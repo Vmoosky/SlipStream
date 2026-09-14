@@ -11,6 +11,19 @@ export const UNIT_REPORTS = [
   'unit-mcp-server.json',
   'unit-extension.json',
 ];
+export const DOC_CONTRACTS = [
+  'docs/architecture.md',
+  'packages/extension/README.md',
+  'docs/mcp.md',
+];
+
+function hasExpectedDocContracts(contracts) {
+  return (
+    Array.isArray(contracts) &&
+    contracts.length === DOC_CONTRACTS.length &&
+    DOC_CONTRACTS.every((file) => contracts.includes(file))
+  );
+}
 
 function readJson(root, file) {
   const target = path.join(root, file);
@@ -150,7 +163,7 @@ export function collectBrowser(root, options) {
         report.passed === true &&
         Array.isArray(report.errors) &&
         report.errors.length === 0 &&
-        report.contracts?.length === 3 &&
+        hasExpectedDocContracts(report.contracts) &&
         report.coverage?.markdownFiles > 0 &&
         Array.isArray(report.written) &&
         report.written.length === 0,
@@ -247,7 +260,7 @@ export function verifyRequired(root, options) {
       } else {
         expect(
           report.browser?.expected > 0 &&
-            report.docs?.contracts?.length === 3 &&
+            hasExpectedDocContracts(report.docs?.contracts) &&
             report.proof?.gate?.passed === true,
         );
       }

@@ -59,17 +59,18 @@ Fixtures must contain synthetic data, never credentials or personal ledgers.
 ## Publication And Activation
 
 The workflow files prepare `ci-required` and `security-required`; their presence
-does not activate branch protection. The repository currently has a README-only
-published baseline. Broader source publication and GitHub administration require
-the owner's separate approval.
+does not activate branch protection. The reviewed source snapshot was published
+as `4dd1559` on 2026-09-14. Future pushes, releases, and GitHub administration
+require the owner's separate approval; publication does not prove CI success or
+merge enforcement.
 
 Before publication, review the exact candidate inventory, redacted secret scan,
 large/binary files, dependency licenses, and VSIX contents. Manifests declare MIT,
 but ownership and a root license text still require confirmation. Do not invent a
 copyright holder or publish source, packages, or releases before that review.
 
-The owner must publish the approved source, observe real successful and failed
-PR checks, and then require PRs with up-to-date `ci-required` and
+The owner must observe real successful and failed PR checks, and then require
+PRs with up-to-date `ci-required` and
 `security-required` results on `main`. Disable force pushes, branch deletion,
 and routine bypasses. Keep merges manual. CODEOWNERS routes review to Vmoosky;
 solo-maintainer mode does not claim an independent approval.

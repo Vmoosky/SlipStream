@@ -420,11 +420,12 @@ Compression claims are verified by measurement, not assertion:
 actually help, and what does it cost?" over a real workload rather than seeded
 fixtures. `tests/outcome-proof.test.mjs` pins the gate logic.
 
-It runs `demo/` once to capture a workload — a failing `npm test`, two source
-reads, a passing `npm test`, a build — then replays **those identical bytes**
+It captures the [offline workload](../tests/fixtures/outcome-workload) once:
+failing tests, two source reads, repaired tests, and a build. It then replays
+**those identical bytes**
 through three arms: baseline (off), static compression (balanced), and a policy
-arm (aggressive). Ground truth is the demo's two seeded defects: the
-known-correct fix is applied to a scratch copy and the suite must go green.
+arm (aggressive). Ground truth is the workload's two seeded defects: the
+known-correct fix is applied to a scratch copy and both tests and build must pass.
 
 Replaying fixed bytes is the whole point. Two live agent runs issue different
 tool calls, so any token delta between them measures the agent's choices, not
@@ -455,7 +456,7 @@ the honest claim, and a regression test asserts that an ANSI-only win *fails*.
 
 | Check | Bar |
 | --- | --- |
-| Ground-truth task verified | demo suite green with the fix applied |
+| Ground-truth task verified | workload tests and build green with the fix applied |
 | Compression vs normalized input | ≥ 10% |
 | Still ahead after retrieval | net > 0 at a declared 30% expansion rate |
 | Added latency | p95 ≤ 250 ms |
@@ -482,10 +483,32 @@ durations, so figures move slightly between invocations by design. And the
 latency check is the only non-deterministic gate — it has been observed at 187 ms
 on a loaded machine, so it can flake.
 
-> `demo/` is not an npm workspace; it resolves `vitest` through npm's ancestor
-> `node_modules/.bin` walk. Scratch copies are therefore created inside the repo
-> (`.outcome-proof-*`, removed on exit) — under `%TEMP%` the demo cannot find
-> vitest and the run silently produces a tiny, meaningless workload.
+The workload is not a separate npm workspace. The proof invokes the root-installed
+Vitest CLI directly, with scratch copies under `.outcome-proof-*` so workload
+imports resolve through the root dependencies. Scratch copies are removed on
+exit. A timeout, spawn error, or failed repaired test/build is a failed proof,
+not a successful task with a small captured output.
+
+## Documentation Contracts
+
+[check-docs.mjs](../scripts/check-docs.mjs) checks all maintained Markdown and
+[llms.txt](../llms.txt), excluding generated output and the installed evaluator.
+CI runs the check without source-path filters and validates the exact contract
+path set at both report collection and aggregation; duplicate or substitute
+paths cannot satisfy the evidence requirement merely by matching its count.
+
+| Surface | Deterministic Coverage | Residual Review |
+| --- | --- | --- |
+| [Build reference](#build-and-script-reference) | Root and workspace manifest digests, scripts, runtime and workspace mapping | Build behavior is verified by CI, not by the reference text |
+| [Extension reference](../packages/extension/README.md#commands-and-settings-reference) | Full manifest digest, command IDs, tool inputs and setting defaults | User-facing descriptions and runtime behavior |
+| [MCP reference](mcp.md#mcp-launch-reference) | Registry, plugin and package digests; launch arguments, modes and tools | Live client/provider behavior |
+| Maintained Markdown and agent index | Local links and anchors; JSON/JSONC syntax and cost-policy examples | External links, other prose and live-provider claims |
+
+Check mode never writes. `npm run docs:write` updates only designated reference
+blocks, and a second write must make no further changes. Tests compare the
+generator's actual contract set with CI's expectations. New contracts require
+an intentional mapping and test update; semantic review remains advisory.
+Required merge enforcement must be verified separately in GitHub settings.
 
 <!-- slipstream-reference:build:start -->
 ## Build And Script Reference

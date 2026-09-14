@@ -4,6 +4,7 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { checkDocs } from '../scripts/check-docs.mjs';
+import { DOC_CONTRACTS } from '../scripts/check-ci.mjs';
 
 function fixture(context) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'slipstream-docs-'));
@@ -67,7 +68,8 @@ test('generation is repeatable and check mode does not modify documents', (conte
   assert.deepEqual(fs.readFileSync(file), original);
   const generated = checkDocs(root, { write: true });
   assert.equal(generated.passed, true, JSON.stringify(generated.errors));
-  assert.equal(generated.written.length, 3);
+  assert.deepEqual([...generated.contracts].sort(), [...DOC_CONTRACTS].sort());
+  assert.deepEqual([...generated.written].sort(), [...DOC_CONTRACTS].sort());
   const modified = fs.statSync(file).mtimeMs;
   assert.deepEqual(checkDocs(root, { write: true }).written, []);
   assert.equal(checkDocs(root).passed, true);

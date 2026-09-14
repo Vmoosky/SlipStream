@@ -82,6 +82,23 @@ post-assessment changes are outside the evaluated 203-file snapshot.
 
 ## Remaining Gaps
 
+These gaps describe the assessment-time state. The source was subsequently
+published as `4dd1559b1331a6c45e17ae3afaebcafbc9a8d752` with owner approval; the
+local and remote revision were verified equal. During the next implementation
+step, an authenticated Actions lookup for that commit returned HTTP 404. This
+does not establish whether workflows failed, are disabled, or are inaccessible.
+Remote run conclusions and current protections remain unverified through that
+session; use an authorized owner session to inspect the existing runs before
+dispatching another one.
+
+The next local change requires the exact generated-document contract paths at
+collection and aggregation. Wrong names, duplicate/missing paths, non-array
+values, and extra contracts must fail; ordering alone is harmless. Generator
+tests also compare their emitted contract set with CI's expectation. The
+[coverage table](architecture.md#documentation-contracts) records what is checked
+and what still needs review. These changes do not constitute another CodeBlend
+evaluation or prove GitHub enforcement.
+
 1. Obtain owner approval for source ownership, complete license text, bundled
    attribution, and the exact publication inventory. The extension license is
    only a placeholder. The local commit does not authorize a push or release.

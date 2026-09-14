@@ -13,6 +13,7 @@ import {
   UNIT_JOBS,
   BROWSER_JOBS,
   UNIT_REPORTS,
+  DOC_CONTRACTS,
 } from '../scripts/check-ci.mjs';
 
 const REPO = fileURLToPath(new URL('../', import.meta.url));
@@ -64,7 +65,7 @@ function fixture(context) {
     kind: 'documentation-contracts',
     passed: true,
     errors: [],
-    contracts: ['a', 'b', 'c'],
+    contracts: [...DOC_CONTRACTS],
     coverage: { markdownFiles: 3 },
     written: [],
     residual: ['Narrative review'],
@@ -126,6 +127,46 @@ test('valid unit and browser evidence records exact provenance', (context) => {
   assert.equal(unit.revision, META.revision);
   assert.equal(browser.passed, true);
   assert.match(browser.proof.measurementCoverage.notCovered[0], /Live agent/);
+});
+
+test('documentation evidence requires the exact contract set in any order', (context) => {
+  const { root, write, options } = artifacts(context);
+  const docs = JSON.parse(fs.readFileSync(path.join(root, 'docs.json'), 'utf8'));
+  const file = `ci-browser-${BROWSER_JOBS[0]}/ci-browser.json`;
+  const browser = JSON.parse(fs.readFileSync(path.join(root, file), 'utf8'));
+  for (const contracts of [
+    undefined,
+    null,
+    3,
+    { length: 3 },
+    DOC_CONTRACTS.join(','),
+    [],
+    ['a', 'b', 'c'],
+    [DOC_CONTRACTS[0], DOC_CONTRACTS[0], DOC_CONTRACTS[2]],
+    DOC_CONTRACTS.slice(1),
+    [...DOC_CONTRACTS, 'docs/unknown.md'],
+    [null, ...DOC_CONTRACTS.slice(1)],
+    [0, ...DOC_CONTRACTS.slice(1)],
+    [{ path: DOC_CONTRACTS[0] }, ...DOC_CONTRACTS.slice(1)],
+  ]) {
+    write('docs.json', { ...docs, contracts });
+    assert.equal(
+      collectBrowser(root, { ...META, job: BROWSER_JOBS[0], steps: browserSteps }).passed,
+      false,
+      `Collection accepted ${JSON.stringify(contracts)}`,
+    );
+    write(file, { ...browser, docs: { ...browser.docs, contracts } });
+    assert.equal(
+      verifyRequired(root, options).passed,
+      false,
+      `Aggregation accepted ${JSON.stringify(contracts)}`,
+    );
+  }
+  write('docs.json', { ...docs, contracts: [...DOC_CONTRACTS].reverse() });
+  const reordered = collectBrowser(root, { ...META, job: BROWSER_JOBS[0], steps: browserSteps });
+  assert.equal(reordered.passed, true);
+  write(file, reordered);
+  assert.equal(verifyRequired(root, options).passed, true);
 });
 
 test('missing or failed unit evidence cannot pass despite successful command status', (context) => {
