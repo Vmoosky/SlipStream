@@ -1,0 +1,22 @@
+{
+  "name": "@slipstream/hook-runtime",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Copilot CLI postToolUse hook runtime for automatic Slipstream compression.",
+  "license": "MIT",
+  "bin": {
+    "slipstream-hook": "./dist/index.js"
+  },
+  "main": "./dist/index.js",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@slipstream/core": "*"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.2"
+  }
+}

@@ -1,0 +1,14 @@
+{
+  "name": "@slipstream/copilot-plugin",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Installable GitHub Copilot CLI plugin for automatic Slipstream compression.",
+  "license": "MIT",
+  "scripts": {
+    "build": "node esbuild.mjs",
+    "test": "node --test test/manifest.test.mjs"
+  },
+  "devDependencies": {
+    "esbuild": "^0.25.0"
+  }
+}

@@ -1,0 +1,11 @@
+{
+  "name": "slipstream-demo-shop",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Small order-processing library used to demo Slipstream.",
+  "scripts": {
+    "test": "vitest run --reporter=verbose",
+    "build": "node scripts/build.js"
+  }
+}

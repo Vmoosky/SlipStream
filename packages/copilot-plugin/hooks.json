@@ -1,0 +1,29 @@
+{
+  "version": 1,
+  "hooks": {
+    "userPromptSubmitted": [
+      {
+        "type": "command",
+        "bash": "node \"${PLUGIN_ROOT}/dist/hook.js\" user-prompt-submitted",
+        "powershell": "node \"${PLUGIN_ROOT}/dist/hook.js\" user-prompt-submitted",
+        "timeoutSec": 5
+      }
+    ],
+    "postToolUse": [
+      {
+        "type": "command",
+        "bash": "node \"${PLUGIN_ROOT}/dist/hook.js\" post-tool-use",
+        "powershell": "node \"${PLUGIN_ROOT}/dist/hook.js\" post-tool-use",
+        "timeoutSec": 30
+      }
+    ],
+    "sessionEnd": [
+      {
+        "type": "command",
+        "bash": "node \"${PLUGIN_ROOT}/dist/hook.js\" session-end",
+        "powershell": "node \"${PLUGIN_ROOT}/dist/hook.js\" session-end",
+        "timeoutSec": 5
+      }
+    ]
+  }
+}

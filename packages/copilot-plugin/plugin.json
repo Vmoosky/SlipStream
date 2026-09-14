@@ -1,0 +1,16 @@
+{
+  "name": "slipstream",
+  "description": "Compresses successful tool output before it reaches the selected Copilot CLI model.",
+  "version": "0.1.0",
+  "author": {
+    "name": "Slipstream"
+  },
+  "license": "MIT",
+  "keywords": [
+    "compression",
+    "context",
+    "copilot-cli"
+  ],
+  "hooks": "hooks.json",
+  "mcpServers": ".mcp.json"
+}

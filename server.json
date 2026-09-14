@@ -1,0 +1,44 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "local.slipstream/slipstream",
+  "title": "Slipstream",
+  "description": "Compress tool output with retrievable artifacts and report measured token savings.",
+  "version": "0.1.0",
+  "_meta": {
+    "io.modelcontextprotocol.registry/publisher-provided": {
+      "distribution": "local-source-only",
+      "identityStatus": "Local placeholder; not a verified or published MCP Registry identity.",
+      "documentation": "docs/mcp.md",
+      "agentIndex": "llms.txt",
+      "localInstall": {
+        "node": ">=20",
+        "workingDirectory": "{repoRoot}",
+        "setup": [
+          { "command": "npm", "args": ["install"] },
+          { "command": "npm", "args": ["run", "build"] }
+        ],
+        "transport": "stdio",
+        "command": "node",
+        "args": [
+          "{repoRoot}/packages/mcp-server/dist/index.js",
+          "--root",
+          "{workspaceRoot}"
+        ],
+        "variables": {
+          "repoRoot": "Absolute path to the Slipstream source checkout.",
+          "workspaceRoot": "Absolute path to the workspace the server may access."
+        },
+        "modes": {
+          "standalone": {
+            "additionalArgs": [],
+            "tools": ["get_savings", "read_file", "retrieve_artifact", "run_command"]
+          },
+          "retrieval-only": {
+            "additionalArgs": ["--retrieval-only"],
+            "tools": ["get_savings", "retrieve_artifact"]
+          }
+        }
+      }
+    }
+  }
+}

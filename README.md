@@ -9,7 +9,7 @@ everything it removes retrievable on demand.
 
 ```
 $ npx vitest run --reporter=verbose
-(exit 1, 1.4s, cwd C:\...\demo)
+(exit 1, 1.4s, cwd C:\...\workload)
 --- slipstream: 185 -> 63 lines; omissions recoverable via retrieve_artifact ---
  ✓ test/cart.test.js (12 tests)
 [[slipstream:4f1a9c02be71 L14-119 | 106 lines omitted (passing suites) | retrieve_artifact]]
@@ -271,7 +271,7 @@ data, run `npm run dashboard:clear`; to remove everything, delete
 
 ## Results
 
-Measured on a real failing test suite in [`demo/`](demo), via
+Measured on the failing [offline workload fixture](tests/fixtures/outcome-workload), via
 `node scripts/benchmark.mjs`. The benchmark re-expands every marker and asserts
 the original bytes come back exactly, so a ratio can never be bought with lost
 information.
@@ -295,13 +295,13 @@ The table above measures savings. `npm run outcome-proof` asks the harder
 question: does compression still pay once you charge for retrieval, and does the
 task still succeed?
 
-It captures one real workload from [`demo/`](demo) — a failing `npm test`, two
-source reads, a passing `npm test`, a build — then replays **those identical
+It captures one workload from the [test fixture](tests/fixtures/outcome-workload):
+a failing `npm test`, two source reads, a passing `npm test`, and a build. It replays **those identical
 bytes** through three arms: baseline (off), static compression, and a policy arm.
 Fixed bytes are essential: two live agent runs issue different tool calls, so a
 delta between them would measure the agent's choices, not compression. Ground
-truth is the demo's two seeded defects — the known-correct fix must turn the
-suite green. Every marker is expanded and asserted byte-exact, and the recovered
+truth is the fixture's two seeded defects. The known-correct fix must turn the
+suite and build green. Every marker is expanded and asserted byte-exact, and the recovered
 tokens are charged back as overhead.
 
 ```
@@ -372,10 +372,8 @@ npm install
 npm run build
 ```
 
-Then press <kbd>F5</kbd>. A second VS Code window opens on `demo/` with the tools
-registered. Ask Copilot:
-
-> Run the tests and fix the failures.
+Then press <kbd>F5</kbd>. A second VS Code window opens on the repository with the
+tools registered. Use them with your own development workflow.
 
 Four tools are contributed to Copilot Chat, and can be referenced explicitly:
 
@@ -445,15 +443,8 @@ through a producer with `slipstream_runCommand` / `#hrRun`,
 `slipstream_readFile` / `#hrRead`, or the MCP `run_command` / `read_file` tools;
 the dashboard observes that traffic rather than receiving it directly.
 
-For a browser-only sample with seeded activity, use the isolated demo store:
-
-```bash
-npm run dashboard:demo
-```
-
 Use `npm run dashboard:clear` only when you want to delete the configured real
-store. Use `npm run dashboard:demo:fresh` when you want to reset and reseed the
-isolated demo store.
+store. It is not needed for normal startup or validation.
 
 It prints a readable local URL, usually:
 
@@ -463,15 +454,14 @@ http://localhost:7331/
 
 The normal dashboard refreshes the ledger and artifact index from disk, so a
 separate Slipstream MCP process can write savings while the browser page is
-open. Demo mode stays under `.slipstream-demo` and does not overwrite real
-session history.
+open.
 
 The VS Code extension, the extension-provided MCP server, the standalone MCP
 server, and `npm run dashboard` all default to the same real store:
 `%USERPROFILE%\.slipstream`. Override it with the `slipstream.storageDir`
 setting or `SLIPSTREAM_STORAGE_DIR` for the dashboard script.
 
-The dashboard is the hackathon proof surface. It shows:
+The dashboard shows:
 
 | Panel | What it proves |
 |---|---|
@@ -516,7 +506,7 @@ has two modes:
   lines, and then the exact compressed payload.
 
 The inspector also has **Copy model payload** and **Open exact payload** controls,
-so the demo can show the real bytes that would have entered the context window.
+so you can inspect the real bytes that would have entered the context window.
 That makes the dashboard the fastest way to sanity-check the compressor on your
 own repo: if it ever cut something that mattered, you will see it immediately.
 
@@ -524,13 +514,11 @@ For judging or async sharing, click **Export snapshot**, **Export JSON**, or
 **Export CSV**. The same data is also available at `/api/report.md`,
 `/api/report.json`, and `/api/report.csv`.
 
-The dashboard stays focused on live savings evidence. The demo walkthrough lives
-in [`docs/hackathon-demo.md`](docs/hackathon-demo.md) and the safety rationale in
-the registration packet and Security section.
+The dashboard stays focused on live savings evidence. See the Security section
+for its safety boundaries.
 
-See [`docs/backlog.md`](docs/backlog.md) for the Headroom-inspired backlog,
-including the next dashboard evidence upgrades and the proxy features that stay
-out of scope for Slipstream.
+See the [architecture guide](docs/architecture.md) for package responsibilities
+and integration boundaries.
 
 ### MCP server
 
@@ -699,12 +687,10 @@ so the boundaries are deliberate:
 
 ### Known advisory
 
-`npm audit` reports two moderate advisories against `qs`, reached via
-`@modelcontextprotocol/sdk → express → body-parser`. Both concern HTTP query
-string parsing. Slipstream uses **only the stdio transport** and never starts a
-listener or parses a query string, so neither is reachable. The advisory names
-`qs@6.16.0` as the fix, but that version is not published yet; an `overrides`
-entry will be added when it ships.
+The lockfile includes `qs@6.16.0`, addressing the previously reported moderate
+query-string parsing advisories. Run `npm audit --audit-level=moderate` when
+reviewing dependency changes; a past clean audit is not a permanent guarantee.
+See [SECURITY.md](SECURITY.md) for responsible reporting.
 
 ## Layout
 
@@ -714,8 +700,8 @@ packages/mcp-server   stdio MCP server (4 tools)
 packages/hook-runtime stateful Copilot CLI hook and local daemon
 packages/copilot-plugin installable hooks plus retrieval-only MCP server
 packages/extension    VS Code extension: LM tools, status bar, dashboard
-demo/                 sample project with two real bugs
-docs/                 architecture reference, demo flow, packaging notes
+tests/fixtures/       isolated workloads for regression and offline proof
+docs/                 architecture reference, integration and packaging notes
 scripts/benchmark.mjs measures savings and verifies recoverability
 scripts/outcome-proof.mjs paired baseline/compression/policy outcome proof
 ```
@@ -725,14 +711,15 @@ npm test                      # all script, unit, and integration tests
 npm run test:dashboard        # browser smoke for the dashboard
 node scripts/benchmark.mjs    # regenerate the results table
 npm run benchmark:snapshot    # write test-results/slipstream-benchmark-snapshot.md
-npm run outcome-proof         # paired arm comparison over the demo workload
+npm run outcome-proof         # paired comparison over an isolated test fixture
 npm run package:extension     # build a VSIX from packages/extension
-npm run registration:packet   # write docs/project-registration.md with screenshots
 ```
 
 See [docs/architecture.md](docs/architecture.md) for how the system is put
 together and how each surface is activated,
 [docs/compressors.md](docs/compressors.md) for the compression strategies and
-their thresholds, [docs/hackathon-demo.md](docs/hackathon-demo.md) for the short
-judging flow, and [docs/packaging.md](docs/packaging.md) for VS Code extension
+their thresholds, and [docs/packaging.md](docs/packaging.md) for VS Code extension
 and MCP server packaging notes.
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for reproducible setup, validation gates,
+and the remaining publication and repository-protection approval steps.

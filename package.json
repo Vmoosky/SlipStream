@@ -1,0 +1,65 @@
+{
+  "name": "slipstream-monorepo",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Context compression for GitHub Copilot — compress tool output before it enters the context window.",
+  "workspaces": [
+    "packages/core",
+    "packages/hook-runtime",
+    "packages/mcp-server",
+    "packages/copilot-plugin",
+    "packages/extension"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "build": "npm run build --workspaces --if-present",
+    "test": "npm run test:scripts && npm run test --workspaces --if-present",
+    "test:scripts": "node --test tests/dashboard-cli.test.mjs tests/benchmark-report.test.mjs tests/copilot-plugin-install.test.mjs tests/outcome-proof.test.mjs tests/check-docs.test.mjs tests/readiness.test.mjs",
+    "test:dashboard": "playwright test tests/dashboard.smoke.spec.ts",
+    "typecheck": "npm run typecheck --workspaces --if-present",
+    "lint": "eslint . --max-warnings 0",
+    "format:check": "prettier --check eslint.config.mjs playwright.config.ts scripts/check-*.mjs tests/check-docs.test.mjs tests/readiness.test.mjs .github/workflows/*.yml",
+    "check:docs": "node scripts/check-docs.mjs",
+    "docs:write": "node scripts/check-docs.mjs --write",
+    "benchmark:snapshot": "node scripts/benchmark.mjs --markdown",
+    "benchmark:recommendations": "node scripts/benchmark.mjs --model-recommendations",
+    "proof-table": "node scripts/proof-table.mjs",
+    "outcome-proof": "node scripts/outcome-proof.mjs",
+    "proof-table:snapshot": "node scripts/proof-table.mjs --markdown",
+    "package:extension": "npm run build && npm run package --workspace slipstream-vscode",
+    "package:copilot-plugin": "npm run build --workspace @slipstream/copilot-plugin",
+    "install:copilot-plugin": "npm run package:copilot-plugin && node scripts/registerCopilotCli.mjs",
+    "install:copilot-plugin:tracking": "npm run package:copilot-plugin && node scripts/registerCopilotCli.mjs --enable-model-tracking",
+    "register:copilot-cli": "npm run install:copilot-plugin",
+    "copilot:plugin": "npm run package:copilot-plugin && copilot --plugin-dir ./packages/copilot-plugin",
+    "dashboard": "node scripts/dashboard.mjs",
+    "dashboard:clear": "node scripts/dashboard.mjs --clear",
+    "reset:copilot": "node packages/copilot-plugin/dist/hook.js reset",
+    "purge:copilot": "node packages/copilot-plugin/dist/hook.js purge",
+    "clean": "node -e \"for (const p of ['copilot-plugin','core','hook-runtime','mcp-server','extension']) require('fs').rmSync('packages/'+p+'/dist',{recursive:true,force:true})\""
+  },
+  "prettier": {
+    "singleQuote": true,
+    "printWidth": 100,
+    "endOfLine": "lf"
+  },
+  "devDependencies": {
+    "@eslint/js": "9.39.5",
+    "@playwright/test": "^1.62.1",
+    "@types/node": "^22.10.2",
+    "eslint": "9.39.5",
+    "github-slugger": "2.0.0",
+    "globals": "16.5.0",
+    "jsonc-parser": "3.3.1",
+    "prettier": "3.9.6",
+    "remark-parse": "11.0.0",
+    "typescript": "^5.7.2",
+    "typescript-eslint": "8.70.0",
+    "unified": "11.0.5",
+    "unist-util-visit": "5.1.0",
+    "vitest": "^4.1.11",
+    "yaml": "2.9.0"
+  }
+}

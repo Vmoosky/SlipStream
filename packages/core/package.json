@@ -1,0 +1,26 @@
+{
+  "name": "@slipstream/core",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Compression engine: log/build compression, cross-turn dedup, read lifecycle, reversible artifact store.",
+  "license": "MIT",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "dependencies": {
+    "diff": "^9.0.0",
+    "gpt-tokenizer": "^4.0.0",
+    "lucide": "^1.41.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.2"
+  }
+}

@@ -1,0 +1,180 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  unit:
+    name: unit-${{ matrix.id }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { id: linux-node20, os: ubuntu-latest, node: '20' }
+          - { id: linux-node22, os: ubuntu-latest, node: '22' }
+          - { id: linux-node24, os: ubuntu-latest, node: '24.14.1' }
+          - { id: windows-node24, os: windows-latest, node: '24.14.1' }
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: ${{ matrix.node }}
+          cache: npm
+          cache-dependency-path: package-lock.json
+      - id: install
+        run: npm ci
+      - id: build
+        run: npm run build
+      - id: types
+        run: npm run typecheck
+      - id: tests
+        run: npm test
+      - id: lint
+        run: npm run lint
+      - id: format
+        run: npm run format:check
+      - name: Verify unit evidence
+        if: ${{ always() }}
+        env:
+          CI_MATRIX_JOB: ${{ matrix.id }}
+          CI_STEPS: ${{ toJSON(steps) }}
+        run: node scripts/check-ci.mjs unit
+      - name: Retain unit evidence
+        if: ${{ always() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: ci-unit-${{ matrix.id }}
+          path: |
+            test-results/ci-unit.json
+            test-results/unit-*.json
+          if-no-files-found: error
+          retention-days: 7
+
+  browser-proof:
+    name: browser-proof-${{ matrix.id }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { id: linux-node24, os: ubuntu-latest }
+          - { id: windows-node24, os: windows-latest }
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version-file: .node-version
+          cache: npm
+          cache-dependency-path: package-lock.json
+      - id: install
+        run: npm ci
+      - id: build
+        run: npm run build
+      - id: chromium
+        shell: bash
+        run: |
+          if [[ "$RUNNER_OS" == "Linux" ]]; then
+            npm exec -- playwright install --with-deps chromium
+          else
+            npm exec -- playwright install chromium
+          fi
+      - id: browser
+        run: npm run test:dashboard
+      - id: docs
+        run: npm run check:docs -- --report test-results/docs.json
+      - id: proof
+        run: npm run outcome-proof -- --runs 5 --json --out test-results/outcome-proof.json
+      - id: package
+        run: npm run package:extension
+      - name: Verify browser and proof evidence
+        if: ${{ always() }}
+        env:
+          CI_MATRIX_JOB: ${{ matrix.id }}
+          CI_STEPS: ${{ toJSON(steps) }}
+        run: node scripts/check-ci.mjs browser
+      - name: Retain browser and proof evidence
+        if: ${{ always() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: ci-browser-${{ matrix.id }}
+          path: |
+            test-results/ci-browser.json
+            test-results/docs.json
+            test-results/outcome-proof.json
+            test-results/browser/report.json
+            test-results/browser/html/
+            test-results/browser/artifacts/
+          if-no-files-found: error
+          retention-days: 7
+
+  secrets:
+    name: secrets
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Install verified Gitleaks 8.30.1
+        shell: bash
+        run: |
+          set -euo pipefail
+          archive="$RUNNER_TEMP/gitleaks.tar.gz"
+          curl --fail --location --retry 2 --output "$archive" https://github.com/gitleaks/gitleaks/releases/download/v8.30.1/gitleaks_8.30.1_linux_x64.tar.gz
+          printf '%s  %s\n' '551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb' "$archive" | sha256sum --check --strict
+          tar -xzf "$archive" -C "$RUNNER_TEMP" gitleaks
+      - name: Scan source and history with redaction
+        shell: bash
+        run: |
+          set -euo pipefail
+          "$RUNNER_TEMP/gitleaks" dir --redact=100 --no-banner --exit-code 1 .
+          "$RUNNER_TEMP/gitleaks" git --redact=100 --no-banner --exit-code 1 .
+
+  ci-required:
+    name: ci-required
+    if: ${{ always() }}
+    needs: [unit, browser-proof, secrets]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version-file: .node-version
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          pattern: ci-*
+          path: artifacts
+      - name: Require successful jobs and matching evidence
+        if: ${{ always() }}
+        env:
+          CI_NEEDS: ${{ toJSON(needs) }}
+        run: node scripts/check-ci.mjs required
+      - name: Retain aggregate result
+        if: ${{ always() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: ci-required
+          path: test-results/ci-required.json
+          if-no-files-found: error
+          retention-days: 7

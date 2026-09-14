@@ -1,0 +1,705 @@
+{
+  "name": "slipstream-vscode",
+  "displayName": "Slipstream — Context Compression for Copilot",
+  "description": "Compresses build, test and file-read output before it reaches Copilot's context window. Nothing is lost: everything omitted stays retrievable.",
+  "version": "0.1.0",
+  "private": true,
+  "license": "MIT",
+  "publisher": "slipstream",
+  "engines": {
+    "vscode": "^1.101.0"
+  },
+  "categories": [
+    "AI",
+    "Other"
+  ],
+  "main": "./dist/extension.js",
+  "activationEvents": [
+    "onStartupFinished",
+    "onUri"
+  ],
+  "contributes": {
+    "chatParticipants": [
+      {
+        "id": "slipstream.chat",
+        "name": "slipstream",
+        "fullName": "Slipstream",
+        "description": "Workspace assistance with compressed tools and automatic per-request model pricing",
+        "isSticky": true,
+        "commands": [
+          {
+            "name": "code",
+            "description": "Code changes with explicit task-category accounting"
+          },
+          {
+            "name": "triage",
+            "description": "Log and failure triage with explicit task-category accounting"
+          },
+          {
+            "name": "summarize",
+            "description": "Summarization with explicit task-category accounting"
+          },
+          {
+            "name": "resume",
+            "description": "Resume an owned task: <task-id> <next step>; retains its model and allowance"
+          }
+        ]
+      }
+    ],
+    "languageModelTools": [
+      {
+        "name": "slipstream_runCommand",
+        "displayName": "Run command (compressed output)",
+        "userDescription": "Runs a build, test or lint command and returns the output with the noise removed.",
+        "modelDescription": "Run a build, test, lint or install command and return its output with the noise removed. PREFER THIS over the built-in terminal tool for anything that prints a lot of output: it preserves every distinct error, its stack trace and the final summary while using far fewer tokens, and everything it omits stays recoverable with slipstream_retrieveArtifact. Pass the program in 'command' and each argument separately in 'args'; shell operators such as &&, |, > and $() are not supported, so run one program per call.",
+        "toolReferenceName": "hrRun",
+        "canBeReferencedInPrompt": true,
+        "icon": "$(zap)",
+        "tags": [
+          "slipstream",
+          "terminal",
+          "build",
+          "test"
+        ],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "command": {
+              "type": "string",
+              "description": "Bare executable name, for example 'npm', 'cargo' or 'pytest'. Never a path."
+            },
+            "args": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "Arguments, one array element each. Example: [\"run\", \"test\"]."
+            },
+            "cwd": {
+              "type": "string",
+              "description": "Absolute working directory. Defaults to the first workspace folder."
+            },
+            "timeoutSeconds": {
+              "type": "number",
+              "description": "Kill the command after this many seconds. Defaults to the configured timeout."
+            },
+            "nativeContext": {
+              "type": "string",
+              "description": "Internal single-use context supplied by native chat hooks. Do not set manually."
+            }
+          },
+          "required": [
+            "command"
+          ]
+        }
+      },
+      {
+        "name": "slipstream_readFile",
+        "displayName": "Read file (lifecycle aware)",
+        "userDescription": "Reads a file, returning only what changed since the last time it was read.",
+        "modelDescription": "Read a workspace file. PREFER THIS over the built-in file reader whenever you might read the same file more than once: if the file is unchanged since you last read it in this session you get a one-line marker instead of the whole file, and if it changed you get a unified diff instead of a full re-send. The complete current contents are always recoverable with slipstream_retrieveArtifact.",
+        "toolReferenceName": "hrRead",
+        "canBeReferencedInPrompt": true,
+        "icon": "$(file-code)",
+        "tags": [
+          "slipstream",
+          "file"
+        ],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "path": {
+              "type": "string",
+              "description": "Absolute path to a file inside an open workspace folder."
+            },
+            "nativeContext": {
+              "type": "string",
+              "description": "Internal single-use context supplied by native chat hooks. Do not set manually."
+            }
+          },
+          "required": [
+            "path"
+          ]
+        }
+      },
+      {
+        "name": "slipstream_retrieveArtifact",
+        "displayName": "Retrieve omitted content",
+        "userDescription": "Expands content that Slipstream compressed away.",
+        "modelDescription": "Expand content that an earlier Slipstream tool omitted. Omissions appear inline as [[slipstream:<id> L<start>-<end> | ... ]]. Pass that id, and ideally the same line range, to get the exact original bytes back. Pass 'grep' to return only matching lines when you are looking for something specific. Nothing Slipstream removes is ever lost, so use this freely instead of re-running a command.",
+        "toolReferenceName": "hrGet",
+        "canBeReferencedInPrompt": true,
+        "icon": "$(unfold)",
+        "tags": [
+          "slipstream"
+        ],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "id": {
+              "type": "string",
+              "description": "The 12-character hex id from a [[slipstream:...]] marker."
+            },
+            "startLine": {
+              "type": "number",
+              "description": "First line to return (1-based)."
+            },
+            "endLine": {
+              "type": "number",
+              "description": "Last line to return, inclusive."
+            },
+            "grep": {
+              "type": "string",
+              "description": "Return only matching lines. A literal substring, or /regex/flags."
+            },
+            "maxLines": {
+              "type": "number",
+              "description": "Cap on returned lines. Default 400."
+            },
+            "nativeContext": {
+              "type": "string",
+              "description": "Internal single-use context supplied by native chat hooks. Do not set manually."
+            }
+          },
+          "required": [
+            "id"
+          ]
+        }
+      },
+      {
+        "name": "slipstream_getSavings",
+        "displayName": "Slipstream savings report",
+        "userDescription": "Reports how many tokens Slipstream has saved this session.",
+        "modelDescription": "Report how many tokens Slipstream has saved so far in this session, broken down by tool, plus how often omitted content actually had to be retrieved.",
+        "toolReferenceName": "hrStats",
+        "canBeReferencedInPrompt": true,
+        "icon": "$(graph)",
+        "tags": [
+          "slipstream"
+        ],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "nativeContext": {
+              "type": "string",
+              "description": "Internal single-use context supplied by native chat hooks. Do not set manually."
+            }
+          }
+        }
+      }
+    ],
+    "mcpServerDefinitionProviders": [
+      {
+        "id": "slipstream",
+        "label": "Slipstream"
+      }
+    ],
+    "commands": [
+      {
+        "command": "slipstream.connectModelTracking",
+        "title": "Slipstream: Connect Local Model Tracking",
+        "icon": "$(plug)"
+      },
+      {
+        "command": "slipstream.disconnectModelTracking",
+        "title": "Slipstream: Disconnect Local Model Tracking",
+        "icon": "$(debug-disconnect)"
+      },
+      {
+        "command": "slipstream.startChat",
+        "title": "Slipstream: Start Chat",
+        "icon": "$(comment-discussion)"
+      },
+      {
+        "command": "slipstream.verifyTask",
+        "title": "Slipstream: Verify Task Outcome",
+        "icon": "$(check)",
+        "enablement": "isWorkspaceTrusted"
+      },
+      {
+        "command": "slipstream.resumeTask",
+        "title": "Slipstream: Resume Task",
+        "icon": "$(debug-continue)",
+        "enablement": "isWorkspaceTrusted"
+      },
+      {
+        "command": "slipstream.enableChatHooks",
+        "title": "Slipstream: Enable VS Code Chat Hooks"
+      },
+      {
+        "command": "slipstream.configureNativeChatPolicy",
+        "title": "Slipstream: Configure Native Chat Policy",
+        "icon": "$(settings-gear)",
+        "enablement": "isWorkspaceTrusted"
+      },
+      {
+        "command": "slipstream.disableChatHooks",
+        "title": "Slipstream: Disable VS Code Chat Hooks"
+      },
+      {
+        "command": "slipstream.runCommand",
+        "title": "Slipstream: Run Command (compressed output)",
+        "icon": "$(zap)"
+      },
+      {
+        "command": "slipstream.showDashboard",
+        "title": "Slipstream: Show Savings Dashboard",
+        "icon": "$(graph)"
+      },
+      {
+        "command": "slipstream.healthCheck",
+        "title": "Slipstream: Run Health Check",
+        "icon": "$(pulse)"
+      },
+      {
+        "command": "slipstream.openDashboardInBrowser",
+        "title": "Slipstream: Open Dashboard in Browser",
+        "icon": "$(link-external)"
+      },
+      {
+        "command": "slipstream.copyDashboardUrl",
+        "title": "Slipstream: Copy Dashboard URL"
+      },
+      {
+        "command": "slipstream.toggle",
+        "title": "Slipstream: Toggle Compression"
+      },
+      {
+        "command": "slipstream.resetSession",
+        "title": "Slipstream: Reset Session State"
+      },
+      {
+        "command": "slipstream.purgeArtifacts",
+        "title": "Slipstream: Purge Stored Artifacts"
+      }
+    ],
+    "configuration": {
+      "title": "Slipstream",
+      "properties": {
+        "slipstream.profile": {
+          "type": "string",
+          "enum": [
+            "conservative",
+            "balanced",
+            "aggressive"
+          ],
+          "default": "balanced",
+          "description": "Compression preset. Balanced uses the original defaults; explicitly configured limits override the preset."
+        },
+        "slipstream.nativeChatPolicy": {
+          "type": "object",
+          "scope": "resource",
+          "default": {
+            "version": 1,
+            "mode": "off"
+          },
+          "additionalProperties": false,
+          "required": [
+            "version",
+            "mode"
+          ],
+          "description": "Opt-in policy for ordinary Copilot chat. Uses native hooks and Slipstream tools, not @slipstream tasks. Does not choose Copilot models or guarantee a billing cap.",
+          "properties": {
+            "version": {
+              "type": "integer",
+              "enum": [
+                1
+              ]
+            },
+            "mode": {
+              "type": "string",
+              "enum": [
+                "off",
+                "observe",
+                "guard"
+              ],
+              "default": "off"
+            },
+            "tokenLimit": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991,
+              "description": "Optional reported input-plus-output token threshold per native conversation. Guard stops at subsequent supported hook boundaries; telemetry can be late or missing."
+            },
+            "compressionProfiles": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "enum": [
+                  "conservative",
+                  "balanced",
+                  "aggressive"
+                ]
+              },
+              "minItems": 1,
+              "maxItems": 3,
+              "uniqueItems": true,
+              "default": [
+                "conservative",
+                "balanced",
+                "aggressive"
+              ]
+            },
+            "checks": {
+              "type": "array",
+              "maxItems": 32,
+              "default": [],
+              "description": "Exact approved commands whose real completion results are recorded as native check evidence. Ordinary command success and agent completion do not verify a task.",
+              "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "kind",
+                  "command"
+                ],
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "enum": [
+                      "test",
+                      "build"
+                    ]
+                  },
+                  "command": {
+                    "type": "string",
+                    "pattern": "^[a-zA-Z0-9][a-zA-Z0-9._-]{0,127}$"
+                  },
+                  "args": {
+                    "type": "array",
+                    "maxItems": 128,
+                    "items": {
+                      "type": "string",
+                      "maxLength": 2048
+                    },
+                    "default": []
+                  },
+                  "cwd": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 4096,
+                    "description": "Working directory relative to the workspace folder, or an absolute workspace path."
+                  }
+                }
+              }
+            }
+          }
+        },
+        "slipstream.costPolicy": {
+          "type": "object",
+          "scope": "window",
+          "default": {
+            "version": 1,
+            "mode": "off"
+          },
+          "additionalProperties": false,
+          "required": [
+            "version",
+            "mode"
+          ],
+          "description": "Cost policy for this workspace. Automatic mode controls owned @slipstream tasks only; native Copilot remains advisory. Local allowances are not guaranteed billing caps.",
+          "properties": {
+            "version": {
+              "type": "integer",
+              "enum": [
+                1
+              ]
+            },
+            "mode": {
+              "type": "string",
+              "enum": [
+                "off",
+                "recommend-only",
+                "automatic-owned-request"
+              ],
+              "default": "off"
+            },
+            "allowedModels": {
+              "type": "array",
+              "default": [],
+              "maxItems": 64,
+              "uniqueItems": true,
+              "description": "Exact vendor and model IDs permitted for automatic requests. An empty list pauses automatic requests; pinned models are never substituted.",
+              "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "vendor",
+                  "id"
+                ],
+                "properties": {
+                  "vendor": {
+                    "type": "string",
+                    "maxLength": 300,
+                    "pattern": "^[a-zA-Z0-9][a-zA-Z0-9._:/+-]{0,299}$"
+                  },
+                  "id": {
+                    "type": "string",
+                    "maxLength": 300,
+                    "pattern": "^[a-zA-Z0-9][a-zA-Z0-9._:/+-]{0,299}$"
+                  }
+                }
+              }
+            },
+            "allowedCompressionProfiles": {
+              "type": "array",
+              "minItems": 1,
+              "uniqueItems": true,
+              "default": [
+                "conservative",
+                "balanced",
+                "aggressive"
+              ],
+              "items": {
+                "type": "string",
+                "enum": [
+                  "conservative",
+                  "balanced",
+                  "aggressive"
+                ]
+              }
+            },
+            "budgetUnit": {
+              "type": "string",
+              "enum": [
+                "tokens",
+                "reference-usd"
+              ],
+              "default": "tokens",
+              "description": "Unit for owned-task accounting and local automatic allowances. Reference USD uses public API prices, not Copilot billing."
+            },
+            "taskBudget": {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 9007199254740991,
+              "description": "Per-task limit, required for automatic calls. Use whole numbers for tokens. Automatic admission reserves conservative local allowances; unknown billed usage remains unknown."
+            },
+            "modelSelection": {
+              "type": "string",
+              "enum": [
+                "pinned",
+                "policy"
+              ],
+              "default": "pinned",
+              "description": "Pinned keeps the picker model. Policy explicitly permits automatic selection among authorized, compatible allowed models with comparable fresh prices and verified evidence for the explicit task category."
+            },
+            "outputTokenAllowance": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 32768,
+              "default": 2048,
+              "description": "Local streamed output cutoff and reservation per automatic call. Not a provider-enforced output limit or guaranteed billing cap."
+            },
+            "pressureThresholds": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "balanced",
+                "aggressive"
+              ],
+              "default": {
+                "balanced": 0.5,
+                "aggressive": 0.8
+              },
+              "description": "Automatic owned-task budget or context pressure thresholds. Require 0 <= balanced < aggressive <= 1. Task overrides may only lower workspace thresholds.",
+              "properties": {
+                "balanced": {
+                  "type": "number",
+                  "minimum": 0,
+                  "maximum": 1
+                },
+                "aggressive": {
+                  "type": "number",
+                  "minimum": 0,
+                  "maximum": 1
+                }
+              }
+            },
+            "compressionFeedback": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "version"
+              ],
+              "description": "Bounded outcome-driven compression feedback for automatic owned tasks. Disabled by default; task overrides and managed constraints may only tighten it.",
+              "properties": {
+                "version": {
+                  "type": "integer",
+                  "enum": [
+                    1
+                  ]
+                },
+                "enabled": {
+                  "type": "boolean",
+                  "default": false,
+                  "description": "Kill switch. When false, compression follows static configuration and the pressure guard only."
+                },
+                "minSamples": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 1000,
+                  "default": 5,
+                  "description": "Verified owned tasks required for a profile before its evidence can change compression."
+                },
+                "maxRetrievalRate": {
+                  "type": "number",
+                  "minimum": 0,
+                  "maximum": 1,
+                  "default": 0.2,
+                  "description": "Retrievals per compression sample above which compression is reduced."
+                },
+                "maxOverheadMs": {
+                  "type": "number",
+                  "minimum": 0,
+                  "maximum": 86400000,
+                  "default": 250,
+                  "description": "Slipstream compression and recovery overhead per sample, in milliseconds."
+                },
+                "minNetBenefitRatio": {
+                  "type": "number",
+                  "minimum": 0,
+                  "maximum": 1,
+                  "default": 0.2,
+                  "description": "Net tokens saved, after retrievals and retries, as a share of raw tool output required to justify a trial."
+                },
+                "hysteresis": {
+                  "type": "number",
+                  "minimum": 0,
+                  "maximum": 1,
+                  "default": 0.05,
+                  "description": "Extra net-benefit margin required to increase compression."
+                },
+                "cooldownMs": {
+                  "type": "number",
+                  "minimum": 0,
+                  "maximum": 86400000,
+                  "default": 3600000,
+                  "description": "Quiet period after a change. Doubles for each earlier rollback of the same profile."
+                },
+                "trialTasks": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 1000,
+                  "default": 5,
+                  "description": "Verified tasks a bounded trial runs for before it is confirmed or rolled back."
+                }
+              }
+            }
+          }
+        },
+        "slipstream.enabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "Compress tool output. When off, tools return raw output unchanged."
+        },
+        "slipstream.chatHooks": {
+          "type": "boolean",
+          "default": true,
+          "scope": "resource",
+          "description": "Automatically observe native Agent chat activity in trusted workspaces using VS Code hooks. Records metadata only; does not compress native tool output. Requires Node.js 20+ and enabled VS Code hook support."
+        },
+        "slipstream.compressLogs": {
+          "type": "boolean",
+          "default": true,
+          "description": "Strip noise from build and test output, keeping errors, stack traces and summaries."
+        },
+        "slipstream.crossTurnDedup": {
+          "type": "boolean",
+          "default": true,
+          "description": "Replace text already returned earlier in the session with a pointer to it."
+        },
+        "slipstream.readLifecycle": {
+          "type": "boolean",
+          "default": true,
+          "description": "Return a marker for unchanged files and a diff for changed ones."
+        },
+        "slipstream.maxFileLines": {
+          "type": "number",
+          "default": 1200,
+          "minimum": 50,
+          "description": "Override the profile's first-read line limit when explicitly set. The remainder stays retrievable."
+        },
+        "slipstream.usdPerMillionTokens": {
+          "type": "number",
+          "default": 3,
+          "minimum": 0,
+          "description": "Fallback input rate in USD per million tokens for savings estimates without a recorded model rate. Recorded event rates take precedence; zero is allowed."
+        },
+        "slipstream.artifactIdleTtlMinutes": {
+          "type": "number",
+          "default": 60,
+          "minimum": 1,
+          "maximum": 1440,
+          "description": "Evict retrievable artifacts after this many idle minutes."
+        },
+        "slipstream.artifactMaxEntries": {
+          "type": "number",
+          "default": 2000,
+          "minimum": 1,
+          "maximum": 100000,
+          "description": "Maximum number of retrievable artifacts to keep locally."
+        },
+        "slipstream.artifactMaxTotalMiB": {
+          "type": "number",
+          "default": 256,
+          "minimum": 1,
+          "maximum": 10240,
+          "description": "Maximum total size of retrievable artifacts to keep locally."
+        },
+        "slipstream.storageDir": {
+          "type": "string",
+          "default": "",
+          "markdownDescription": "Directory for the savings ledger and retrievable artifacts. Leave empty to use `%USERPROFILE%\\.slipstream`, which is also the default used by `npm run dashboard` and the standalone MCP server."
+        },
+        "slipstream.allowedCommands": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [],
+          "markdownDescription": "Executables the model may run. Leave empty to use the built-in list (npm, npx, node, cargo, pytest, dotnet, git, ...). Anything not listed is refused."
+        },
+        "slipstream.commandTimeoutSeconds": {
+          "type": "number",
+          "default": 120,
+          "minimum": 5,
+          "maximum": 600,
+          "description": "Kill a command after this many seconds."
+        },
+        "slipstream.provideMcpServer": {
+          "type": "boolean",
+          "default": false,
+          "markdownDescription": "Also expose Slipstream as an MCP server. Leave off in VS Code — the built-in tools above already cover it, and enabling both shows the model duplicate tools. Turn it on to share this instance with another MCP client."
+        },
+        "slipstream.dashboardServer": {
+          "type": "boolean",
+          "default": true,
+          "markdownDescription": "Serve the savings dashboard on `127.0.0.1` so it can be opened in a browser. The URL contains a random access token and is never reachable from another machine."
+        },
+        "slipstream.dashboardPort": {
+          "type": "number",
+          "default": 7331,
+          "minimum": 0,
+          "maximum": 65535,
+          "description": "Preferred port for the dashboard. If it is taken, a free port is chosen instead. Use 0 to always pick a free port."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "build": "node esbuild.mjs",
+    "watch": "node esbuild.mjs --watch",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "package": "npm run build && vsce package --no-dependencies --allow-missing-repository",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@slipstream/core": "*",
+    "@slipstream/mcp-server": "*",
+    "@vscode/chat-extension-utils": "^0.0.0-alpha.5"
+  },
+  "devDependencies": {
+    "@types/vscode": "^1.101.0",
+    "@vscode/vsce": "3.9.2",
+    "esbuild": "^0.25.0"
+  }
+}

@@ -1,0 +1,30 @@
+# Slipstream
+
+> Local tool-output compression for GitHub Copilot and other MCP clients, with retrievable artifacts and measured token savings.
+
+Slipstream is installed from this source checkout, not a published npm package.
+It uses MCP over stdio. It does not intercept model requests or act as a provider proxy.
+Relative links below resolve from the repository root.
+
+## Installation and Tools
+
+- [Canonical server manifest](server.json): Local identity, prerequisites, launch arguments, and tool names by mode; not a public registry listing.
+- [MCP integration](docs/mcp.md): Source installation, standalone and retrieval-only modes, live tool discovery, and configuration.
+- [Project README](README.md): Copilot CLI quick start, VS Code setup, settings, and security boundaries.
+- [Packaging](docs/packaging.md): Building and installing local packages and the extension.
+
+## Recovery and Safety
+
+- [Recovery limits and security](docs/mcp.md#recovery-and-security): Stored representations, retention limits, workspace access, and command execution.
+- [Security boundaries](README.md#security): Command allowlisting, path restrictions, untrusted output, and artifact storage.
+
+Omission markers reference stored artifact ranges. Retrieve those ranges while
+available; expired or evicted artifacts require rerunning the command or rereading
+the file. Line omissions preserve stored text; JSON formatting, ANSI removal, path
+folding, and marker sanitization mean retrieval is not always the original raw bytes.
+
+## Development
+
+- [Architecture](docs/architecture.md): Package responsibilities, compressors, profiles, and integration boundaries.
+- [Contributing](CONTRIBUTING.md): Bootstrap, required validation, and publication approval boundaries.
+- [MCP smoke tests](packages/mcp-server/test/smoke.test.ts): Live tools/list checks and tool behavior.
