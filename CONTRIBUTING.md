@@ -110,9 +110,9 @@ the signed download host. The collector never retries jobs, edits source,
 creates issues or PRs, commits, pushes, merges, or changes the runtime store.
 
 To connect a recurring finding to a regression, propose a reviewed entry in the
-[regression registry](.github/improvement-regressions.json). It intentionally
-starts empty; do not invent history or seed successful-looking proof. Each entry
-has exactly these fields:
+[regression registry](.github/improvement-regressions.json). Entries must refer
+to genuine history; do not invent failures or seed successful-looking proof.
+Each entry has exactly these fields:
 
 - `findingId`: the full fingerprint from a CI comparison report.
 - `beforeRunId` and `afterRunId`: decimal strings identifying two distinct,
@@ -129,6 +129,51 @@ The resulting regression proof still requires review; it does not establish
 causality, an approval, or a merge. Keep the real review and merge links with the
 ordinary change record. Review replacement or removal of stale registry entries
 as source changes; expired evidence becomes insufficient, never implicitly valid.
+
+### Historical Dashboard Regression
+
+The first proposed registry entry links a genuine Linux Node 22 failure to the
+same named test passing on a later revision. It remains pending owner review.
+
+- Before: [CI run 34957634350](https://github.com/Vmoosky/SlipStream/actions/runs/34957634350),
+    revision `01ca1caaef7c573f8b4a0c45b4f17a6ca848a720`, attempt 1, `main` push.
+    The core report recorded 554 passed and one failed test.
+- After: [CI run 34972436653](https://github.com/Vmoosky/SlipStream/actions/runs/34972436653),
+    revision `32f906f9b9c5aa954a9a5e929af598aee0e9a42e`, attempt 1, `main` push.
+    The core report recorded 556 passed and no failed tests.
+- Named test: `dashboard end to end supports the exact clean-URL browser API contract`
+    in `unit-core.json`, matrix job `linux-node22`.
+- Repair: [32f906f](https://github.com/Vmoosky/SlipStream/commit/32f906f9b9c5aa954a9a5e929af598aee0e9a42e)
+    added event IDs to disambiguate dashboard entries sharing a timestamp. The
+    separate same-millisecond regression was added by that change, so it is not
+    claimed as a test observed failing in the earlier run.
+
+On 2026-09-15, the existing verifier accepted the named failing-then-passing test
+after both CI aggregates and both unit archives were bound to GitHub run metadata
+and their SHA-256 digests. This was a local read-only verification of GitHub
+evidence, not an improvement-workflow run using the proposed entry. It proves one
+historical regression pair, not repeated failure, causal attribution, automatic
+repair, or a completed human-reviewed loop. GitHub returned no PR associated with
+the repair commit; no historical PR approval or merge is claimed.
+
+The earliest required artifact expires at **2026-09-22 10:24:12 UTC**. Review and
+retire this entry before then if no longer needed. An expired or deleted artifact
+must make the collector report insufficient evidence; an archived local copy or
+an unrelated successful run must not substitute for live provenance.
+
+### Repair Review And Rollback
+
+Before publishing an entry, the owner reviews the source diff, exact named test,
+run identities, artifact digests, and any remaining evidence limitations. Record
+the actual review and manual merge links with the change; do not backfill an
+approval for a historical direct push.
+
+To undo this registry addition, remove only its entry in an ordinary reviewed
+change. A product rollback requires a separate reviewed fix or narrowly scoped
+revert of the event-selection changes on the current branch, preserving later
+security fixes. Do not revert the entire historical commit, rewrite history, or
+change the user's ledger. Validate the dashboard regression suites and full
+required CI and Security gates before a manual merge. No rollback has been run.
 
 `npm run improvement:report` is the authenticated workflow command. For local
 comparison without GitHub access, use

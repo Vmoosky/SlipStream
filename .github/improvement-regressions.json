@@ -1,4 +1,13 @@
 {
   "schemaVersion": 1,
-  "regressions": []
+  "regressions": [
+    {
+      "findingId": "23f69a0d2e3fb35ede215d810bcad084ee157777977418a5f6db0e5939b8ebe0",
+      "beforeRunId": "34957634350",
+      "afterRunId": "34972436653",
+      "job": "linux-node22",
+      "suite": "unit-core.json",
+      "testName": "dashboard end to end supports the exact clean-URL browser API contract"
+    }
+  ]
 }
