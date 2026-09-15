@@ -1856,7 +1856,21 @@ test('improvement runner preserves the checkout and separates local from workflo
   });
   const completionSummary = fs.readFileSync(completionEnv.GITHUB_STEP_SUMMARY, 'utf8');
   assert.match(completionSummary, /ci\.yml run 124, attempt 1/);
-  assert.ok(completionSummary.includes('https://github.com/Vmoosky/SlipStream/actions/runs/124'));
+  const summaryUrls = completionSummary.match(/https?:\/\/[^\s)]+/g) ?? [];
+  assert.ok(
+    summaryUrls.some((value) => {
+      try {
+        const parsed = new URL(value);
+        return (
+          parsed.protocol === 'https:' &&
+          parsed.host === 'github.com' &&
+          parsed.pathname === '/Vmoosky/SlipStream/actions/runs/124'
+        );
+      } catch {
+        return false;
+      }
+    }),
+  );
   assert.ok(completionSummary.includes(`Source revision: ${'d'.repeat(40)}`));
   assert.ok(completionSummary.includes(`Collector revision: ${env.GITHUB_SHA}`));
   history.runs[1].conclusion = 'failure';
