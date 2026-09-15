@@ -128,6 +128,15 @@ test('workspaces build in dependency order including the source-bundled plugin',
   assert.ok(names.indexOf('@slipstream/core') < names.indexOf('@slipstream/copilot-plugin'));
 });
 
+test('branch protection verification keeps the supported unit matrix intact', () => {
+  assert.deepEqual(UNIT_JOBS, [
+    'linux-node20',
+    'linux-node22',
+    'linux-node24',
+    'verification-intentional-failure',
+  ]);
+});
+
 test('valid unit and browser evidence records exact provenance', (context) => {
   const { root } = fixture(context);
   const unit = collectUnit(root, { ...META, job: UNIT_JOBS[0], steps: unitSteps });
