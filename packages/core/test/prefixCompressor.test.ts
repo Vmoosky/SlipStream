@@ -1,3 +1,4 @@
+import { runInNewContext } from 'node:vm';
 import { describe, it, expect } from 'vitest';
 import {
   planPrefixFold,
@@ -59,6 +60,30 @@ describe('planPrefixFold', () => {
   it('returns null when the prefix occurs too few times', () => {
     const input = listing(['only.ts', 'two.ts']);
     expect(planPrefixFold(input)).toBeNull();
+  });
+
+  it.each([
+    ['labelC:/dev/project/src/', 'C:/dev/project/src/'],
+    ['C:relative\\project\\src\\', 'C:relative\\project\\src\\'],
+    ['//server/share/project/src/', '/server/share/project/src/'],
+    ['alpha/beta//long-project-name/src/', '/long-project-name/src/'],
+    ['root/folder/C:/long-project-name/src/', '/long-project-name/src/'],
+    ['relative/@scope/pkg.with-dots/src/', 'relative/@scope/pkg.with-dots/src/'],
+  ])('preserves path token boundaries in %s', (prefix, expectedPrefix) => {
+    const input = ['one.ts', 'two.ts', 'three.ts', 'four.ts']
+      .map((fileName) => `${prefix}${fileName}:42`)
+      .join('\n');
+    const plan = planPrefixFold(input);
+    expect(plan).not.toBeNull();
+    expect(plan!.legend[0].value).toBe(expectedPrefix);
+    expect(expandPrefixFold(plan!.text)).toBe(input);
+  });
+
+  it.each(['', '/file', '\\file'])('bounds work for a long non-path ending in %s', (suffix) => {
+    const input = '+'.repeat(200_000) + suffix;
+    expect(runInNewContext('planPrefixFold(input)', { planPrefixFold, input }, {
+      timeout: 1000,
+    })).toBeNull();
   });
 
   it('returns null when there is no shared long prefix', () => {

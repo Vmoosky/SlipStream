@@ -46,8 +46,15 @@ interface TableInfo {
   dataStart: number;
 }
 
-/** A markdown alignment row: `| --- | :--: |`, requiring runs of at least 3 dashes. */
-const MD_SEPARATOR_RE = /^\s*\|?\s*:?-{3,}:?\s*(\|\s*:?-{3,}:?\s*)*\|?\s*$/;
+/** A markdown alignment cell, requiring a run of at least 3 dashes. */
+const MD_SEPARATOR_CELL_RE = /^:?-{3,}:?$/;
+
+function isMarkdownSeparator(line: string): boolean {
+  let row = line.trim();
+  if (row.startsWith('|')) row = row.slice(1);
+  if (row.endsWith('|')) row = row.slice(0, -1);
+  return row.split('|').every((cell) => MD_SEPARATOR_CELL_RE.test(cell.trim()));
+}
 
 /** Count the cells of a markdown row, ignoring the optional outer pipes. */
 function markdownCells(line: string): number {
@@ -90,7 +97,7 @@ function findTable(lines: readonly string[]): TableInfo | null {
   if ((lines[first] ?? '').includes('|')) {
     let sep = first + 1;
     while (sep < n && (lines[sep] ?? '').trim() === '') sep++;
-    if (sep < n && MD_SEPARATOR_RE.test(lines[sep] ?? '')) {
+    if (sep < n && isMarkdownSeparator(lines[sep] ?? '')) {
       return { format: 'markdown', delimiter: '|', headerLines: [first, sep], dataStart: sep + 1 };
     }
   }
