@@ -53,11 +53,25 @@ the full recommended JS rules to new readiness tooling. Formatting currently
 covers that tooling and workflows, not the entire historical source tree.
 Expand these scopes deliberately; avoid unrelated formatting churn.
 
-`check:docs` validates manifest reference blocks, local Markdown links, JSON/JSONC
-examples, and cost-policy examples against the public validator. After changing a
-documented manifest, run `npm run docs:write`, review the generated sections, and
-rerun `check:docs`. A second write must be a no-op. Prose, external links, and
-live-provider outcomes still need review.
+`check:docs` scans maintained `.md`, `.markdown`, and root `llms.txt` documents for
+manifest reference drift, broken local links and anchors, invalid JSON/JSONC and
+cost-policy examples, and missing npm scripts. Static `npm run`/`run-script`
+examples start at the repository root and support explicit workspace names or
+paths, `--prefix`, and simple relative `cd` commands. Arguments after `--` belong
+to the script. No documentation commands are executed; dynamic or unsupported
+examples appear in `manualExamples` and still require review.
+
+Every PR runs repository-wide validation, including unchanged documents affected
+by deleted files or changed manifests. CI uses all Git-tracked documents, without
+directory exclusions, and binds the inventory and base-to-tested-revision changes
+to the exact PR head/base, tested commit, workflow, run, and attempt. Both report
+collection and `ci-required` independently recompute this Git evidence; missing
+history, dirty tracked files, incomplete inventories, and mismatched reports fail.
+Local checks also include new maintained documents but omit installed/generated
+directories and do not claim CI provenance. After changing a documented manifest,
+run `npm run docs:write`, review the generated sections, and rerun `check:docs`.
+A second write must be a no-op. Narrative behavior, external links, and
+live-provider outcomes remain outside these deterministic checks.
 
 CI retains allowlisted test reports and failure screenshots/traces for seven
 days. Evidence includes the tested revision, PR head/base revisions, workflow,

@@ -532,19 +532,29 @@ limits, and the explicitly unauthenticated local-input mode.
 ## Documentation Contracts
 
 [check-docs.mjs](../scripts/check-docs.mjs) checks all maintained Markdown and
-[llms.txt](../llms.txt), excluding generated output and the installed evaluator.
-CI runs the check without source-path filters and validates the exact contract
-path set at both report collection and aggregation; duplicate or substitute
-paths cannot satisfy the evidence requirement merely by matching its count.
+[llms.txt](../llms.txt). Local mode includes new `.md` and `.markdown` files but
+excludes generated output and installed dependencies/evaluator files. CI sets
+`SLIPSTREAM_DOCS_CI=true` (also available as `--ci`) and scans every Git-tracked
+document, including unchanged documents and tracked files in output directories.
+There are no PR source-path filters. Full Git history and a clean tracked checkout
+are required; PR merge parents must match the event's exact base and head.
+
+Reports retain the sorted document inventory, base-to-tested-revision changes
+(renames as deletion/addition), and commit/workflow/run/attempt identity. Collection
+and final aggregation independently recompute this evidence from their checkouts.
+Missing or substituted documents, changes, or identities fail `ci-required` on
+both browser-proof platforms. With no comparison base, initial pushes and manual
+runs inventory the complete tree as additions, not an observed prior-run delta.
 
 | Surface | Deterministic Coverage | Residual Review |
 | --- | --- | --- |
 | [Build reference](#build-and-script-reference) | Root and workspace manifest digests, scripts, runtime and workspace mapping | Build behavior is verified by CI, not by the reference text |
 | [Extension reference](../packages/extension/README.md#commands-and-settings-reference) | Full manifest digest, command IDs, tool inputs and setting defaults | User-facing descriptions and runtime behavior |
 | [MCP reference](mcp.md#mcp-launch-reference) | Registry, plugin and package digests; launch arguments, modes and tools | Live client/provider behavior |
-| Maintained Markdown and agent index | Local links and anchors; JSON/JSONC syntax and cost-policy examples | External links, other prose and live-provider claims |
+| Repository Markdown and agent index | Local links and anchors; JSON/JSONC syntax and cost-policy examples, including unchanged inbound links after deletions | External links, narrative behavior and live-provider claims |
+| Static npm examples | Existing scripts and workspace selectors, prefix/relative working directories, script arguments after `--`; no execution | Dynamic/unsupported shell forms are listed in `manualExamples`; script behavior still requires tests |
 
-Check mode never writes. `npm run docs:write` updates only designated reference
+Check mode never edits documentation. `npm run docs:write` updates only designated reference
 blocks, and a second write must make no further changes. Tests compare the
 generator's actual contract set with CI's expectations. New contracts require
 an intentional mapping and test update; semantic review remains advisory.
@@ -597,5 +607,5 @@ Supported Node.js: >=20. The pinned development runtime is in [.node-version](..
 | purge:copilot | node packages/copilot-plugin/dist/hook.js purge |
 | clean | node -e "for (const p of ['copilot-plugin','core','hook-runtime','mcp-server','extension']) require('fs').rmSync('packages/'+p+'/dist',{recursive:true,force:true})" |
 
-<!-- source-sha256: 0412c4d00f3a2f1fa7176a7af13154c7dca084087b2c5ac1bc9a16e5386c4b1c -->
+<!-- source-sha256: 3e63d368dbac5d41d7456c96392b45e06d82b1e01746a3a3109209933a9ac8ce -->
 <!-- slipstream-reference:build:end -->

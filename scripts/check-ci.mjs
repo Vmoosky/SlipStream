@@ -2,6 +2,7 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { createHash } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
+import { execFileSync } from 'node:child_process';
 
 const ROOT = fileURLToPath(new URL('../', import.meta.url));
 export const UNIT_JOBS = ['linux-node20', 'linux-node22', 'linux-node24', 'windows-node24'];
@@ -17,6 +18,7 @@ export const DOC_CONTRACTS = [
   'packages/extension/README.md',
   'docs/mcp.md',
 ];
+export const DOC_CHECKS = ['generated-manifests', 'local-links', 'json-examples', 'npm-scripts'];
 const CONTAINMENT_RULES = [
   {
     category: 'dependency',
@@ -51,6 +53,157 @@ function hasExpectedDocContracts(contracts) {
     contracts.length === DOC_CONTRACTS.length &&
     DOC_CONTRACTS.every((file) => contracts.includes(file))
   );
+}
+
+export function isDocumentationFile(file) {
+  return typeof file === 'string' && (/\.(md|markdown)$/i.test(file) || file === 'llms.txt');
+}
+
+function repositoryPath(file) {
+  return (
+    typeof file === 'string' &&
+    file.length > 0 &&
+    file.length <= 1024 &&
+    !/[\\:]/.test(file) &&
+    ![...file].some(
+      (character) => character.charCodeAt(0) < 32 || character.charCodeAt(0) === 127,
+    ) &&
+    !path.posix.isAbsolute(file) &&
+    !file.split('/').some((part) => ['', '.', '..'].includes(part))
+  );
+}
+
+export function documentationContext(root, options) {
+  const metadata = identity(options);
+  const git = (args) => {
+    try {
+      return execFileSync('git', ['--no-optional-locks', '-C', root, ...args], {
+        encoding: 'utf8',
+        timeout: 30_000,
+        maxBuffer: 8 * 1024 * 1024,
+        windowsHide: true,
+        stdio: ['ignore', 'pipe', 'pipe'],
+      });
+    } catch {
+      throw new Error(
+        'Documentation Git evidence requires a clean checkout and full revision history.',
+      );
+    }
+  };
+  expect(
+    path.relative(
+      fs.realpathSync.native(root),
+      fs.realpathSync.native(git(['rev-parse', '--show-toplevel']).trim()),
+    ) === '',
+  );
+  expect(git(['rev-parse', 'HEAD']).trim() === metadata.revision);
+  expect(git(['status', '--porcelain', '--untracked-files=no']).trim() === '');
+  if (metadata.eventName === 'pull_request') {
+    const parents = git(['show', '--no-patch', '--format=%P', metadata.revision]).trim().split(' ');
+    expect(
+      parents.length === 2 &&
+        parents[0] === metadata.baseRevision &&
+        parents[1] === metadata.headRevision,
+    );
+  } else {
+    expect(metadata.headRevision === metadata.revision);
+  }
+  const entries = git(['ls-tree', '-r', '-z', '--full-tree', metadata.revision])
+    .split('\0')
+    .filter(Boolean)
+    .map((entry) => {
+      const match = /^([0-7]{6}) (blob|commit) ([a-f0-9]{40})\t([\s\S]+)$/.exec(entry);
+      expect(match && repositoryPath(match[4]));
+      return { mode: match[1], path: match[4] };
+    });
+  expect(entries.length <= 20_000);
+  const documents = entries
+    .filter((entry) => isDocumentationFile(entry.path))
+    .map((entry) => {
+      expect(['100644', '100755'].includes(entry.mode));
+      expect(!fs.lstatSync(path.join(root, entry.path)).isSymbolicLink());
+      return entry.path;
+    })
+    .sort();
+  expect(documents.length > 0 && documents.length <= 10_000);
+  const comparedBase =
+    metadata.baseRevision && !/^0+$/.test(metadata.baseRevision) ? metadata.baseRevision : null;
+  let changes;
+  if (comparedBase) {
+    expect(git(['rev-parse', `${comparedBase}^{commit}`]).trim() === comparedBase);
+    const fields = git([
+      'diff',
+      '--name-status',
+      '-z',
+      '--no-renames',
+      '--no-ext-diff',
+      '--no-textconv',
+      comparedBase,
+      metadata.revision,
+      '--',
+    ])
+      .split('\0')
+      .filter(Boolean);
+    expect(fields.length % 2 === 0 && fields.length <= 40_000);
+    changes = [];
+    for (let index = 0; index < fields.length; index += 2) {
+      expect(['A', 'M', 'D', 'T'].includes(fields[index]) && repositoryPath(fields[index + 1]));
+      changes.push({ status: fields[index], path: fields[index + 1] });
+    }
+  } else {
+    changes = entries.map((entry) => ({ status: 'A', path: entry.path }));
+  }
+  changes.sort((left, right) => (left.path < right.path ? -1 : left.path > right.path ? 1 : 0));
+  return { ...metadata, comparedBase, changes, documents };
+}
+
+function validateDocumentationScope(report, metadata, expectedContext) {
+  const { scope, coverage } = report;
+  expect(scope?.kind === 'repository-wide');
+  expect(
+    Array.isArray(scope.checks) &&
+      scope.checks.length === DOC_CHECKS.length &&
+      DOC_CHECKS.every((check) => scope.checks.includes(check)),
+  );
+  expect(
+    Array.isArray(scope.files) &&
+      scope.files.length > 0 &&
+      scope.files.length <= 10_000 &&
+      scope.files.every((file) => repositoryPath(file) && isDocumentationFile(file)) &&
+      new Set(scope.files).size === scope.files.length &&
+      JSON.stringify(scope.files) === JSON.stringify([...scope.files].sort()),
+  );
+  expect(DOC_CONTRACTS.every((file) => scope.files.includes(file)));
+  expect(
+    ['markdownFiles', 'localLinks', 'jsonExamples', 'npmCommands'].every(
+      (key) => Number.isSafeInteger(coverage?.[key]) && coverage[key] >= 0,
+    ) && coverage.markdownFiles === scope.files.length,
+  );
+  const context = scope.context;
+  expect(context && Object.entries(metadata).every(([key, value]) => context[key] === value));
+  const comparedBase =
+    metadata.baseRevision && !/^0+$/.test(metadata.baseRevision) ? metadata.baseRevision : null;
+  expect(context.comparedBase === comparedBase);
+  expect(metadata.eventName !== 'pull_request' || comparedBase !== null);
+  expect(JSON.stringify(context.documents) === JSON.stringify(scope.files));
+  if (expectedContext !== undefined) {
+    expect(
+      expectedContext &&
+        Object.entries(expectedContext).every(
+          ([key, value]) => JSON.stringify(context[key]) === JSON.stringify(value),
+        ),
+    );
+  }
+  expect(Array.isArray(context.changes) && context.changes.length <= 20_000);
+  const paths = context.changes.map((change) => {
+    expect(change && ['A', 'M', 'D', 'T'].includes(change.status) && repositoryPath(change.path));
+    if (isDocumentationFile(change.path)) {
+      expect(scope.files.includes(change.path) === (change.status !== 'D'));
+    }
+    return change.path;
+  });
+  expect(new Set(paths).size === paths.length);
+  expect(JSON.stringify(paths) === JSON.stringify([...paths].sort()));
 }
 
 function readJson(root, file) {
@@ -188,7 +341,13 @@ export function collectBrowser(root, options) {
         Array.isArray(report.written) &&
         report.written.length === 0,
     );
-    return { contracts: report.contracts, coverage: report.coverage, residual: report.residual };
+    validateDocumentationScope(report, metadata, options.documentation);
+    return {
+      contracts: report.contracts,
+      coverage: report.coverage,
+      scope: report.scope,
+      residual: report.residual,
+    };
   });
   const proof = inspect(errors, 'outcome-proof.json', () =>
     validateProofReport(readJson(root, 'outcome-proof.json')),
@@ -286,6 +445,7 @@ export function verifyRequired(root, options) {
             hasExpectedDocContracts(report.docs?.contracts) &&
             report.proof?.gate?.passed === true,
         );
+        validateDocumentationScope(report.docs, metadata, options.documentation);
       }
     });
   }
@@ -572,6 +732,13 @@ function main() {
     steps: JSON.parse(process.env.CI_STEPS ?? '{}'),
     needs: JSON.parse(process.env.CI_NEEDS ?? '{}'),
   };
+  if (['browser', 'required', 'contain-ci'].includes(mode)) {
+    try {
+      options.documentation = documentationContext(ROOT, options);
+    } catch {
+      options.documentation = null;
+    }
+  }
   const reports = path.join(ROOT, 'test-results');
   let report;
   if (mode === 'unit') report = collectUnit(reports, options);

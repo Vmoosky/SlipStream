@@ -86,7 +86,18 @@ function fixture(context) {
     passed: true,
     errors: [],
     contracts: [...DOC_CONTRACTS],
-    coverage: { markdownFiles: 3 },
+    coverage: { markdownFiles: 3, localLinks: 0, jsonExamples: 0, npmCommands: 0 },
+    scope: {
+      kind: 'repository-wide',
+      checks: ['generated-manifests', 'local-links', 'json-examples', 'npm-scripts'],
+      files: [...DOC_CONTRACTS].sort(),
+      context: {
+        ...META,
+        comparedBase: META.baseRevision,
+        changes: [{ status: 'M', path: 'docs/mcp.md' }],
+        documents: [...DOC_CONTRACTS].sort(),
+      },
+    },
     written: [],
     residual: ['Narrative review'],
   });
@@ -115,6 +126,8 @@ function artifacts(context) {
     write,
     options: {
       ...META,
+      documentation: JSON.parse(fs.readFileSync(path.join(root, 'docs.json'), 'utf8')).scope
+        .context,
       needs: {
         unit: { result: 'success' },
         'browser-proof': { result: 'success' },
@@ -387,6 +400,80 @@ test('documentation evidence requires the exact contract set in any order', (con
   assert.equal(reordered.passed, true);
   write(file, reordered);
   assert.equal(verifyRequired(root, options).passed, true);
+});
+
+test('documentation evidence requires repository-wide coverage bound to the exact PR', (context) => {
+  const { root, write, options } = artifacts(context);
+  const docs = JSON.parse(fs.readFileSync(path.join(root, 'docs.json'), 'utf8'));
+  const file = `ci-browser-${BROWSER_JOBS[0]}/ci-browser.json`;
+  const browser = JSON.parse(fs.readFileSync(path.join(root, file), 'utf8'));
+  for (const scope of [
+    undefined,
+    { ...docs.scope, kind: 'targeted' },
+    { ...docs.scope, checks: docs.scope.checks.slice(1) },
+    { ...docs.scope, files: docs.scope.files.slice(1) },
+    { ...docs.scope, files: [...docs.scope.files, '../outside.md'] },
+    { ...docs.scope, context: null },
+    ...['revision', 'headRevision', 'baseRevision', 'comparedBase'].map((key) => ({
+      ...docs.scope,
+      context: { ...docs.scope.context, [key]: 'd'.repeat(40) },
+    })),
+    { ...docs.scope, context: { ...docs.scope.context, attempt: '2' } },
+    { ...docs.scope, context: { ...docs.scope.context, changes: null } },
+    { ...docs.scope, context: { ...docs.scope.context, changes: [] } },
+    {
+      ...docs.scope,
+      context: { ...docs.scope.context, changes: [{ status: 'M', path: 'unrelated.txt' }] },
+    },
+    {
+      ...docs.scope,
+      context: {
+        ...docs.scope.context,
+        changes: [{ status: 'M', path: 'packages/new/README.md' }],
+      },
+    },
+    {
+      ...docs.scope,
+      context: { ...docs.scope.context, changes: [{ status: 'D', path: 'docs/mcp.md' }] },
+    },
+  ]) {
+    write('docs.json', { ...docs, scope });
+    assert.equal(
+      collectBrowser(root, {
+        ...META,
+        job: BROWSER_JOBS[0],
+        steps: browserSteps,
+        documentation: docs.scope.context,
+      }).passed,
+      false,
+      `Collection accepted ${JSON.stringify(scope)}`,
+    );
+    write(file, { ...browser, docs: { ...browser.docs, scope } });
+    assert.equal(verifyRequired(root, options).passed, false);
+  }
+  write('docs.json', docs);
+  write(file, browser);
+  assert.equal(
+    collectBrowser(root, {
+      ...META,
+      job: BROWSER_JOBS[0],
+      steps: browserSteps,
+      documentation: null,
+    }).passed,
+    false,
+  );
+  assert.equal(verifyRequired(root, { ...options, documentation: null }).passed, false);
+  assert.equal(
+    classifyFailureContainment(
+      root,
+      {
+        ...options,
+        documentation: null,
+      },
+      'ci',
+    ).status,
+    'contained',
+  );
 });
 
 test('missing or failed unit evidence cannot pass despite successful command status', (context) => {
@@ -1197,6 +1284,17 @@ test('required CI has no path bypass, unpinned actions, or success-by-skipping p
     BROWSER_JOBS,
   );
   assert.equal(workflow.jobs['browser-proof'].strategy['fail-fast'], false);
+  for (const job of [workflow.jobs['browser-proof'], workflow.jobs['ci-required']]) {
+    assert.equal(
+      job.steps.find((step) => step.uses?.startsWith('actions/checkout@')).with['fetch-depth'],
+      0,
+    );
+  }
+  assert.equal(
+    workflow.jobs['browser-proof'].steps.find((step) => step.id === 'validate').env
+      .SLIPSTREAM_DOCS_CI,
+    'true',
+  );
 });
 
 function documentationChange(file = 'docs/architecture.md') {

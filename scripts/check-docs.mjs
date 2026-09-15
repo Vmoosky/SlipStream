@@ -2,12 +2,15 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { createHash } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
+import { parseArgs } from 'node:util';
 import { unified } from 'unified';
 import remarkParse from 'remark-parse';
 import { visit } from 'unist-util-visit';
 import GithubSlugger from 'github-slugger';
 import { parse as parseJsonc } from 'jsonc-parser';
+import shellQuote from 'shell-quote';
 import { validateCostPolicy } from '../packages/core/dist/index.js';
+import { DOC_CHECKS, documentationContext, isDocumentationFile } from './check-ci.mjs';
 
 const REPO_ROOT = fileURLToPath(new URL('../', import.meta.url));
 const WORKSPACES = ['core', 'hook-runtime', 'mcp-server', 'copilot-plugin', 'extension'];
@@ -211,10 +214,7 @@ function markdownFiles(root, directory = '') {
       )
         continue;
       files.push(...markdownFiles(root, relative));
-    } else if (
-      entry.isFile() &&
-      (entry.name.toLowerCase().endsWith('.md') || relative === 'llms.txt')
-    ) {
+    } else if (entry.isFile() && isDocumentationFile(relative)) {
       files.push(relative);
     }
   }
@@ -232,12 +232,140 @@ function headings(tree) {
   return slugs;
 }
 
-export function checkDocs(root = REPO_ROOT, { write = false } = {}) {
+function checkNpmExamples(root, file, node, manifest) {
+  const languages = ['sh', 'bash', 'shell', 'console', 'zsh', 'powershell', 'pwsh', 'cmd', 'bat'];
+  const result = { checked: 0, errors: [], review: [] };
+  if (node.type !== 'inlineCode' && !languages.includes(node.lang?.toLowerCase())) return result;
+  let directory = '';
+  for (const [offset, source] of node.value.split(/\r?\n/).entries()) {
+    const line = node.position.start.line + offset + (node.type === 'code' ? 1 : 0);
+    const review = (reason) => result.review.push({ file, line, reason });
+    let tokens;
+    try {
+      tokens = shellQuote.parse(source.replace(/^\s*\$\s+/, ''), (name) => `$${name}`);
+    } catch {
+      if (/\bnpm\b/.test(source)) review('Command quoting requires manual review.');
+      continue;
+    }
+    const commands = [[]];
+    for (const token of tokens) {
+      if (token?.comment !== undefined) break;
+      if ([';', '&&', '||', '|', '&'].includes(token?.op)) commands.push([]);
+      else commands.at(-1).push(token);
+    }
+    for (const command of commands) {
+      while (typeof command[0] === 'string' && /^[A-Za-z_]\w*=/.test(command[0])) command.shift();
+      if (command[0] === 'cd') {
+        try {
+          if (
+            directory === null ||
+            command.length !== 2 ||
+            typeof command[1] !== 'string' ||
+            /[$<>~\\]/.test(command[1]) ||
+            path.posix.isAbsolute(command[1]) ||
+            /^[A-Za-z]:/.test(command[1])
+          ) {
+            directory = null;
+          } else {
+            const target = withinRoot(root, path.posix.join(directory, command[1]));
+            directory = fs.statSync(target).isDirectory()
+              ? path.relative(root, target).split(path.sep).join('/')
+              : null;
+          }
+        } catch {
+          directory = null;
+        }
+        continue;
+      }
+      if (!['npm', 'npm.cmd'].includes(command[0])) continue;
+      const separator = command.indexOf('--');
+      const args = command.slice(1, separator < 0 ? undefined : separator);
+      if (
+        directory === null ||
+        args.some((value) => typeof value !== 'string' || /[$<>`]/.test(value))
+      ) {
+        review('Dynamic or external npm command requires manual review.');
+        continue;
+      }
+      const options = {
+        workspace: { type: 'string', short: 'w', multiple: true },
+        workspaces: { type: 'boolean' },
+        prefix: { type: 'string' },
+        'include-workspace-root': { type: 'boolean' },
+        'if-present': { type: 'boolean' },
+        silent: { type: 'boolean', short: 's' },
+      };
+      let parsed;
+      try {
+        parsed = parseArgs({ args, options, allowPositionals: true });
+      } catch {
+        review('Npm options require manual review.');
+        continue;
+      }
+      const [action, script] = parsed.positionals;
+      if (!['run', 'run-script'].includes(action) || !script) continue;
+      if (
+        parsed.values.prefix &&
+        (path.posix.isAbsolute(parsed.values.prefix) ||
+          /[~\\]|^[A-Za-z]:/.test(parsed.values.prefix))
+      ) {
+        review('External npm prefix requires manual review.');
+        continue;
+      }
+      try {
+        const selectedDirectory = parsed.values.prefix
+          ? path.posix.join(directory, parsed.values.prefix)
+          : directory;
+        const selected = manifest(selectedDirectory);
+        let targets = [selected];
+        if (parsed.values.workspace || parsed.values.workspaces) {
+          const workspaces = (selected.workspaces ?? []).map((relative) => ({
+            relative,
+            value: manifest(path.posix.join(selectedDirectory, relative)),
+          }));
+          if (workspaces.length === 0) throw new Error('no npm workspaces defined');
+          const selectors = parsed.values.workspace ?? [];
+          const matches = ({ relative, value }, selector) =>
+            selector === value.name || path.posix.relative(selector, relative) === '';
+          targets = workspaces
+            .filter(
+              (workspace) =>
+                parsed.values.workspaces ||
+                selectors.some((selector) => matches(workspace, selector)),
+            )
+            .map(({ value }) => value);
+          for (const selector of selectors) {
+            if (!workspaces.some((workspace) => matches(workspace, selector))) {
+              throw new Error(`unknown npm workspace: ${selector}`);
+            }
+          }
+          if (parsed.values['include-workspace-root']) targets.push(selected);
+        }
+        result.checked++;
+        for (const target of targets) {
+          if (!Object.hasOwn(target.scripts ?? {}, script) && !parsed.values['if-present']) {
+            throw new Error(`unknown npm script: ${script}`);
+          }
+        }
+      } catch (error) {
+        result.errors.push(`${file}:${line}: ${error.message}`);
+      }
+    }
+  }
+  return result;
+}
+
+export function checkDocs(root = REPO_ROOT, { write = false, context = null } = {}) {
   root = path.resolve(root);
   const errors = [];
   const written = [];
   let contracts;
+  let sourceContext = null;
   try {
+    if (context !== null) {
+      if (write) throw new Error('CI documentation validation must be check-only.');
+      sourceContext = documentationContext(root, context);
+    }
     contracts = references(root);
   } catch (error) {
     return {
@@ -284,13 +412,23 @@ export function checkDocs(root = REPO_ROOT, { write = false } = {}) {
       }
     }
   }
-  const files = markdownFiles(root);
+  const files = sourceContext?.documents ?? markdownFiles(root);
   const documents = new Map(
     files.map((file) => [file, parser.parse(fs.readFileSync(withinRoot(root, file), 'utf8'))]),
   );
   const anchors = new Map([...documents].map(([file, tree]) => [file, headings(tree)]));
   let localLinks = 0;
   let jsonExamples = 0;
+  let npmCommands = 0;
+  const manualExamples = [];
+  const manifests = new Map();
+  const manifest = (directory) => {
+    const file = path.posix.join(directory, 'package.json');
+    if (!manifests.has(file)) {
+      manifests.set(file, JSON.parse(fs.readFileSync(withinRoot(root, file), 'utf8')));
+    }
+    return manifests.get(file);
+  };
   for (const [file, tree] of documents) {
     visit(tree, ['link', 'image', 'definition'], (node) => {
       if (/^[a-z][a-z0-9+.-]*:|^\/\//i.test(node.url)) return;
@@ -317,7 +455,11 @@ export function checkDocs(root = REPO_ROOT, { write = false } = {}) {
         errors.push(`${file}:${node.position.start.line}: invalid local link (${error.message})`);
       }
     });
-    visit(tree, 'code', (node) => {
+    visit(tree, ['code', 'inlineCode'], (node) => {
+      const npm = checkNpmExamples(root, file, node, manifest);
+      npmCommands += npm.checked;
+      errors.push(...npm.errors);
+      manualExamples.push(...npm.review);
       if (!['json', 'jsonc'].includes(node.lang)) return;
       jsonExamples++;
       const parseErrors = [];
@@ -344,9 +486,16 @@ export function checkDocs(root = REPO_ROOT, { write = false } = {}) {
     kind: 'documentation-contracts',
     passed: errors.length === 0,
     contracts: [...contracts.keys()],
-    coverage: { markdownFiles: files.length, localLinks, jsonExamples },
+    coverage: { markdownFiles: files.length, localLinks, jsonExamples, npmCommands },
+    scope: {
+      kind: 'repository-wide',
+      checks: [...DOC_CHECKS],
+      files,
+      context: sourceContext,
+    },
+    manualExamples,
     residual: [
-      'Narrative claims, external links, runtime enforcement, and live-provider outcomes require review.',
+      'Narrative claims, external links, dynamic commands, runtime enforcement, and live-provider outcomes require review.',
     ],
     errors,
     written,
@@ -354,18 +503,29 @@ export function checkDocs(root = REPO_ROOT, { write = false } = {}) {
 }
 
 function main() {
-  const args = process.argv.slice(2);
-  const reportIndex = args.indexOf('--report');
-  const flags = args.filter((_, index) => index !== reportIndex + 1 || reportIndex < 0);
-  if (
-    flags.some((flag) => !['--write', '--report'].includes(flag)) ||
-    (reportIndex >= 0 && !args[reportIndex + 1])
-  ) {
-    throw new Error('Usage: check-docs.mjs [--write] [--report relative-path]');
+  const { values } = parseArgs({
+    options: {
+      write: { type: 'boolean', default: false },
+      report: { type: 'string' },
+      ci: { type: 'boolean', default: false },
+    },
+  });
+  let context = null;
+  if (values.ci || process.env.SLIPSTREAM_DOCS_CI === 'true') {
+    const event = JSON.parse(fs.readFileSync(process.env.GITHUB_EVENT_PATH, 'utf8'));
+    context = {
+      revision: process.env.GITHUB_SHA,
+      runId: process.env.GITHUB_RUN_ID,
+      attempt: process.env.GITHUB_RUN_ATTEMPT,
+      eventName: process.env.GITHUB_EVENT_NAME,
+      workflow: process.env.GITHUB_WORKFLOW_REF,
+      headRevision: event.pull_request?.head?.sha ?? process.env.GITHUB_SHA,
+      baseRevision: event.pull_request?.base?.sha ?? event.before ?? null,
+    };
   }
-  const report = checkDocs(REPO_ROOT, { write: args.includes('--write') });
-  if (reportIndex >= 0) {
-    const target = withinRoot(REPO_ROOT, args[reportIndex + 1]);
+  const report = checkDocs(REPO_ROOT, { write: values.write, context });
+  if (values.report) {
+    const target = withinRoot(REPO_ROOT, values.report);
     fs.mkdirSync(path.dirname(target), { recursive: true });
     fs.writeFileSync(target, `${JSON.stringify(report, null, 2)}\n`);
   }
