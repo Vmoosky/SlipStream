@@ -154,6 +154,49 @@ test('workspaces build in dependency order including the source-bundled plugin',
   assert.ok(names.indexOf('@slipstream/core') < names.indexOf('@slipstream/copilot-plugin'));
 });
 
+test('development editor tasks reuse root npm scripts and build dependencies before debugging', () => {
+  const readJson = (file) => JSON.parse(fs.readFileSync(path.join(REPO, file), 'utf8'));
+  const manifest = readJson('package.json');
+  const configuration = readJson('.vscode/tasks.json');
+  const launch = readJson('.vscode/launch.json');
+  assert.equal(configuration.version, '2.0.0');
+  assert.deepEqual(
+    configuration.tasks.map((task) => [task.label, task.script]),
+    [
+      ['Slipstream: Setup', 'setup'],
+      ['Slipstream: Build', 'build'],
+      ['Slipstream: Validate', 'validate'],
+      ['Slipstream: E2E', 'test:e2e'],
+    ],
+  );
+  for (const task of configuration.tasks) {
+    assert.equal(task.type, 'npm');
+    assert.ok(Object.hasOwn(manifest.scripts, task.script));
+    assert.deepEqual(task.options, { cwd: '${workspaceFolder}' });
+    for (const property of [
+      'path',
+      'command',
+      'dependsOn',
+      'isBackground',
+      'windows',
+      'linux',
+      'osx',
+    ])
+      assert.equal(task[property], undefined);
+    assert.equal(task.runOptions?.runOn, undefined);
+  }
+  const build = configuration.tasks.find((task) => task.script === 'build');
+  assert.deepEqual(build.group, { kind: 'build', isDefault: true });
+  assert.deepEqual(build.problemMatcher, ['$tsc']);
+  assert.deepEqual(configuration.tasks.find((task) => task.script === 'validate').group, {
+    kind: 'test',
+    isDefault: true,
+  });
+  const extension = launch.configurations.find((entry) => entry.type === 'extensionHost');
+  assert.equal(extension.preLaunchTask, build.label);
+  assert.equal(manifest.scripts.build, 'npm run build --workspaces --if-present');
+});
+
 function developmentFixture(context) {
   const { root: parent } = fixture(context);
   const root = path.join(parent, 'checkout with spaces');

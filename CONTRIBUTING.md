@@ -44,6 +44,15 @@ setup. `test:dashboard` remains a compatibility alias, including forwarded
 Playwright arguments. Both browser-proof PR jobs run E2E once through `validate`;
 `ci-required` rejects missing, failed, or skipped browser evidence.
 
+In VS Code, open the Slipstream repository itself as a workspace folder; opening
+only its parent folder does not load these repository-local configurations.
+**Tasks: Run Task** offers `Slipstream: Setup`, `Slipstream: Build`,
+`Slipstream: Validate`, and `Slipstream: E2E` from the
+[task definitions](.vscode/tasks.json). Setup is explicit; no task runs on folder
+open. **Tasks: Run Build Task** selects the root build, and **Tasks: Run Test Task**
+selects full validation. After setup, the **Run Slipstream Extension** debug
+configuration builds all workspaces before starting the Extension Development Host.
+
 Browser tests start temporary loopback servers and cover desktop/mobile layouts.
 They do not need a running dashboard or the user's savings store. The
 [offline workload](tests/fixtures/outcome-workload) deliberately fails before the
