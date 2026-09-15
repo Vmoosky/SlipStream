@@ -45,11 +45,6 @@
     "purge:copilot": "node packages/copilot-plugin/dist/hook.js purge",
     "clean": "node -e \"for (const p of ['copilot-plugin','core','hook-runtime','mcp-server','extension']) require('fs').rmSync('packages/'+p+'/dist',{recursive:true,force:true})\""
   },
-  "prettier": {
-    "singleQuote": true,
-    "printWidth": 100,
-    "endOfLine": "lf"
-  },
   "devDependencies": {
     "@eslint/js": "9.39.5",
     "@playwright/test": "^1.62.1",
