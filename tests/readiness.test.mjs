@@ -6,6 +6,7 @@ import * as path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { execFileSync } from 'node:child_process';
 import { parse } from 'yaml';
+import { resolveConfig, resolveConfigFile } from 'prettier';
 import { developmentPlan, runDevelopmentCommand, runDevelopment } from '../scripts/develop.mjs';
 import {
   IMPROVEMENT_LIMITS,
@@ -152,6 +153,18 @@ test('workspaces build in dependency order including the source-bundled plugin',
     }
   }
   assert.ok(names.indexOf('@slipstream/core') < names.indexOf('@slipstream/copilot-plugin'));
+});
+
+test('formatting discovers standalone Prettier settings in every workspace', async () => {
+  const manifest = JSON.parse(fs.readFileSync(path.join(REPO, 'package.json'), 'utf8'));
+  const config = path.join(REPO, '.prettierrc.json');
+  const expected = { singleQuote: true, printWidth: 100, endOfLine: 'lf' };
+  for (const folder of ['.', ...manifest.workspaces]) {
+    const target = path.join(REPO, folder, 'package.json');
+    assert.equal(await resolveConfigFile(target), config);
+    assert.deepEqual(await resolveConfig(target, { useCache: false }), expected);
+  }
+  assert.equal(Object.hasOwn(manifest, 'prettier'), false);
 });
 
 test('development editor tasks reuse root npm scripts and build dependencies before debugging', () => {

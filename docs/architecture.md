@@ -608,5 +608,5 @@ Supported Node.js: >=20. The pinned development runtime is in [.node-version](..
 | purge:copilot | node packages/copilot-plugin/dist/hook.js purge |
 | clean | node -e "for (const p of ['copilot-plugin','core','hook-runtime','mcp-server','extension']) require('fs').rmSync('packages/'+p+'/dist',{recursive:true,force:true})" |
 
-<!-- source-sha256: 0ede7a2b33344c30d8d9a5fbc972aa806d40e4a9fd10c0530e9a4fea2def5bd4 -->
+<!-- source-sha256: b0edc379a962b3f9123ee80fb9c4b87aa2ad6625b741cfe9a621af9b46f9c94e -->
 <!-- slipstream-reference:build:end -->
