@@ -20,6 +20,7 @@ jobs:
     permissions:
       contents: read
       actions: read
+      pull-requests: read
     env:
       SLIPSTREAM_IMPROVEMENT_ENABLED: ${{ vars.SLIPSTREAM_IMPROVEMENT_ENABLED }}
     steps:
@@ -34,6 +35,7 @@ jobs:
           test "$SLIPSTREAM_IMPROVEMENT_ENABLED" = 'true'
           test "$GITHUB_REF" = "refs/heads/$DEFAULT_BRANCH"
           test "$GITHUB_WORKFLOW_REF" = "$GITHUB_REPOSITORY/.github/workflows/improvement.yml@refs/heads/$DEFAULT_BRANCH"
+          test "$GITHUB_RUN_ATTEMPT" = '1'
           case "$GITHUB_EVENT_NAME" in
             schedule|workflow_dispatch) ;;
             *) exit 1 ;;
@@ -54,7 +56,7 @@ jobs:
         timeout-minutes: 2
         run: node --test --test-name-pattern='^improvement' tests/readiness.test.mjs
       - id: review
-        name: Report recurring findings and registered regression evidence
+        name: Verify findings, repair history, and retained originals
         timeout-minutes: 4
         env:
           GITHUB_TOKEN: ${{ github.token }}
@@ -68,4 +70,12 @@ jobs:
             test-results/improvement/run-*/report.json
             test-results/improvement/run-*/summary.md
           if-no-files-found: error
-          retention-days: 7
+          retention-days: 90
+      - name: Retain verified original evidence
+        if: ${{ success() && steps.review.outcome == 'success' }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: continuous-improvement-evidence-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ steps.review.outputs.evidence-path }}
+          if-no-files-found: error
+          retention-days: 90

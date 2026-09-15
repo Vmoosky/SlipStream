@@ -10,9 +10,11 @@ import { developmentPlan, runDevelopmentCommand, runDevelopment } from '../scrip
 import {
   IMPROVEMENT_LIMITS,
   readImprovementArchive,
+  readRetainedImprovementEvidence,
   createImprovementClient,
   collectImprovementReports,
   validateImprovementRegistry,
+  verifyImprovementRepair,
   improvementIdentity,
   runImprovementReview,
 } from '../scripts/check-improvement.mjs';
@@ -754,6 +756,103 @@ test('improvement regression proof requires one named failing then passing test'
   );
 });
 
+function improvementRepairEvidence(proof, repair) {
+  return {
+    repository: 'Vmoosky/SlipStream',
+    branch: 'main',
+    pull: {
+      number: 7,
+      commits: 1,
+      state: 'closed',
+      merged: true,
+      merged_at: '2026-09-15T12:00:00Z',
+      merge_commit_sha: proof.after.revision,
+      base: { ref: 'main', repo: { full_name: 'Vmoosky/SlipStream' } },
+      head: { sha: repair.fixCommit, repo: { full_name: 'Vmoosky/SlipStream' } },
+      user: { id: 1 },
+    },
+    commits: [{ sha: repair.fixCommit }],
+    comparison: {
+      status: 'ahead',
+      base_commit: { sha: proof.before.revision },
+      merge_base_commit: { sha: proof.before.revision },
+      total_commits: 1,
+      commits: [{ sha: proof.after.revision }],
+    },
+    reviews: [
+      {
+        id: 10,
+        state: 'APPROVED',
+        user: { id: 2, type: 'User' },
+        author_association: 'COLLABORATOR',
+        commit_id: repair.fixCommit,
+        submitted_at: '2026-09-15T11:00:00Z',
+        pull_request_url: 'https://api.github.com/repos/Vmoosky/SlipStream/pulls/7',
+      },
+    ],
+  };
+}
+
+test('improvement repair history requires a merged fix and final-head human approval', () => {
+  const proof = {
+    kind: 'regression-proof',
+    findingId: 'b'.repeat(64),
+    verified: true,
+    before: { revision: 'a'.repeat(40) },
+    after: { revision: 'd'.repeat(40) },
+  };
+  const repair = { fixCommit: 'c'.repeat(40), pullRequest: 7 };
+  const evidence = improvementRepairEvidence(proof, repair);
+  const result = verifyImprovementRepair(proof, repair, evidence);
+  assert.equal(result.verified, true);
+  assert.equal(result.reviewRequired, true);
+  assert.equal(result.automaticRepair, false);
+  assert.equal(result.mergeCommit, proof.after.revision);
+  assert.equal(result.reviews[0].commit, repair.fixCommit);
+  for (const mutate of [
+    (value) => (value.pull.head.repo.full_name = 'untrusted/fork'),
+    (value) => (value.pull.base.ref = 'other'),
+    (value) => (value.pull.merged = false),
+    (value) => (value.pull.head.sha = 'HEAD'),
+    (value) => (value.pull.user.id = 0),
+    (value) => (value.pull.merge_commit_sha = 'e'.repeat(40)),
+    (value) => (value.commits = []),
+    (value) => (value.commits[0].sha = 'HEAD'),
+    (value) => (value.pull.commits = 100),
+    (value) => (value.comparison.base_commit.sha = 'e'.repeat(40)),
+    (value) => (value.comparison.merge_base_commit.sha = 'e'.repeat(40)),
+    (value) => (value.comparison.total_commits = 100),
+    (value) => (value.comparison.commits = [{ sha: 'HEAD' }, { sha: proof.after.revision }]),
+    (value) => (value.reviews[0].commit_id = 'e'.repeat(40)),
+    (value) => (value.reviews[0].state = 'DISMISSED'),
+    (value) => (value.reviews[0].user.id = 1),
+    (value) => (value.reviews[0].user.type = 'Bot'),
+    (value) => (value.reviews[0].author_association = 'NONE'),
+    (value) => (value.reviews[0].submitted_at = '2026-09-15T13:00:00Z'),
+    (value) => (value.reviews[0].pull_request_url += '0'),
+    (value) => value.reviews.push({ ...value.reviews[0], id: 11, state: 'CHANGES_REQUESTED' }),
+    (value) =>
+      value.reviews.push({
+        ...value.reviews[0],
+        id: 9,
+        state: 'CHANGES_REQUESTED',
+        submitted_at: '2026-09-15T11:30:00Z',
+      }),
+    (value) => (value.reviews = Array(100).fill(value.reviews[0])),
+  ]) {
+    const invalid = structuredClone(evidence);
+    mutate(invalid);
+    const rejected = verifyImprovementRepair(proof, repair, invalid);
+    assert.equal(rejected.verified, false);
+    assert.equal(rejected.missing.length, 1);
+  }
+  assert.equal(
+    verifyImprovementRepair({ ...proof, verified: false }, repair, evidence).verified,
+    false,
+  );
+  assert.deepEqual(verifyImprovementRepair(proof, undefined).missing, ['repair-reference']);
+});
+
 test('improvement archives read bounded JSON without extracting or accepting unsafe names', async (context) => {
   const { root, sentinel } = maintenanceRepository(context);
   const archive = (extra = []) =>
@@ -828,6 +927,33 @@ test('improvement downloads authenticate only to GitHub and verify the archive d
     async () => new Response('{}', { headers: { 'content-length': String(3 * 1024 * 1024) } }),
   );
   await assert.rejects(oversized.json('/actions/runs/123'));
+  const resources = [];
+  const metadata = createImprovementClient(
+    'Vmoosky/SlipStream',
+    'synthetic-token',
+    async (url, options) => {
+      resources.push(url);
+      assert.equal(options.method, 'GET');
+      assert.equal(options.redirect, 'manual');
+      return new Response('{}');
+    },
+  );
+  for (const resource of [
+    '/pulls/7',
+    '/pulls/7/reviews?per_page=100',
+    '/pulls/7/commits?per_page=100',
+    `/compare/${'a'.repeat(40)}...${'d'.repeat(40)}?per_page=100`,
+  ])
+    await metadata.json(resource);
+  assert.equal(resources.length, 4);
+  for (const resource of [
+    '/issues/7',
+    '/pulls/7/comments',
+    '/pulls/7?other=true',
+    '/compare/HEAD...main',
+  ])
+    await assert.rejects(metadata.json(resource));
+  assert.equal(resources.length, 4);
 });
 
 function improvementHistory(context) {
@@ -906,7 +1032,7 @@ function improvementHistory(context) {
         return { total_count: artifacts.length, artifacts };
       }
       if (runId) return runs.find((run) => run.id === runId);
-      const workflow = resource.includes('/ci.yml/') ? 'ci.yml' : 'security.yml';
+      const workflow = resource.match(/\/workflows\/([^/]+)\/runs/)?.[1];
       return { workflow_runs: runs.filter((run) => run.path.endsWith(`/${workflow}`)) };
     },
     async archive(artifact) {
@@ -915,6 +1041,112 @@ function improvementHistory(context) {
   };
   return { root, emptyTree, runs, artifactLists, archives, calls, client };
 }
+
+test('improvement retained evidence requires an authenticated producer and intact original archives', async (context) => {
+  const history = improvementHistory(context);
+  const sourceRun = history.runs[0];
+  const sourceArtifact = history.artifactLists.get(sourceRun.id)[0];
+  const producer = {
+    ...history.runs[1],
+    id: 300,
+    head_sha: 'f'.repeat(40),
+    path: '.github/workflows/improvement.yml',
+    event: 'schedule',
+    updated_at: new Date().toISOString(),
+  };
+  const bundle = {
+    schemaVersion: 1,
+    kind: 'retained-improvement-evidence',
+    repository: 'Vmoosky/SlipStream',
+    branch: 'main',
+    collector: {
+      revision: producer.head_sha,
+      runId: '300',
+      attempt: '1',
+      eventName: 'schedule',
+      workflow: 'Vmoosky/SlipStream/.github/workflows/improvement.yml@refs/heads/main',
+    },
+    entries: [
+      {
+        run: sourceRun,
+        artifact: sourceArtifact,
+        capturedAt: producer.updated_at,
+        archive: history.archives.get(sourceArtifact.id).toString('base64'),
+      },
+    ],
+  };
+  const check = (value = bundle, mutate = () => {}) => {
+    fs.writeFileSync(path.join(history.root, 'evidence.json'), JSON.stringify(value));
+    const bytes = execFileSync(
+      'git',
+      ['archive', '--format=zip', '--add-file=evidence.json', history.emptyTree],
+      { cwd: history.root },
+    );
+    const options = {
+      repository: bundle.repository,
+      branch: bundle.branch,
+      run: structuredClone(producer),
+      artifact: {
+        id: 2000,
+        name: 'continuous-improvement-evidence-300-1',
+        expired: false,
+        size_in_bytes: bytes.length,
+        digest: `sha256:${createHash('sha256').update(bytes).digest('hex')}`,
+        workflow_run: { id: producer.id, head_sha: producer.head_sha },
+      },
+    };
+    mutate(options);
+    return readRetainedImprovementEvidence(bytes, options);
+  };
+  const retained = await check();
+  assert.equal(retained.size, 1);
+  assert.deepEqual(retained.get('123/ci-required').bytes, history.archives.get(sourceArtifact.id));
+  fs.writeFileSync(path.join(history.root, 'unexpected.json'), '{"synthetic":"unrequested"}');
+  const unexpectedBytes = execFileSync(
+    'git',
+    [
+      'archive',
+      '--format=zip',
+      '--add-file=ci-required.json',
+      '--add-file=unexpected.json',
+      history.emptyTree,
+    ],
+    { cwd: history.root },
+  );
+  const unexpected = structuredClone(bundle);
+  unexpected.entries[0].archive = unexpectedBytes.toString('base64');
+  unexpected.entries[0].artifact.size_in_bytes = unexpectedBytes.length;
+  unexpected.entries[0].artifact.digest = `sha256:${createHash('sha256').update(unexpectedBytes).digest('hex')}`;
+  await assert.rejects(check(unexpected));
+  for (const mutate of [
+    (value) => (value.collector.revision = 'e'.repeat(40)),
+    (value) => (value.collector.attempt = '2'),
+    (value) => (value.repository = 'untrusted/fork'),
+    (value) => (value.entries[0].run.event = 'pull_request'),
+    (value) => (value.entries[0].run.run_attempt = 2),
+    (value) => (value.entries[0].run.head_sha = 'e'.repeat(40)),
+    (value) => (value.entries[0].capturedAt = '2999-01-01T00:00:00Z'),
+    (value) => (value.entries[0].capturedAt = '2020-01-01T00:00:00Z'),
+    (value) => (value.entries[0].archive = Buffer.from('different bytes').toString('base64')),
+    (value) => (value.entries[0].archive += '\n'),
+    (value) => (value.entries[0].artifact.expired = true),
+    (value) => value.entries.push(value.entries[0]),
+    (value) => (value.entries = Array(17).fill(value.entries[0])),
+  ]) {
+    const invalid = structuredClone(bundle);
+    mutate(invalid);
+    await assert.rejects(check(invalid));
+  }
+  for (const mutate of [
+    (value) => (value.run.event = 'pull_request'),
+    (value) => (value.run.run_attempt = 2),
+    (value) => (value.run.conclusion = 'failure'),
+    (value) => (value.run.head_repository.full_name = 'untrusted/fork'),
+    (value) => (value.artifact.expired = true),
+    (value) => (value.artifact.digest = `sha256:${'0'.repeat(64)}`),
+  ])
+    await assert.rejects(check(bundle, mutate));
+});
 
 test('improvement collection compares exact run artifacts and treats expiry as insufficient evidence', async (context) => {
   const history = improvementHistory(context);
@@ -1001,6 +1233,97 @@ test('improvement registry connects an explicit run pair to a verified regressio
   assert.equal(report.regressions[0].verified, true);
   assert.equal(report.regressions[0].reviewRequired, true);
   assert.equal(report.evidence.length, 6);
+  assert.equal(report.retention.status, 'ready');
+  assert.equal(report.retainedEvidence.entries.length, 4);
+  assert.equal(report.repairHistoryStatus, 'insufficient-evidence');
+  assert.deepEqual(report.repairs[0].missing, ['repair-reference']);
+  const originals = [];
+  for (const runId of [123, 124]) {
+    const artifact = history.artifactLists.get(runId)[1];
+    const bytes = history.archives.get(artifact.id);
+    originals.push({ artifact, metadata: structuredClone(artifact), bytes });
+    const reports = await readImprovementArchive(bytes, ['ci-unit.json', regression.suite]);
+    fs.writeFileSync(
+      path.join(history.root, 'ci-unit.json'),
+      JSON.stringify({
+        ...reports.get('ci-unit.json'),
+        retentionLimitFixture: 'x'.repeat(2 * 1024 * 1024),
+      }),
+    );
+    fs.writeFileSync(
+      path.join(history.root, regression.suite),
+      JSON.stringify(reports.get(regression.suite)),
+    );
+    const oversized = execFileSync(
+      'git',
+      [
+        'archive',
+        '--format=zip',
+        '-0',
+        '--add-file=ci-unit.json',
+        `--add-file=${regression.suite}`,
+        history.emptyTree,
+      ],
+      { cwd: history.root, maxBuffer: 4 * 1024 * 1024 },
+    );
+    artifact.size_in_bytes = oversized.length;
+    artifact.digest = `sha256:${createHash('sha256').update(oversized).digest('hex')}`;
+    history.archives.set(artifact.id, oversized);
+  }
+  const overLimit = await collectImprovementReports({ ...options, registry });
+  assert.equal(overLimit.regressions[0].verified, true);
+  assert.equal(overLimit.status, 'insufficient-evidence');
+  assert.equal(overLimit.retention.status, 'insufficient-evidence');
+  assert.match(overLimit.retention.errors[0], /retention budget/);
+  assert.deepEqual(overLimit.retainedEvidence.entries, []);
+  for (const original of originals) {
+    Object.assign(original.artifact, original.metadata);
+    history.archives.set(original.artifact.id, original.bytes);
+  }
+  const repair = { fixCommit: 'c'.repeat(40), pullRequest: 7 };
+  const linkedRegistry = { schemaVersion: 1, regressions: [{ ...regression, repair }] };
+  const details = improvementRepairEvidence(report.regressions[0], repair);
+  const responses = new Map([
+    ['/pulls/7', details.pull],
+    ['/pulls/7/commits?per_page=100', details.commits],
+    ['/pulls/7/reviews?per_page=100', details.reviews],
+    [`/compare/${'a'.repeat(40)}...${'d'.repeat(40)}?per_page=100`, details.comparison],
+  ]);
+  const linkedClient = {
+    ...history.client,
+    json: (resource) =>
+      responses.has(resource) ? responses.get(resource) : history.client.json(resource),
+  };
+  const linked = await collectImprovementReports({
+    ...options,
+    registry: linkedRegistry,
+    client: linkedClient,
+  });
+  assert.equal(linked.status, 'reported');
+  assert.equal(linked.repairHistoryStatus, 'verified');
+  assert.equal(linked.repairs[0].verified, true);
+  details.reviews[0].commit_id = 'e'.repeat(40);
+  const stale = await collectImprovementReports({
+    ...options,
+    registry: linkedRegistry,
+    client: linkedClient,
+  });
+  assert.equal(stale.status, 'insufficient-evidence');
+  assert.equal(stale.regressions[0].verified, true);
+  assert.equal(stale.repairs[0].verified, false);
+  for (const invalidRepair of [
+    null,
+    { ...repair, command: 'not allowed' },
+    { ...repair, fixCommit: 'HEAD' },
+    { ...repair, pullRequest: '7' },
+  ]) {
+    assert.throws(() =>
+      validateImprovementRegistry({
+        schemaVersion: 1,
+        regressions: [{ ...regression, repair: invalidRepair }],
+      }),
+    );
+  }
   const invalid = structuredClone(registry);
   invalid.regressions[0].testName = 'unobserved test';
   assert.equal(
@@ -1022,6 +1345,82 @@ test('improvement registry connects an explicit run pair to a verified regressio
       regressions: [{ ...regression, afterRunId: '122' }],
     }),
   );
+  const producer = {
+    ...history.runs[1],
+    id: 300,
+    path: '.github/workflows/improvement.yml',
+    event: 'schedule',
+    head_sha: 'f'.repeat(40),
+    updated_at: new Date().toISOString(),
+  };
+  const retainedBundle = {
+    ...report.retainedEvidence,
+    collector: {
+      revision: producer.head_sha,
+      workflow: 'Vmoosky/SlipStream/.github/workflows/improvement.yml@refs/heads/main',
+      eventName: 'schedule',
+      runId: '300',
+      attempt: '1',
+    },
+  };
+  fs.writeFileSync(path.join(history.root, 'evidence.json'), JSON.stringify(retainedBundle));
+  const retainedBytes = execFileSync(
+    'git',
+    ['archive', '--format=zip', '--add-file=evidence.json', history.emptyTree],
+    { cwd: history.root },
+  );
+  const retainedArtifact = {
+    id: 5000,
+    name: 'continuous-improvement-evidence-300-1',
+    expired: false,
+    size_in_bytes: retainedBytes.length,
+    digest: `sha256:${createHash('sha256').update(retainedBytes).digest('hex')}`,
+    workflow_run: { id: producer.id, head_sha: producer.head_sha },
+  };
+  history.runs.push(producer);
+  history.artifactLists.set(producer.id, [retainedArtifact]);
+  history.archives.set(retainedArtifact.id, retainedBytes);
+  for (const runId of [123, 124]) {
+    for (const artifact of history.artifactLists.get(runId)) artifact.expired = true;
+  }
+  const recovered = await collectImprovementReports({ ...options, registry });
+  assert.equal(recovered.status, 'reported');
+  assert.equal(recovered.regressions[0].verified, true);
+  assert.equal(recovered.retention.recoveredArchives, 4);
+  assert.ok(
+    recovered.evidence
+      .filter((entry) => entry.source === 'retained')
+      .every((entry) => entry.retainedFrom.digest === retainedArtifact.digest),
+  );
+  assert.deepEqual(
+    recovered.retainedEvidence.entries.map((entry) => entry.capturedAt),
+    report.retainedEvidence.entries.map((entry) => entry.capturedAt),
+  );
+  retainedArtifact.expired = true;
+  assert.equal(
+    (await collectImprovementReports({ ...options, registry })).status,
+    'insufficient-evidence',
+  );
+  retainedArtifact.expired = false;
+  history.runs[1].run_attempt = 2;
+  assert.equal(
+    (await collectImprovementReports({ ...options, registry })).status,
+    'insufficient-evidence',
+  );
+  history.runs[1].run_attempt = 1;
+  history.artifactLists.get(124)[0].digest = `sha256:${'0'.repeat(64)}`;
+  assert.equal(
+    (await collectImprovementReports({ ...options, registry })).status,
+    'insufficient-evidence',
+  );
+  history.artifactLists.set(123, []);
+  history.artifactLists.set(124, []);
+  const removed = await collectImprovementReports({ ...options, registry });
+  assert.equal(removed.status, 'reported');
+  assert.equal(removed.retention.recoveredArchives, 4);
+  const unregistered = await collectImprovementReports(options);
+  assert.equal(unregistered.status, 'insufficient-evidence');
+  assert.equal(unregistered.retention.recoveredArchives, 0);
 });
 
 test('improvement workflow is opt-in, default-branch-only, read-only and artifact-producing', () => {
@@ -1034,10 +1433,11 @@ test('improvement workflow is opt-in, default-branch-only, read-only and artifac
   assert.equal(workflow.concurrency['cancel-in-progress'], false);
   const job = workflow.jobs.report;
   assert.equal(job.if, "${{ vars.SLIPSTREAM_IMPROVEMENT_ENABLED == 'true' }}");
-  assert.deepEqual(job.permissions, { contents: 'read', actions: 'read' });
+  assert.deepEqual(job.permissions, { contents: 'read', actions: 'read', 'pull-requests': 'read' });
   assert.equal(job['timeout-minutes'], 10);
   assert.equal(job['continue-on-error'], undefined);
   assert.match(job.steps[0].run, /test "\$GITHUB_REF" = "refs\/heads\/\$DEFAULT_BRANCH"/);
+  assert.match(job.steps[0].run, /test "\$GITHUB_RUN_ATTEMPT" = '1'/);
   const checkout = job.steps.find((step) => step.uses?.startsWith('actions/checkout@'));
   assert.equal(checkout.with.ref, '${{ github.sha }}');
   assert.equal(checkout.with['persist-credentials'], false);
@@ -1045,9 +1445,16 @@ test('improvement workflow is opt-in, default-branch-only, read-only and artifac
   assert.ok(job.steps.every((step) => step['continue-on-error'] === undefined));
   const retained = job.steps.find((step) => step.uses?.startsWith('actions/upload-artifact@'));
   assert.match(retained.if, /always\(\)/);
-  assert.equal(retained.with['retention-days'], 7);
+  assert.equal(retained.with['retention-days'], IMPROVEMENT_LIMITS.retentionDays);
   assert.equal(retained.with['if-no-files-found'], 'error');
   assert.match(retained.with.path, /report\.json/);
+  const originals = job.steps.find((step) =>
+    step.with?.name?.startsWith('continuous-improvement-evidence-'),
+  );
+  assert.equal(originals.if, "${{ success() && steps.review.outcome == 'success' }}");
+  assert.equal(originals.with['retention-days'], IMPROVEMENT_LIMITS.retentionDays);
+  assert.equal(originals.with.path, '${{ steps.review.outputs.evidence-path }}');
+  assert.equal(originals.with['if-no-files-found'], 'error');
   assert.ok(job.steps.some((step) => step.run === 'npm run improvement:report'));
   const registry = JSON.parse(
     fs.readFileSync(path.join(REPO, '.github/improvement-regressions.json'), 'utf8'),
@@ -1075,6 +1482,7 @@ test('improvement runner preserves the checkout and separates local from workflo
     GITHUB_RUN_ATTEMPT: '1',
     GITHUB_SERVER_URL: 'https://github.com',
     GITHUB_API_URL: 'https://api.github.com',
+    GITHUB_OUTPUT: path.join(history.root, 'step-outputs'),
   };
   const result = await runImprovementReview(history.root, { env, event, client: history.client });
   assert.equal(result.report.status, 'reported');
@@ -1082,6 +1490,17 @@ test('improvement runner preserves the checkout and separates local from workflo
   assert.equal(result.report.source, 'github-actions');
   assert.ok(fs.existsSync(path.join(history.root, result.outputDirectory, 'report.json')));
   assert.ok(fs.existsSync(path.join(history.root, result.outputDirectory, 'summary.md')));
+  const retainedBundle = JSON.parse(
+    fs.readFileSync(path.join(history.root, result.outputDirectory, 'evidence.json'), 'utf8'),
+  );
+  assert.equal(retainedBundle.kind, 'retained-improvement-evidence');
+  assert.deepEqual(retainedBundle.collector, result.report.collector);
+  assert.deepEqual(retainedBundle.entries, []);
+  assert.equal(result.report.retainedEvidence, undefined);
+  assert.equal(
+    fs.readFileSync(env.GITHUB_OUTPUT, 'utf8'),
+    `evidence-path=${result.outputDirectory}/evidence.json\n`,
+  );
   assert.equal(
     fs.readFileSync(path.join(history.root, '.slipstream/user-sentinel'), 'utf8'),
     'Do not touch user data',
@@ -1094,6 +1513,7 @@ test('improvement runner preserves the checkout and separates local from workflo
     { GITHUB_REPOSITORY: 'untrusted/fork' },
     { GITHUB_API_URL: 'https://untrusted.invalid' },
     { GITHUB_RUN_ID: '' },
+    { GITHUB_RUN_ATTEMPT: '2' },
     { GITHUB_SHA: 'HEAD' },
   ])
     assert.throws(() => improvementIdentity({ ...env, ...invalid }, event));
@@ -1109,6 +1529,10 @@ test('improvement runner preserves the checkout and separates local from workflo
   const local = await runImprovementReview(history.root, { env: {}, input });
   assert.equal(local.report.source, 'local-unverified');
   assert.equal(local.report.collector, undefined);
+  assert.equal(
+    fs.existsSync(path.join(history.root, local.outputDirectory, 'evidence.json')),
+    false,
+  );
   assert.equal(local.report.comparisons[0].findings[0].fixVerified, false);
   assert.notEqual(local.outputDirectory, result.outputDirectory);
   await assert.rejects(runImprovementReview(history.root, { env, event, input }));
