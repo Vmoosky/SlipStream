@@ -1,3 +1,4 @@
+import { runInNewContext } from 'node:vm';
 import { describe, expect, it } from 'vitest';
 
 import {
@@ -46,6 +47,47 @@ describe('looksLikeTabular', () => {
 
   it('is true for a markdown table', () => {
     expect(looksLikeTabular(markdownTable(30))).toBe(true);
+  });
+
+  it.each([
+    '---',
+    '| --- |',
+    '--- | :---: | ---:',
+    '\t|\t:---- \t| :---: |\t---:| \t',
+    '\u00a0| :--- | ---: | :---: |\u00a0',
+  ])('accepts a markdown alignment separator: %s', (separator) => {
+    const lines = markdownTable(30);
+    lines[1] = separator;
+    expect(looksLikeTabular(lines)).toBe(true);
+    expect(planTabularCompression(lines)?.format).toBe('markdown');
+  });
+
+  it.each([
+    '--',
+    '| -- |',
+    '|| --- |',
+    '| --- || --- |',
+    '| :- -: |',
+    '| :---:: |',
+    '| --- | !',
+    '| --- |\u200b',
+    '| --- ||',
+  ])('rejects a malformed markdown alignment separator: %s', (separator) => {
+    const lines = markdownTable(30);
+    lines[1] = separator;
+    expect(looksLikeTabular(lines)).toBe(false);
+    expect(planTabularCompression(lines)).toBeNull();
+  });
+
+  it.each(['', '|', '| --- |'])('bounds whitespace before a failing cell after %s', (prefix) => {
+    const lines = markdownTable(30);
+    lines[1] = prefix + ' '.repeat(200_000) + '!';
+    expect(runInNewContext('looksLikeTabular(lines)', { looksLikeTabular, lines }, {
+      timeout: 1000,
+    })).toBe(false);
+    expect(runInNewContext('planTabularCompression(lines)', { planTabularCompression, lines }, {
+      timeout: 1000,
+    })).toBeNull();
   });
 
   it('is true for a CSV block', () => {

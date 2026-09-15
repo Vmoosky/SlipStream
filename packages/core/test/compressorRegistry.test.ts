@@ -1,6 +1,8 @@
+import { runInNewContext } from 'node:vm';
 import { describe, expect, it, vi } from 'vitest';
 
 import { CompressorRegistry, DEFAULT_COMPRESSORS, type CompressionInput, type Compressor } from '../src/compressors/compressorRegistry.js';
+import { detectContentKind } from '../src/contentRouter.js';
 import { DEFAULT_ENGINE_CONFIG } from '../src/engine.js';
 
 function input(patch: Partial<CompressionInput> = {}): CompressionInput {
@@ -20,6 +22,28 @@ function compressor(name: string): Compressor {
     compress: vi.fn(() => ({ strategy: name, segments: [] })),
   };
 }
+
+describe('detectContentKind', () => {
+  it.each(['\n', '\r\n', '\r', '\u2028', '\u2029'])('detects indented stack frames after %j', (separator) => {
+    const text = `plain preamble${separator.repeat(3)}\t\u00a0at work (module.js:1)`;
+    expect(detectContentKind(text)).toBe('log');
+  });
+
+  it.each(['\v\f\ufeffFile "script.py", line 2', '  at work (module.js:1)', 'npm ERR! build failed'])('preserves log detection for %j', (text) => {
+    expect(detectContentKind(text)).toBe('log');
+  });
+
+  it.each(['plain text at work', 'metadata File "script.py"', 'info about a passing test'])('keeps non-log prose: %s', (text) => {
+    expect(detectContentKind(text)).toBe('text');
+  });
+
+  it('bounds work across many blank lines without a log marker', () => {
+    const text = '\n'.repeat(200_000) + '!';
+    expect(runInNewContext('detectContentKind(text)', { detectContentKind, text }, {
+      timeout: 1000,
+    })).toBe('text');
+  });
+});
 
 describe('CompressorRegistry', () => {
   it('selects the first successful plan and skips later detectors', () => {
@@ -102,6 +126,20 @@ describe('CompressorRegistry', () => {
   it('falls through a declined structured plan to the opaque-blob fallback', () => {
     const text = JSON.stringify({ payload: 'abcdef0123456789'.repeat(500) });
     expect(new CompressorRegistry().compress(input({ text, lines: [text] }))?.strategy).toBe('blob');
+  });
+
+  it('bounds a long non-path that reaches prefix matching after the blob stage declines', () => {
+    const prefix = DEFAULT_COMPRESSORS.find((candidate) => candidate.name === 'prefix')!;
+    const prefixCompress = vi.fn(prefix.compress);
+    const registry = new CompressorRegistry(DEFAULT_COMPRESSORS.map((candidate) => (
+      candidate.name === 'prefix' ? { ...candidate, compress: prefixCompress } : candidate
+    )));
+    const text = '+'.repeat(200_000) + ' '.repeat(100_000) + '!';
+    const request = input({ text, lines: [text] });
+    expect(runInNewContext('registry.compress(request)', { registry, request }, {
+      timeout: 1000,
+    })).toBeNull();
+    expect(prefixCompress).toHaveBeenCalledOnce();
   });
 
   it('keeps unsupported file reads out of output-only compressors', () => {

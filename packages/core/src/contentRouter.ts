@@ -5,7 +5,7 @@ import type { ContentKind } from './types.js';
 
 const DIFF_RE = /^diff --git |^@@ -\d+(,\d+)? \+\d+(,\d+)? @@/m;
 const LOGGY_RE =
-  /(^|\n)\s*(at |File ")|\b(ERROR|WARN|INFO|DEBUG|FAIL|PASS)\b|\berror TS\d{4}\b|^npm (ERR!|WARN)/m;
+  /^[^\S\r\n\u2028\u2029]*(at |File ")|\b(ERROR|WARN|INFO|DEBUG|FAIL|PASS)\b|\berror TS\d{4}\b|^npm (ERR!|WARN)/m;
 
 const CODE_EXTENSIONS = new Set([
   '.ts', '.tsx', '.js', '.jsx', '.mjs', '.cjs', '.py', '.rs', '.go', '.java',

@@ -59,7 +59,7 @@ export interface BlobPlan {
   omittedChars: number;
 }
 
-const DATA_URI_RE = /data:[^\s,;]*;base64,/i;
+const DATA_URI_TOKEN_RE = /[^\s,;]+/g;
 const OPAQUE_CHAR_RE = /[A-Za-z0-9+/=_-]/;
 
 /** Longest contiguous run of base64/hex/url-safe chars as a fraction of length. */
@@ -98,7 +98,12 @@ export function isOpaqueBlobLine(
 ): boolean {
   const cfg = { ...DEFAULT_BLOB_CONFIG, ...config };
   if (line.length < cfg.minLineLength) return false;
-  if (DATA_URI_RE.test(line)) return true;
+  for (const token of line.matchAll(DATA_URI_TOKEN_RE)) {
+    const endOffset = token.index + token[0].length;
+    if (line.slice(endOffset, endOffset + 8).toLowerCase() === ';base64,' && /data:/i.test(token[0])) {
+      return true;
+    }
+  }
   const trimmed = line.trim();
   if (opaqueRunFraction(trimmed) >= cfg.opaqueRatio) return true;
   if (whitespaceFraction(line) <= cfg.maxWhitespaceRatio) return true;

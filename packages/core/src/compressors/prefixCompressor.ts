@@ -53,8 +53,8 @@ const PLACEHOLDER_CHAR = '\u00A7';
 const LEGEND_START = '\u27E6slipstream path legend\u27E7';
 const LEGEND_END = '\u27E6end path legend\u27E7';
 
-/** Matches path-like runs (at least two path separators), unix or windows. */
-const PATH_RE = /(?:[A-Za-z]:)?[\w.@+-]*(?:[\\/][\w.@+-]+){2,}/g;
+/** Consume runs before checking path depth, without retrying failed suffixes. */
+const PATH_TOKEN_RE = /[\w.@+-]+(?:[\\/][\w.@+-]+)*/g;
 
 interface Candidate {
   prefix: string;
@@ -85,7 +85,26 @@ export function planPrefixFold(
   const cfg = { ...DEFAULT_PREFIX_CONFIG, ...config };
   if (text === '' || text.includes(PLACEHOLDER_CHAR)) return null;
 
-  const paths = text.match(PATH_RE) ?? [];
+  const paths: string[] = [];
+  let matchedThrough = 0;
+  for (const token of text.matchAll(PATH_TOKEN_RE)) {
+    let startOffset = token.index;
+    let separators = (token[0].match(/[\\/]/g) ?? []).length;
+    if (text[startOffset - 1] === '/' || text[startOffset - 1] === '\\') {
+      startOffset--;
+      separators++;
+    }
+    if (separators < 2) continue;
+    if (
+      startOffset - 2 >= matchedThrough &&
+      text[startOffset - 1] === ':' &&
+      /[A-Za-z]/.test(text[startOffset - 2] ?? '')
+    ) {
+      startOffset -= 2;
+    }
+    matchedThrough = token.index + token[0].length;
+    paths.push(text.slice(startOffset, matchedThrough));
+  }
   if (paths.length < cfg.minOccurrences) return null;
 
   // Count how many path tokens start with each candidate directory prefix.
