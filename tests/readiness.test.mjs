@@ -129,12 +129,7 @@ test('workspaces build in dependency order including the source-bundled plugin',
 });
 
 test('branch protection verification keeps the supported unit matrix intact', () => {
-  assert.deepEqual(UNIT_JOBS, [
-    'linux-node20',
-    'linux-node22',
-    'linux-node24',
-    'verification-intentional-failure',
-  ]);
+  assert.deepEqual(UNIT_JOBS, ['linux-node20', 'linux-node22', 'linux-node24', 'windows-node24']);
 });
 
 test('valid unit and browser evidence records exact provenance', (context) => {
