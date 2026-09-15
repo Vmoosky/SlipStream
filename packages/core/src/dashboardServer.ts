@@ -139,12 +139,12 @@ export async function startDashboardServer(
   const events = createDashboardEventHub(engine, options);
 
   const server = http.createServer((request, response) => {
-    void handleRequest(engine, options, events, server, request, response).catch((error: unknown) => {
+    void handleRequest(engine, options, events, server, request, response).catch(() => {
       send(
         response,
         500,
         'application/json',
-        JSON.stringify({ error: error instanceof Error ? error.message : String(error) }),
+        JSON.stringify({ error: 'Internal server error.' }),
       );
     });
   });
@@ -413,8 +413,8 @@ async function handleRequest(
     let change: ReturnType<typeof parseCostPolicyPatch>;
     try {
       change = parseCostPolicyPatch(JSON.parse(await readRequestBody(request)));
-    } catch (error) {
-      send(response, 400, 'application/json', JSON.stringify({ error: String(error) }));
+    } catch {
+      send(response, 400, 'application/json', JSON.stringify({ error: 'Invalid cost policy request.' }));
       return;
     }
     if (change.expectedRevision !== engine.getCostPolicyAssessment().policyRevision) {
@@ -440,11 +440,14 @@ async function handleRequest(
     let patch: Partial<EngineConfig>;
     try {
       patch = parseConfigPatch(JSON.parse(await readRequestBody(request)));
-      engine.updateConfig(patch);
     } catch (error) {
-      send(response, 400, 'application/json', JSON.stringify({ error: String(error) }));
+      const message = error instanceof ConfigValidationError
+        ? CONFIG_VALIDATION_MESSAGES[error.field]
+        : 'Invalid configuration request.';
+      send(response, 400, 'application/json', JSON.stringify({ error: message }));
       return;
     }
+    engine.updateConfig(patch);
     await options.onConfigChanged?.(engine.getConfig(), engine.getConfigOverrides());
     const payload = buildSummaryPayload(engine, events.status());
     send(response, 200, 'application/json', JSON.stringify(payload));
@@ -579,24 +582,46 @@ function readRequestBody(request: http.IncomingMessage): Promise<string> {
   });
 }
 
+const CONFIG_VALIDATION_MESSAGES = {
+  object: 'Config patch must be an object',
+  pricing: 'Pricing is managed automatically from request models',
+  costPolicy: 'Cost policy is managed by the host configuration',
+  usdPerMillionTokens: 'Fallback input rate must be a non-negative finite number',
+  profile: 'Unknown compression profile',
+  enabled: 'enabled must be a boolean',
+  compressLogs: 'compressLogs must be a boolean',
+  readLifecycle: 'readLifecycle must be a boolean',
+  crossTurnDedup: 'crossTurnDedup must be a boolean',
+  maxFileLines: 'maxFileLines must be between 50 and 20000',
+  artifactIdleTtlMinutes: 'artifactIdleTtlMinutes must be between 1 and 1440',
+  artifactMaxEntries: 'artifactMaxEntries must be between 1 and 100000',
+  artifactMaxTotalMiB: 'artifactMaxTotalMiB must be between 1 and 10240',
+} as const;
+
+class ConfigValidationError extends Error {
+  constructor(readonly field: keyof typeof CONFIG_VALIDATION_MESSAGES) {
+    super(CONFIG_VALIDATION_MESSAGES[field]);
+  }
+}
+
 export function parseConfigPatch(raw: unknown): Partial<EngineConfig> {
   if (!raw || typeof raw !== 'object') {
-    throw new Error('Config patch must be an object');
+    throw new ConfigValidationError('object');
   }
   const input = raw as Record<string, unknown>;
   const patch: Partial<EngineConfig> = {};
   if (input.pricing !== undefined) {
-    throw new Error('Pricing is managed automatically from request models');
+    throw new ConfigValidationError('pricing');
   }
   if (input.costPolicy !== undefined) {
-    throw new Error('Cost policy is managed by the host configuration');
+    throw new ConfigValidationError('costPolicy');
   }
   if (input.usdPerMillionTokens !== undefined) {
-    if (!validRate(input.usdPerMillionTokens)) throw new Error('Fallback input rate must be a non-negative finite number');
+    if (!validRate(input.usdPerMillionTokens)) throw new ConfigValidationError('usdPerMillionTokens');
     patch.usdPerMillionTokens = input.usdPerMillionTokens;
   }
   if (input.profile !== undefined) {
-    if (!isCompressionProfile(input.profile)) throw new Error('Unknown compression profile');
+    if (!isCompressionProfile(input.profile)) throw new ConfigValidationError('profile');
     patch.profile = input.profile;
   }
   readBoolean(input, patch, 'enabled');
@@ -628,19 +653,19 @@ export function parseCostPolicyPatch(raw: unknown): { policy: CostPolicy; expect
   return { policy, expectedRevision: input.expectedRevision };
 }
 
-function readBoolean<T extends keyof EngineConfig>(
+function readBoolean<T extends 'enabled' | 'compressLogs' | 'readLifecycle' | 'crossTurnDedup'>(
   input: Record<string, unknown>,
   patch: Partial<EngineConfig>,
   key: T,
 ): void {
   if (input[key] === undefined) return;
   if (typeof input[key] !== 'boolean') {
-    throw new Error(`${String(key)} must be a boolean`);
+    throw new ConfigValidationError(key);
   }
   patch[key] = input[key] as EngineConfig[T];
 }
 
-function readNumber<T extends keyof EngineConfig>(
+function readNumber<T extends 'maxFileLines' | 'artifactIdleTtlMinutes' | 'artifactMaxEntries' | 'artifactMaxTotalMiB'>(
   input: Record<string, unknown>,
   patch: Partial<EngineConfig>,
   key: T,
@@ -651,7 +676,7 @@ function readNumber<T extends keyof EngineConfig>(
   if (input[key] === undefined) return;
   const value = Number(input[key]);
   if (!Number.isFinite(value) || value < min || value > max) {
-    throw new Error(`${String(key)} must be between ${min} and ${max}`);
+    throw new ConfigValidationError(key);
   }
   const rounded = step >= 1 ? Math.round(value) : Math.round(value / step) * step;
   patch[key] = rounded as EngineConfig[T];

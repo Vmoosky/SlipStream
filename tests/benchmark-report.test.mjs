@@ -50,3 +50,22 @@ test('formats shareable benchmark Markdown safely', () => {
   assert.match(markdown, /vitest run \\\| failures/);
   assert.match(markdown, /Every omitted marker was expanded/);
 });
+
+test('preserves literal backslashes in Markdown scenario and detail cells', () => {
+  const cases = [
+    ['left|right', String.raw`left\|right`],
+    [String.raw`left\|right`, String.raw`left\\\|right`],
+    [String.raw`left\\|right`, String.raw`left\\\\\|right`],
+    [String.raw`left\\\|right`, String.raw`left\\\\\\\|right`],
+    ['C:\\workspace\\test\\', 'C:\\\\workspace\\\\test\\\\'],
+    ['first\r\nsecond\nthird', 'first second third'],
+  ];
+  const markdown = formatBenchmarkMarkdown(
+    cases.map(([value]) => ({ scenario: value, before: 10, after: 5, saved: 5, detail: value })),
+    { compressions: cases.length, retrievals: 0, estimatedCostSavedUsd: 0 },
+    new Date('2026-09-15T00:00:00.000Z'),
+  );
+  for (const [, escaped] of cases) {
+    assert.ok(markdown.includes(`| ${escaped} | 10 | 5 | 50.0% | ${escaped} |`));
+  }
+});

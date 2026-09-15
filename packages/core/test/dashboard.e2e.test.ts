@@ -865,6 +865,32 @@ describe('dashboard end to end', () => {
     expect(csv).toContain('"event","$ npm test"');
   });
 
+  it('preserves literal backslashes in Markdown activity labels', async () => {
+    const { engine, root, server } = await startSeededDashboard();
+    const cases = [
+      ['left|right', String.raw`left\|right`],
+      [String.raw`left\|right`, String.raw`left\\\|right`],
+      [String.raw`left\\|right`, String.raw`left\\\\\|right`],
+      [String.raw`left\\\|right`, String.raw`left\\\\\\\|right`],
+      ['C:\\workspace\\test\\', 'C:\\\\workspace\\\\test\\\\'],
+    ] as const;
+    try {
+      for (const [label] of cases) {
+        engine.compressCommandOutput({
+          command: label, cwd: root, exitCode: 0, stdout: 'test output', stderr: '', durationMs: 1,
+        });
+      }
+      const response = await fetch(`${server.url}api/report.md`);
+      expect(response.status).toBe(200);
+      const markdown = await response.text();
+      for (const [, escaped] of cases) {
+        expect(markdown).toContain(`| $ ${escaped} |`);
+      }
+    } finally {
+      engine.dispose();
+    }
+  });
+
   it('updates runtime config from the local dashboard API', async () => {
     let persistedConfig: unknown;
     const { engine, server } = await startSeededDashboard({ onConfigChanged: (config) => (persistedConfig = config) });
