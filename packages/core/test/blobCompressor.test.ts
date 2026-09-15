@@ -1,3 +1,4 @@
+import { runInNewContext } from 'node:vm';
 import { describe, it, expect } from 'vitest';
 import {
   planBlobCompression,
@@ -46,6 +47,31 @@ describe('isOpaqueBlobLine', () => {
 
   it('flags a base64 data URI', () => {
     expect(isOpaqueBlobLine(dataUri)).toBe(true);
+  });
+
+  it.each([
+    'data:;base64,',
+    'DATA:image/png;BASE64,',
+    'prefixdata:data:image/png;base64,',
+  ])('recognizes a data URI header inside prose: %s', (header) => {
+    expect(isOpaqueBlobLine('payload description '.repeat(140) + header)).toBe(true);
+  });
+
+  it.each([
+    'data:image/png ;base64,',
+    'data:image/png,other;base64,',
+    'data:image/png;charset=utf8;base64,',
+    'data:image/png; base64,',
+    'data:image/png;base64!',
+  ])('does not recognize a malformed data URI header: %s', (header) => {
+    expect(isOpaqueBlobLine('payload description '.repeat(140) + header)).toBe(false);
+  });
+
+  it('bounds work for repeated data URI prefixes without a terminator', () => {
+    const input = 'data:'.repeat(50_000);
+    expect(runInNewContext('isOpaqueBlobLine(input)', { isOpaqueBlobLine, input }, {
+      timeout: 1000,
+    })).toBe(true);
   });
 
   it('flags a long low-whitespace minified line', () => {
