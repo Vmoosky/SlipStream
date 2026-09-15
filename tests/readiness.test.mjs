@@ -149,6 +149,27 @@ function developmentFixture(context) {
   return { root, npmCli, nodeVersion: '24.14.1', log: () => {} };
 }
 
+test('development runner retains LF in Windows-style Git checkouts', (context) => {
+  const { root } = fixture(context);
+  const file = 'scripts/develop.mjs';
+  const checkout = path.join(root, 'windows checkout');
+  fs.mkdirSync(path.join(root, 'scripts'));
+  fs.copyFileSync(path.join(REPO, '.gitattributes'), path.join(root, '.gitattributes'));
+  fs.copyFileSync(path.join(REPO, file), path.join(root, file));
+  const git = (args) =>
+    execFileSync(
+      'git',
+      ['-C', root, '-c', 'core.autocrlf=true', '-c', 'core.safecrlf=false', ...args],
+      { stdio: 'pipe' },
+    );
+  git(['init', '--quiet']);
+  git(['add', '--', '.gitattributes', file]);
+  git(['checkout-index', `--prefix=${checkout.replaceAll(path.sep, '/')}/`, '--', file]);
+  const checkedOut = fs.readFileSync(path.join(checkout, file), 'utf8');
+  assert.equal(checkedOut.includes('\r\n'), false, 'Git checkout must keep LF for Prettier');
+  assert.equal(checkedOut, fs.readFileSync(path.join(REPO, file), 'utf8'));
+});
+
 test('development setup rejects invalid modes and Node pins before running commands', async (context) => {
   const options = developmentFixture(context);
   let calls = 0;
