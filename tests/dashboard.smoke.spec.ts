@@ -16,7 +16,7 @@ import { startDashboardServer, type DashboardServerHandle } from '../packages/co
 import { jestFailureLog, sourceFile } from '../packages/core/test/fixtures.js';
 import { createChatHookConfig } from '../packages/extension/src/chatHooks.js';
 import { recordModelObservation, startModelTelemetryReceiver } from '../packages/extension/src/modelTelemetry.js';
-import type { DashboardModelTrackingStatus } from '../packages/core/src/dashboard.js';
+import { buildSummaryPayload, type DashboardModelTrackingStatus } from '../packages/core/src/dashboard.js';
 
 test('standalone model tracking reaches the connected runtime in the same tab', async ({ page }) => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'slipstream-model-tracking-manage-'));
@@ -769,11 +769,18 @@ for (const width of [1280, 390]) {
       await scroll.scrollIntoViewIfNeeded();
       await scroll.focus();
       await expect(scroll).toBeFocused();
+      await scroll.evaluate((element) => {
+        element.addEventListener('scrollend', () => element.setAttribute('data-keyboard-scroll-settled', 'true'), { once: true });
+      });
       await scroll.press('ArrowRight');
       await expect.poll(() => scroll.evaluate((element) => element.scrollLeft)).toBeGreaterThan(0);
+      await expect(scroll).toHaveAttribute('data-keyboard-scroll-settled', 'true');
       await scroll.evaluate((element) => {
         const component = element.querySelector('.modelInputBreakdown')!;
-        element.scrollLeft += component.getBoundingClientRect().left - element.getBoundingClientRect().left;
+        element.scrollTo({
+          left: element.scrollLeft + component.getBoundingClientRect().left - element.getBoundingClientRect().left,
+          behavior: 'instant',
+        });
       });
       const componentBounds = await observations.first().locator('.modelInputBreakdown').boundingBox();
       const componentScrollBounds = await scroll.boundingBox();
@@ -1825,6 +1832,10 @@ test('dashboard renders audit, inspector, diff mode and exact model payload', as
     await expect(page.locator('#history')).toContainText('%');
 
     await page.getByRole('tab', { name: 'Activity' }).click();
+    const commandEvent = buildSummaryPayload(engine).events.find((event) => event.tool === 'run_command')!;
+    const retrievalEvent = engine.recentEvents().find((event) => event.tool === 'retrieve_artifact')!;
+    engine.ledger.record({ ...retrievalEvent, ts: commandEvent.ts });
+    await expect(page.locator('#events tr.event')).toHaveCount(5);
     await page.locator('#events tr.event').filter({ hasText: '$ npm test' }).first().click();
     await expect(page.getByRole('heading', { name: 'What was removed' })).toBeVisible();
     await expect(page.locator('#modelPayloadMeta')).toContainText('Exact payload:');
@@ -1838,6 +1849,11 @@ test('dashboard renders audit, inspector, diff mode and exact model payload', as
 
     const payloadUrl = await page.locator('#modelPayloadLink').getAttribute('href');
     expect(payloadUrl).toContain('api/model-payload?');
+    const target = new URL(payloadUrl!, server.url);
+    expect(target.searchParams.get('eventId')).toBe(commandEvent.eventId);
+    const payload = await page.request.get(target.toString());
+    expect(payload.status()).toBe(200);
+    expect(await payload.text()).toBe(command.text);
   } finally {
     await server?.close();
     fs.rmSync(root, { recursive: true, force: true });

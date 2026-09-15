@@ -321,6 +321,7 @@ test('security workflow isolates write permission and never builds untrusted PR 
   assert.deepEqual(workflow.permissions, { contents: 'read' });
   assert.deepEqual(workflow.jobs.codeql.permissions, {
     contents: 'read',
+    actions: 'read',
     'security-events': 'write',
   });
   assert.ok(workflow.jobs.codeql.steps.every((step) => !step.run));

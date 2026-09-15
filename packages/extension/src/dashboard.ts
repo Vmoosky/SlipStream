@@ -138,10 +138,11 @@ export class DashboardPanel {
       { dispose: this.engine.ledger.onRecord(() => this.post()) },
       { dispose: watchLedgerChanges(this.engine.ledger.path(), () => this.post()) },
       { dispose: this.engine.pricing.onChange(() => this.post()) },
-      this.panel.webview.onDidReceiveMessage((message: { type?: string; ts?: number; patch?: Partial<EngineConfig>; action?: unknown; policy?: unknown; expectedRevision?: unknown; request?: unknown; requestId?: unknown }) => {
+      this.panel.webview.onDidReceiveMessage((message: { type?: string; ts?: number; eventId?: unknown; patch?: Partial<EngineConfig>; action?: unknown; policy?: unknown; expectedRevision?: unknown; request?: unknown; requestId?: unknown }) => {
         if (message?.type === 'ready') this.post();
-        if (message?.type === 'inspect' && typeof message.ts === 'number') {
-          this.postDetail(message.ts);
+        if (message?.type === 'inspect' && typeof message.ts === 'number' && Number.isFinite(message.ts)) {
+          if (message.eventId !== undefined && typeof message.eventId !== 'string') return;
+          this.postDetail(message.ts, message.eventId);
         }
         if (message?.type === 'config' && message.patch) {
           void this.applyConfigPatch(message.patch).catch((error: unknown) => {
@@ -238,8 +239,8 @@ export class DashboardPanel {
     }));
   }
 
-  private postDetail(ts: number): void {
-    const payload = buildDetailPayload(this.engine, ts);
+  private postDetail(ts: number, eventId?: string): void {
+    const payload = buildDetailPayload(this.engine, ts, eventId);
     if (payload) void this.panel.webview.postMessage(payload);
   }
 

@@ -668,7 +668,8 @@ describe('dashboard end to end', () => {
     expect(runEvent!.strategy).toMatch(/^log:/);
     expect(runEvent!.durationMs).toEqual(expect.any(Number));
 
-    const detail = await json<DashboardDetailPayload>(`${server.url}api/detail?t=&ts=${runEvent!.ts}`);
+    const selector = new URLSearchParams({ ts: String(runEvent!.ts), eventId: runEvent!.eventId! });
+    const detail = await json<DashboardDetailPayload>(`${server.url}api/detail?t=&${selector}`);
     expect(detail.type).toBe('detail');
     expect(detail.label).toBe('$ npm test');
     expect(detail.strategy).toBe(runEvent!.strategy);
@@ -688,10 +689,69 @@ describe('dashboard end to end', () => {
     expect(detail.after).toContain('retrieve_artifact');
     expect(detail.omitted.length).toBeGreaterThan(0);
 
-    const payload = await fetch(`${server.url}api/model-payload?t=&ts=${runEvent!.ts}`);
+    const payload = await fetch(`${server.url}api/model-payload?t=&${selector}`);
     expect(payload.status).toBe(200);
     expect(payload.headers.get('content-type')).toContain('text/plain');
     expect(await payload.text()).toBe(detail.after);
+  });
+
+  it('keeps command details distinct from retrievals recorded in the same millisecond', async () => {
+    const timestamp = Date.now();
+    const clock = vi.spyOn(Date, 'now').mockReturnValue(timestamp);
+    let seeded: Awaited<ReturnType<typeof startSeededDashboard>>;
+    try {
+      seeded = await startSeededDashboard();
+    } finally {
+      clock.mockRestore();
+    }
+    const { engine, root, server } = seeded;
+    engine.ledger.record(engine.recentEvents(1)[0]!);
+    const stored = fs.readFileSync(engine.ledger.path(), 'utf8');
+    const summary = await json<DashboardSummaryPayload>(`${server.url}api/summary?t=`);
+    const command = summary.events.find((event) => event.tool === 'run_command')!;
+    const retrieval = summary.events.find((event) => event.tool === 'retrieve_artifact')!;
+    expect(command.ts).toBe(retrieval.ts);
+    expect(new Set(summary.events.map((event) => event.eventId)).size).toBe(summary.events.length);
+
+    for (const event of summary.events) {
+      expect(event.eventId).toMatch(/^[a-f0-9]{64}:\d+$/);
+      const selector = new URLSearchParams({ ts: String(event.ts), eventId: event.eventId! });
+      const detail = await json<DashboardDetailPayload>(`${server.url}api/detail?t=&${selector}`);
+      expect(detail).toMatchObject({
+        eventId: event.eventId,
+        strategy: event.strategy,
+        tokensBefore: event.tokensBefore,
+        tokensAfter: event.tokensAfter,
+      });
+      expect(detail.before).toBe(engine.inspect(event).before);
+      expect(detail.after).toBe(engine.inspect(event).after);
+      const payload = await fetch(`${server.url}api/model-payload?t=&${selector}`);
+      expect(payload.status).toBe(event.renderedArtifactId ? 200 : 404);
+      expect(await payload.text()).toBe(detail.after ?? 'No such event');
+    }
+    const legacy = await json<DashboardDetailPayload>(`${server.url}api/detail?t=&ts=${command.ts}`);
+    expect(legacy.eventId).toBe(summary.events[0]!.eventId);
+    for (const route of ['detail', 'model-payload']) {
+      for (const selector of [
+        new URLSearchParams({ ts: String(command.ts), eventId: 'unknown' }),
+        new URLSearchParams({ ts: String(command.ts + 1), eventId: command.eventId! }),
+      ]) {
+        expect((await fetch(`${server.url}api/${route}?t=&${selector}`)).status).toBe(404);
+      }
+    }
+    expect(fs.readFileSync(engine.ledger.path(), 'utf8')).toBe(stored);
+    const observer = new CompressionEngine({ rootDir: root, workspaceRoots: [root] });
+    try {
+      expect(buildSummaryPayload(observer).events.map((event) => event.eventId)).toEqual(
+        summary.events.map((event) => event.eventId),
+      );
+    } finally {
+      observer.dispose();
+    }
+    engine.recordChatSubmitted();
+    expect(buildSummaryPayload(engine).events.slice(1).map((event) => event.eventId)).toEqual(
+      summary.events.map((event) => event.eventId),
+    );
   });
 
   it('pushes summary updates from other sessions through an event stream', async () => {

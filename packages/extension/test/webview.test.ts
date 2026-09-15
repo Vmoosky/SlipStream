@@ -3,7 +3,7 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 
 import { describe, expect, it, vi } from 'vitest';
-import { CompressionEngine, OwnedTaskUsage, recordTaskOutcome, taskWorkspaceKey, type CostPolicy } from '@slipstream/core';
+import { buildSummaryPayload, CompressionEngine, OwnedTaskUsage, recordTaskOutcome, taskWorkspaceKey, type CostPolicy } from '@slipstream/core';
 
 /**
  * The dashboard's script and markup live inside a template literal in
@@ -30,6 +30,46 @@ function inlineScript(): string {
 }
 
 describe('dashboard webview', () => {
+  it('routes exact inspect selectors and rejects invalid selectors without timestamp fallback', async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'slipstream-inspect-webview-'));
+    const engine = new CompressionEngine({ rootDir: root, workspaceRoots: [root] });
+    engine.ledger.record({
+      ts: Date.now(), tool: 'run_command', label: 'Command', strategy: 'log:jest',
+      tokensBefore: 10, tokensAfter: 5, bytesBefore: 100, bytesAfter: 50, linesBefore: 10, linesAfter: 5,
+    });
+    engine.ledger.record({ ...engine.recentEvents(1)[0]!, tool: 'retrieve_artifact', strategy: 'retrieve' });
+    const events = buildSummaryPayload(engine).events;
+    let receive!: (message: Record<string, unknown>) => void;
+    let disposePanel: (() => void) | undefined;
+    const postMessage = vi.fn().mockResolvedValue(true);
+    const panel = { webview: { html: '', postMessage, onDidReceiveMessage: (handler: typeof receive) => { receive = handler; return { dispose() {} }; } },
+      onDidDispose: (handler: () => void) => { disposePanel = handler; return { dispose() {} }; } };
+    vi.resetModules();
+    vi.doMock('vscode', () => ({ window: { createWebviewPanel: () => panel }, ViewColumn: { Beside: 2 }, ThemeIcon: class {} }));
+    try {
+      const { DashboardPanel } = await import('../src/dashboard.js');
+      DashboardPanel.show({ subscriptions: [] } as unknown as import('vscode').ExtensionContext, engine);
+      for (const event of events) {
+        postMessage.mockClear();
+        receive({ type: 'inspect', ts: event.ts, eventId: event.eventId });
+        expect(postMessage).toHaveBeenCalledWith(expect.objectContaining({ type: 'detail', eventId: event.eventId, strategy: event.strategy }));
+      }
+      for (const eventId of ['unknown', '', 123, null, {}]) {
+        postMessage.mockClear();
+        receive({ type: 'inspect', ts: events[0]!.ts, eventId });
+        expect(postMessage).not.toHaveBeenCalled();
+      }
+      receive({ type: 'inspect', ts: events[0]!.ts });
+      expect(postMessage).toHaveBeenCalledWith(expect.objectContaining({ type: 'detail', eventId: events[0]!.eventId }));
+    } finally {
+      disposePanel?.();
+      engine.dispose();
+      fs.rmSync(root, { recursive: true, force: true });
+      vi.doUnmock('vscode');
+      vi.resetModules();
+    }
+  });
+
   it('routes read-only model-list messages without saving and rejects unavailable access', async () => {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), 'slipstream-model-list-webview-'));
     const engine = new CompressionEngine({ rootDir: root, workspaceRoots: [root] });

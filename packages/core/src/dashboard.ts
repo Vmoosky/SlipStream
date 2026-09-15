@@ -1,3 +1,5 @@
+import { createHash } from 'node:crypto';
+
 import { Activity, Check, ChevronDown, Download, Info, Palette, Plug, RefreshCw, RotateCcw, Settings2, TriangleAlert, Unplug, X, type IconNode } from 'lucide';
 
 import type { CompressionEngine } from './engine.js';
@@ -16,6 +18,10 @@ import type { LedgerEntry, SavingsSummary } from './types.js';
 export interface OmittedRange {
   startLine: number;
   endLine: number;
+}
+
+export interface DashboardEvent extends LedgerEntry {
+  eventId?: string;
 }
 
 export interface DashboardSummaryPayload {
@@ -58,7 +64,7 @@ export interface DashboardSummaryPayload {
   wasteSignals: DashboardWasteSignal[];
   costAttribution: DashboardCostAttributionPayload;
   comparison: DashboardComparisonPayload;
-  events: LedgerEntry[];
+  events: DashboardEvent[];
 }
 
 export interface DashboardComparisonDelta {
@@ -264,7 +270,7 @@ export interface DashboardOutputGroup {
   label: string;
   calls: number;
   tokensSaved: number;
-  events: LedgerEntry[];
+  events: DashboardEvent[];
 }
 
 export interface DashboardWorkspaceAttributionItem {
@@ -380,6 +386,7 @@ export interface DashboardStrategyBreakdownItem {
 
 export interface DashboardTimelineItem {
   ts: number;
+  eventId?: string;
   time: string;
   kind: string;
   title: string;
@@ -394,6 +401,7 @@ export interface DashboardTimelineItem {
 export interface DashboardDetailPayload {
   type: 'detail';
   ts: number;
+  eventId?: string;
   label: string;
   strategy: string;
   tokensBefore: number;
@@ -473,12 +481,26 @@ function pickDetectedModelEvent(entries: readonly LedgerEntry[]): LedgerEntry | 
   return latest;
 }
 
+function recentDashboardEvents(entries: readonly LedgerEntry[], count: number): DashboardEvent[] {
+  const occurrences = new Map<string, number>();
+  const events: DashboardEvent[] = [];
+  entries.forEach((entry, index) => {
+    const fingerprint = createHash('sha256').update(JSON.stringify(entry)).digest('hex');
+    const occurrence = occurrences.get(fingerprint) ?? 0;
+    occurrences.set(fingerprint, occurrence + 1);
+    if (index >= entries.length - count) {
+      events.push({ ...entry, eventId: `${fingerprint}:${occurrence}` });
+    }
+  });
+  return events.reverse();
+}
+
 export function buildSummaryPayload(
   engine: CompressionEngine,
   status: DashboardServerStatus = { viewerConnections: 0 },
 ): DashboardSummaryPayload {
-  const events = engine.recentEvents(RECENT_WINDOW);
   const lifetimeEvents = engine.ledger.all();
+  const events = recentDashboardEvents(lifetimeEvents, RECENT_WINDOW);
   const config = buildConfigPayload(engine);
   const retrievalAudit = buildRetrievalAudit(engine, events);
   const modelEvent = pickDetectedModelEvent(lifetimeEvents);
@@ -1469,7 +1491,7 @@ function percentile(ascending: readonly number[], percent: number): number {
   return ascending[index] ?? 0;
 }
 
-function buildOutputGroups(events: readonly LedgerEntry[], currentSessionId: string): DashboardOutputGroup[] {
+function buildOutputGroups(events: readonly DashboardEvent[], currentSessionId: string): DashboardOutputGroup[] {
   const groups: DashboardOutputGroup[] = [
     {
       id: 'global',
@@ -1712,7 +1734,7 @@ function strategyFamily(entry: LedgerEntry): string {
   return 'Other';
 }
 
-function buildTimeline(events: readonly LedgerEntry[]): DashboardTimelineItem[] {
+function buildTimeline(events: readonly DashboardEvent[]): DashboardTimelineItem[] {
   return [...events]
     .sort((a, b) => a.ts - b.ts)
     .map((entry) => {
@@ -1734,6 +1756,7 @@ function buildTimeline(events: readonly LedgerEntry[]): DashboardTimelineItem[] 
 
       return {
         ts: entry.ts,
+        eventId: entry.eventId,
         time: new Date(entry.ts).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }),
         kind: timelineKind(entry),
         title: timelineTitle(entry),
@@ -1766,12 +1789,15 @@ function timelineTitle(entry: LedgerEntry): string {
   return entry.label;
 }
 
-/** `undefined` when no ledger entry has that timestamp. */
+/** `undefined` when no recent ledger entry matches the timestamp and optional event selector. */
 export function buildDetailPayload(
   engine: CompressionEngine,
   ts: number,
+  eventId?: string,
 ): DashboardDetailPayload | undefined {
-  const entry = engine.recentEvents(200).find((candidate) => candidate.ts === ts);
+  const entry = recentDashboardEvents(engine.ledger.all(), 200).find(
+    (candidate) => candidate.ts === ts && (eventId === undefined || candidate.eventId === eventId),
+  );
   if (!entry) return undefined;
 
   const { before, after } = engine.inspect(entry);
@@ -1788,6 +1814,7 @@ export function buildDetailPayload(
   return {
     type: 'detail',
     ts: entry.ts,
+    eventId: entry.eventId,
     label: entry.label,
     strategy: entry.strategy,
     tokensBefore: entry.tokensBefore,
@@ -1814,8 +1841,8 @@ function countOmittedLines(omitted: readonly OmittedRange[]): number {
   return omitted.reduce((total, range) => total + Math.max(0, range.endLine - range.startLine + 1), 0);
 }
 
-export function buildModelPayload(engine: CompressionEngine, ts: number): string | undefined {
-  return buildDetailPayload(engine, ts)?.after;
+export function buildModelPayload(engine: CompressionEngine, ts: number, eventId?: string): string | undefined {
+  return buildDetailPayload(engine, ts, eventId)?.after;
 }
 
 function renderIcon(node: IconNode): string {
@@ -2819,9 +2846,13 @@ export function renderDashboardHtml(nonce: string): string {
     }
   }
 
-  function requestDetail(ts) {
-    if (vscodeApi) vscodeApi.postMessage({ type: 'inspect', ts: ts });
-    else api('detail', { ts: String(ts) }).then((data) => { if (data) renderDetail(data); }).catch(() => {});
+  function requestDetail(ts, eventId) {
+    if (vscodeApi) vscodeApi.postMessage({ type: 'inspect', ts: ts, eventId: eventId });
+    else {
+      const query = { ts: String(ts) };
+      if (typeof eventId === 'string') query.eventId = eventId;
+      api('detail', query).then((data) => { if (data) renderDetail(data); }).catch(() => {});
+    }
   }
 
   function updateConfig(patch) {
@@ -3385,8 +3416,9 @@ export function renderDashboardHtml(nonce: string): string {
     }).catch(() => { requestSummary(); $('modelTrackingDetail').textContent = 'Model tracking update failed.'; });
   }
 
-  function modelPayloadUrl(ts) {
+  function modelPayloadUrl(ts, eventId) {
     const query = new URLSearchParams({ ts: String(ts) });
+    if (typeof eventId === 'string') query.set('eventId', eventId);
     query.set('t', token);
     return 'api/model-payload?' + query.toString();
   }
@@ -3575,12 +3607,12 @@ export function renderDashboardHtml(nonce: string): string {
     for (const e of list) {
       const row = document.createElement('tr');
       row.className = 'event';
-      if (e.ts === selected) row.classList.add('active');
+      if ((e.eventId || e.ts) === selected) row.classList.add('active');
       row.addEventListener('click', () => {
-        selected = e.ts;
+        selected = e.eventId || e.ts;
         for (const other of events.children) other.classList.remove('active');
         row.classList.add('active');
-        requestDetail(e.ts);
+        requestDetail(e.ts, e.eventId);
       });
       cell(row, e.label, 'label');
       const strategy = cell(row, '');
@@ -4473,7 +4505,7 @@ export function renderDashboardHtml(nonce: string): string {
       row.className = 'timelineItem';
       if (item.inspectable) {
         row.classList.add('inspectable');
-        row.addEventListener('click', () => requestDetail(item.ts));
+        row.addEventListener('click', () => requestDetail(item.ts, item.eventId));
       }
 
       const time = document.createElement('span');
@@ -4690,7 +4722,7 @@ export function renderDashboardHtml(nonce: string): string {
     $('copyModelPayload').disabled = !hasModelPayload;
     const link = $('modelPayloadLink');
     link.hidden = !!vscodeApi || !hasModelPayload;
-    link.href = modelPayloadUrl(d.ts);
+    link.href = modelPayloadUrl(d.ts, d.eventId);
     renderBefore($('dBefore'), d.before, d.omitted);
     renderAfter($('dAfter'), d.after);
     renderDiff(d);

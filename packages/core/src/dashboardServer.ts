@@ -538,7 +538,8 @@ async function handleRequest(
 
   if (url.pathname === '/api/detail') {
     const ts = Number(url.searchParams.get('ts'));
-    const payload = Number.isFinite(ts) ? buildDetailPayload(engine, ts) : undefined;
+    const eventId = url.searchParams.get('eventId') ?? undefined;
+    const payload = Number.isFinite(ts) ? buildDetailPayload(engine, ts, eventId) : undefined;
     if (!payload) {
       send(response, 404, 'application/json', JSON.stringify({ error: 'No such event' }));
       return;
@@ -549,7 +550,8 @@ async function handleRequest(
 
   if (url.pathname === '/api/model-payload') {
     const ts = Number(url.searchParams.get('ts'));
-    const payload = Number.isFinite(ts) ? buildModelPayload(engine, ts) : undefined;
+    const eventId = url.searchParams.get('eventId') ?? undefined;
+    const payload = Number.isFinite(ts) ? buildModelPayload(engine, ts, eventId) : undefined;
     if (payload === undefined) {
       send(response, 404, 'text/plain; charset=utf-8', 'No such event');
       return;
