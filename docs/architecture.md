@@ -505,6 +505,30 @@ evidence finding. The report provides bounded local reproduction guidance for a
 human or a separately approved repair workflow; it is not proof that a repair was
 attempted or successful.
 
+## Continuous Improvement Reports
+
+[check-improvement.mjs](../scripts/check-improvement.mjs) reads retained CI and
+Security aggregate reports and uses the comparison and regression validators in
+[check-ci.mjs](../scripts/check-ci.mjs). It groups fixed gate/artifact failures
+across two completed default-branch push runs. A new successful revision may
+clear a CI symptom, but it does not by itself establish a verified fix.
+
+The reviewed [regression registry](../.github/improvement-regressions.json) can
+bind a finding to a specific pair of run IDs, unit matrix job, report, and test
+name. Proof requires matching run/revision provenance and exactly one test with
+that name failing before and passing afterward. Human review is still required.
+The collector does not execute downloaded code or tests, infer approval, or
+replace the existing synthetic offline outcome proof with a claim about a real
+repair. An empty registry makes no regression-proof claim.
+
+The [workflow](../.github/workflows/improvement.yml) is opt-in, default-branch-only,
+and read-only. API and signed downloads are bounded and credentials are isolated;
+ZIP entries are never extracted. Reruns, expired artifacts, incomplete history,
+and malformed evidence are insufficient evidence. Curated entries and source
+remain unchanged; only fresh report/summary artifacts are written. See the
+[contributor process](../CONTRIBUTING.md#continuous-improvement) for enrollment,
+limits, and the explicitly unauthenticated local-input mode.
+
 ## Documentation Contracts
 
 [check-docs.mjs](../scripts/check-docs.mjs) checks all maintained Markdown and
@@ -553,6 +577,7 @@ Supported Node.js: >=20. The pinned development runtime is in [.node-version](..
 | check:docs | node scripts/check-docs.mjs |
 | docs:write | node scripts/check-docs.mjs --write |
 | maintenance:docs | node scripts/maintenance.mjs |
+| improvement:report | node scripts/check-improvement.mjs |
 | benchmark:snapshot | node scripts/benchmark.mjs --markdown |
 | benchmark:recommendations | node scripts/benchmark.mjs --model-recommendations |
 | proof-table | node scripts/proof-table.mjs |
@@ -570,5 +595,5 @@ Supported Node.js: >=20. The pinned development runtime is in [.node-version](..
 | purge:copilot | node packages/copilot-plugin/dist/hook.js purge |
 | clean | node -e "for (const p of ['copilot-plugin','core','hook-runtime','mcp-server','extension']) require('fs').rmSync('packages/'+p+'/dist',{recursive:true,force:true})" |
 
-<!-- source-sha256: ffdbaa28d71fc5b78aef08db0ca7757d93def6e56e0bcfc285b9cbcfea64ef70 -->
+<!-- source-sha256: f2947df7a558359f1bacd0a06cff75d499650160157a45a2ec74c2f9bdbe70d9 -->
 <!-- slipstream-reference:build:end -->

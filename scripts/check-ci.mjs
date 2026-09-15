@@ -1,5 +1,6 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
+import { createHash } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 
 const ROOT = fileURLToPath(new URL('../', import.meta.url));
@@ -370,6 +371,198 @@ export function classifyFailureContainment(root, options, scope) {
     categories,
     actions,
   };
+}
+
+export function compareImprovementReports(before, after) {
+  const read = (snapshot) => {
+    if (!snapshot) return null;
+    const { expected, report } = snapshot;
+    const metadata = identity(expected);
+    const { kind, conclusion } = expected;
+    expect(['required-validation', 'security-validation'].includes(kind));
+    expect(metadata.runId.length <= 20 && metadata.workflow.length <= 512);
+    const allowedErrors =
+      kind === 'security-validation'
+        ? [
+            'codeql: required analysis did not succeed',
+            'dependency-review: unexpected result for this event',
+          ]
+        : [
+            ...['unit', 'browser-proof', 'secrets'].map(
+              (name) => `${name}: required job did not succeed`,
+            ),
+            ...UNIT_JOBS.map((job) => `ci-unit-${job}/ci-unit.json`),
+            ...BROWSER_JOBS.map((job) => `ci-browser-${job}/ci-browser.json`),
+          ].map((error) =>
+            error.endsWith('.json')
+              ? `${error}: missing, malformed, or unsuccessful evidence`
+              : error,
+          );
+    const valid =
+      metadata.attempt === '1' &&
+      report?.schemaVersion === 1 &&
+      report.kind === kind &&
+      Object.entries(metadata).every(([key, value]) => report[key] === value) &&
+      typeof report.passed === 'boolean' &&
+      Array.isArray(report.errors) &&
+      report.errors.length <= allowedErrors.length &&
+      report.errors.every((error) => allowedErrors.includes(error)) &&
+      report.passed === (report.errors.length === 0) &&
+      conclusion === (report.passed ? 'success' : 'failure');
+    return {
+      ...metadata,
+      kind,
+      valid,
+      passed: valid ? report.passed : null,
+      errors: valid ? [...new Set(report.errors)].sort() : [],
+    };
+  };
+  const baseline = read(before);
+  const candidate = read(after);
+  if (baseline && candidate) {
+    expect(baseline.kind === candidate.kind && baseline.workflow === candidate.workflow);
+    expect(BigInt(baseline.runId) < BigInt(candidate.runId));
+  }
+  const comparable = Boolean(baseline?.valid && candidate?.valid);
+  const failures = [...new Set([...(baseline?.errors ?? []), ...(candidate?.errors ?? [])])];
+  const findings = failures.sort().map((failure) => {
+    let status = 'unverified';
+    if (comparable) {
+      if (candidate.errors.includes(failure)) {
+        status = baseline.errors.includes(failure) ? 'recurring' : 'new';
+      } else if (candidate.passed && candidate.revision !== baseline.revision) {
+        status = 'cleared';
+      }
+    }
+    return {
+      id: createHash('sha256')
+        .update(`${(candidate ?? baseline).workflow}\0${(candidate ?? baseline).kind}\0${failure}`)
+        .digest('hex'),
+      failure,
+      status,
+      fixVerified: false,
+      beforeRevision: baseline?.revision ?? null,
+      afterRevision: candidate?.revision ?? null,
+      nextAction: 'Add a regression that fails before the fix and passes after it; require review.',
+    };
+  });
+  return {
+    schemaVersion: 1,
+    kind: 'continuous-improvement',
+    status: comparable ? 'reported' : 'insufficient-evidence',
+    before: baseline,
+    after: candidate,
+    automaticRetry: false,
+    automaticRepair: false,
+    findings,
+    residual: [
+      'Cleared CI failures are not proof of a targeted regression fix or its review.',
+      'The offline outcome proof covers its synthetic workload, not arbitrary source repairs.',
+    ],
+  };
+}
+
+export function verifyImprovementRegression(finding, regression, before, after) {
+  const result = {
+    schemaVersion: 1,
+    kind: 'regression-proof',
+    findingId: finding.id,
+    verified: false,
+    reviewRequired: true,
+  };
+  try {
+    expect(finding.status === 'cleared' && regression.findingId === finding.id);
+    expect(UNIT_JOBS.includes(regression.job) && UNIT_REPORTS.includes(regression.suite));
+    expect(
+      finding.failure === 'unit: required job did not succeed' ||
+        finding.failure ===
+          `ci-unit-${regression.job}/ci-unit.json: missing, malformed, or unsuccessful evidence`,
+    );
+    expect(typeof regression.testName === 'string' && regression.testName.trim().length > 0);
+    expect(regression.testName.length <= 300);
+    const baseline = identity(before.expected);
+    const candidate = identity(after.expected);
+    expect(baseline.revision === finding.beforeRevision);
+    expect(
+      candidate.revision === finding.afterRevision && candidate.revision !== baseline.revision,
+    );
+    expect(
+      baseline.workflow === candidate.workflow && BigInt(baseline.runId) < BigInt(candidate.runId),
+    );
+    for (const [evidence, passed] of [
+      [before, false],
+      [after, true],
+    ]) {
+      const { expected, unit, tests } = evidence;
+      const metadata = identity(expected);
+      expect(expected.kind === 'required-validation' && metadata.attempt === '1');
+      expect(expected.conclusion === (passed ? 'success' : 'failure'));
+      expect(unit.schemaVersion === 1 && unit.kind === 'unit-validation');
+      expect(Object.entries(metadata).every(([key, value]) => unit[key] === value));
+      expect(unit.job === regression.job && unit.passed === passed && Array.isArray(unit.errors));
+      expect(
+        passed
+          ? unit.errors.length === 0
+          : unit.errors.includes(
+              `${regression.suite}: missing, malformed, or unsuccessful evidence`,
+            ),
+      );
+      expect(tests.success === passed && Array.isArray(tests.testResults));
+      const counts = ['numTotalTests', 'numPassedTests', 'numFailedTests', 'numPendingTests'];
+      expect(counts.every((key) => Number.isInteger(tests[key]) && tests[key] >= 0));
+      expect(tests.numTotalTests > 0 && tests.numTotalTests <= 20_000);
+      expect(
+        tests.numTotalTests === tests.numPassedTests + tests.numFailedTests + tests.numPendingTests,
+      );
+      expect(
+        passed
+          ? tests.numFailedTests === 0 && tests.numFailedTestSuites === 0
+          : tests.numFailedTests > 0,
+      );
+      expect(tests.testResults.length <= tests.numTotalTests);
+      expect(tests.testResults.every((suite) => Array.isArray(suite.assertionResults)));
+      const assertions = tests.testResults.flatMap((suite) => suite.assertionResults);
+      expect(assertions.length === tests.numTotalTests);
+      expect(
+        assertions.filter((assertion) => assertion.status === 'passed').length ===
+          tests.numPassedTests,
+      );
+      expect(
+        assertions.filter((assertion) => assertion.status === 'failed').length ===
+          tests.numFailedTests,
+      );
+      expect(
+        assertions.filter((assertion) =>
+          ['pending', 'skipped', 'todo', 'disabled'].includes(assertion.status),
+        ).length === tests.numPendingTests,
+      );
+      const matches = assertions.filter((assertion) => assertion.fullName === regression.testName);
+      expect(matches.length === 1 && matches[0].status === (passed ? 'passed' : 'failed'));
+      if (passed) {
+        expect(
+          Array.isArray(unit.suites) &&
+            unit.suites.some(
+              (suite) =>
+                suite?.file === regression.suite &&
+                suite.total === tests.numTotalTests &&
+                suite.passed === tests.numPassedTests &&
+                suite.skipped === tests.numPendingTests,
+            ),
+        );
+      }
+    }
+    return {
+      ...result,
+      verified: true,
+      job: regression.job,
+      suite: regression.suite,
+      testName: regression.testName,
+      before: baseline,
+      after: candidate,
+    };
+  } catch {
+    return { ...result, reason: 'Missing or mismatched failing-then-passing regression evidence.' };
+  }
 }
 
 function main() {

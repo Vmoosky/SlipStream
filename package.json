@@ -24,6 +24,7 @@
     "check:docs": "node scripts/check-docs.mjs",
     "docs:write": "node scripts/check-docs.mjs --write",
     "maintenance:docs": "node scripts/maintenance.mjs",
+    "improvement:report": "node scripts/check-improvement.mjs",
     "benchmark:snapshot": "node scripts/benchmark.mjs --markdown",
     "benchmark:recommendations": "node scripts/benchmark.mjs --model-recommendations",
     "proof-table": "node scripts/proof-table.mjs",
@@ -61,6 +62,7 @@
     "unified": "11.0.5",
     "unist-util-visit": "5.1.0",
     "vitest": "^4.1.11",
-    "yaml": "2.9.0"
+    "yaml": "2.9.0",
+    "yauzl": "3.4.0"
   }
 }

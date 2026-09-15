@@ -7,11 +7,23 @@ import { fileURLToPath } from 'node:url';
 import { execFileSync } from 'node:child_process';
 import { parse } from 'yaml';
 import {
+  IMPROVEMENT_LIMITS,
+  readImprovementArchive,
+  createImprovementClient,
+  collectImprovementReports,
+  validateImprovementRegistry,
+  improvementIdentity,
+  runImprovementReview,
+} from '../scripts/check-improvement.mjs';
+import { createHash } from 'node:crypto';
+import {
   collectUnit,
   collectBrowser,
   verifyRequired,
   verifySecurity,
   classifyFailureContainment,
+  compareImprovementReports,
+  verifyImprovementRegression,
   UNIT_JOBS,
   BROWSER_JOBS,
   UNIT_REPORTS,
@@ -248,6 +260,541 @@ test('failure containment classifies bounded diagnostics and fails closed on mis
     'Inspect missing or invalid CI evidence before retrying.',
     'Reproduce the failing test suite locally.',
   ]);
+});
+
+function improvementSnapshot(runId, revision, errors = []) {
+  const metadata = { ...META, runId, revision };
+  return {
+    expected: {
+      ...metadata,
+      kind: 'required-validation',
+      conclusion: errors.length === 0 ? 'success' : 'failure',
+    },
+    report: {
+      schemaVersion: 1,
+      kind: 'required-validation',
+      ...metadata,
+      passed: errors.length === 0,
+      errors,
+    },
+  };
+}
+
+test('improvement reports track recurrence without inferring proof of a fix', () => {
+  const failure = 'unit: required job did not succeed';
+  const before = improvementSnapshot('123', 'a'.repeat(40), [failure]);
+  const after = improvementSnapshot('124', 'd'.repeat(40), [failure]);
+  const recurring = compareImprovementReports(before, after);
+  assert.equal(recurring.status, 'reported');
+  assert.equal(recurring.findings[0].status, 'recurring');
+  assert.equal(recurring.findings[0].fixVerified, false);
+  const cleared = compareImprovementReports(before, improvementSnapshot('125', 'e'.repeat(40)));
+  assert.equal(cleared.findings[0].id, recurring.findings[0].id);
+  assert.equal(cleared.findings[0].status, 'cleared');
+  assert.equal(cleared.findings[0].fixVerified, false);
+  assert.equal(cleared.automaticRetry, false);
+  assert.equal(cleared.automaticRepair, false);
+  const introduced = compareImprovementReports(improvementSnapshot('123', 'a'.repeat(40)), after);
+  assert.equal(introduced.findings[0].status, 'new');
+  assert.equal(
+    compareImprovementReports(before, improvementSnapshot('124', 'a'.repeat(40))).findings[0]
+      .status,
+    'unverified',
+  );
+  assert.deepEqual(
+    compareImprovementReports(
+      improvementSnapshot('123', 'a'.repeat(40)),
+      improvementSnapshot('124', 'd'.repeat(40)),
+    ).findings,
+    [],
+  );
+});
+
+test('improvement reports cannot clear failures with missing or mismatched evidence', () => {
+  const before = improvementSnapshot('123', 'a'.repeat(40), ['unit: required job did not succeed']);
+  for (const mutate of [
+    (snapshot) => {
+      snapshot.report = null;
+    },
+    (snapshot) => {
+      snapshot.report.revision = 'f'.repeat(40);
+    },
+    (snapshot) => {
+      snapshot.expected.attempt = snapshot.report.attempt = '2';
+    },
+    (snapshot) => {
+      snapshot.expected.conclusion = 'cancelled';
+    },
+    (snapshot) => {
+      snapshot.report.errors = ['untrusted diagnostic content'];
+    },
+  ]) {
+    const after = improvementSnapshot('124', 'd'.repeat(40));
+    mutate(after);
+    const report = compareImprovementReports(before, after);
+    assert.equal(report.status, 'insufficient-evidence');
+    assert.equal(report.findings[0].status, 'unverified');
+    assert.equal(report.findings[0].fixVerified, false);
+    assert.equal(JSON.stringify(report).includes('untrusted diagnostic content'), false);
+  }
+  assert.equal(compareImprovementReports(before, null).findings[0].status, 'unverified');
+  assert.throws(() => compareImprovementReports(before, before));
+});
+
+test('improvement regression proof requires one named failing then passing test', (context) => {
+  const { root, write } = fixture(context);
+  const before = improvementSnapshot('123', 'a'.repeat(40), ['unit: required job did not succeed']);
+  const after = improvementSnapshot('124', 'd'.repeat(40));
+  const finding = compareImprovementReports(before, after).findings[0];
+  const regression = {
+    findingId: finding.id,
+    job: 'linux-node24',
+    suite: 'unit-core.json',
+    testName: 'preserves a regression sentinel',
+  };
+  const evidence = (snapshot, passed) => {
+    const tests = {
+      success: passed,
+      numTotalTests: 1,
+      numPassedTests: passed ? 1 : 0,
+      numFailedTests: passed ? 0 : 1,
+      numPendingTests: 0,
+      numFailedTestSuites: passed ? 0 : 1,
+      testResults: [
+        {
+          assertionResults: [
+            { fullName: regression.testName, status: passed ? 'passed' : 'failed' },
+          ],
+        },
+      ],
+    };
+    write(regression.suite, tests);
+    const unit = collectUnit(root, {
+      ...snapshot.expected,
+      job: regression.job,
+      steps: { ...unitSteps, tests: { outcome: passed ? 'success' : 'failure' } },
+    });
+    return { expected: snapshot.expected, unit, tests };
+  };
+  const baseline = evidence(before, false);
+  const candidate = evidence(after, true);
+  const proof = verifyImprovementRegression(finding, regression, baseline, candidate);
+  assert.equal(proof.verified, true);
+  assert.equal(proof.reviewRequired, true);
+  assert.equal(proof.before.revision, before.expected.revision);
+  assert.equal(proof.after.revision, after.expected.revision);
+  for (const mutate of [
+    (value) => {
+      value.tests.testResults[0].assertionResults[0].fullName = 'another test';
+    },
+    (value) => {
+      value.unit.revision = baseline.expected.revision;
+    },
+    (value) => {
+      value.tests.numTotalTests = 0;
+    },
+    (value) => {
+      value.tests.testResults[0].assertionResults[0].status = 'skipped';
+    },
+    (value) => {
+      value.expected.attempt = value.unit.attempt = '2';
+    },
+  ]) {
+    const invalid = structuredClone(candidate);
+    mutate(invalid);
+    assert.equal(
+      verifyImprovementRegression(finding, regression, baseline, invalid).verified,
+      false,
+    );
+  }
+  assert.equal(
+    verifyImprovementRegression(
+      { ...finding, status: 'recurring' },
+      regression,
+      baseline,
+      candidate,
+    ).verified,
+    false,
+  );
+});
+
+test('improvement archives read bounded JSON without extracting or accepting unsafe names', async (context) => {
+  const { root, sentinel } = maintenanceRepository(context);
+  const archive = (extra = []) =>
+    execFileSync('git', ['archive', '--format=zip', ...extra, 'HEAD', 'package.json'], {
+      cwd: root,
+      timeout: 60_000,
+    });
+  const reports = await readImprovementArchive(archive(), ['package.json']);
+  assert.equal(reports.get('package.json').name, 'slipstream-monorepo');
+  await assert.rejects(readImprovementArchive(archive(), ['missing.json']));
+  await assert.rejects(readImprovementArchive(archive(['--prefix=../']), ['package.json']));
+  await assert.rejects(
+    readImprovementArchive(archive(['--add-file=package.json']), ['package.json']),
+  );
+  await assert.rejects(readImprovementArchive(Buffer.from('not a zip'), ['package.json']));
+  await assert.rejects(
+    readImprovementArchive(Buffer.alloc(IMPROVEMENT_LIMITS.archiveBytes + 1), ['package.json']),
+  );
+  assert.equal(fs.readFileSync(sentinel, 'utf8'), 'Do not touch user data');
+});
+
+test('improvement downloads authenticate only to GitHub and verify the archive digest', async () => {
+  const bytes = Buffer.from('synthetic archive bytes');
+  const artifact = {
+    id: 100,
+    digest: `sha256:${createHash('sha256').update(bytes).digest('hex')}`,
+  };
+  const calls = [];
+  const client = createImprovementClient(
+    'Vmoosky/SlipStream',
+    'synthetic-token',
+    async (url, options) => {
+      calls.push({ url, options });
+      return calls.length === 1
+        ? new Response(null, {
+            status: 302,
+            headers: { location: 'https://fixture.blob.core.windows.net/artifact?sig=synthetic' },
+          })
+        : new Response(bytes);
+    },
+  );
+  assert.deepEqual(await client.archive(artifact), bytes);
+  assert.equal(calls[0].options.method, 'GET');
+  assert.equal(calls[0].options.headers.Authorization, 'Bearer synthetic-token');
+  assert.equal(calls[1].options.headers, undefined);
+  assert.equal(calls[1].options.redirect, 'error');
+  const invalid = createImprovementClient(
+    'Vmoosky/SlipStream',
+    'synthetic-token',
+    async () =>
+      new Response(null, {
+        status: 302,
+        headers: { location: 'https://untrusted.invalid/artifact' },
+      }),
+  );
+  await assert.rejects(invalid.archive(artifact));
+  const mismatched = createImprovementClient(
+    'Vmoosky/SlipStream',
+    'synthetic-token',
+    async (url) =>
+      url.startsWith('https://api.github.com/')
+        ? new Response(null, {
+            status: 302,
+            headers: { location: 'https://fixture.blob.core.windows.net/artifact' },
+          })
+        : new Response(Buffer.from('different bytes')),
+  );
+  await assert.rejects(mismatched.archive(artifact));
+  const oversized = createImprovementClient(
+    'Vmoosky/SlipStream',
+    'synthetic-token',
+    async () => new Response('{}', { headers: { 'content-length': String(3 * 1024 * 1024) } }),
+  );
+  await assert.rejects(oversized.json('/actions/runs/123'));
+});
+
+function improvementHistory(context) {
+  const { root } = maintenanceRepository(context);
+  const emptyTree = execFileSync('git', ['mktree'], {
+    cwd: root,
+    input: '',
+    encoding: 'utf8',
+  }).trim();
+  const archives = new Map();
+  const runs = [];
+  const artifactLists = new Map();
+  const calls = [];
+  for (const [workflow, kind, name, file, firstId] of [
+    ['ci.yml', 'required-validation', 'ci-required', 'ci-required.json', 123],
+    ['security.yml', 'security-validation', 'security-required', 'ci-security.json', 223],
+  ]) {
+    for (const offset of [0, 1]) {
+      const run = {
+        id: firstId + offset,
+        run_attempt: 1,
+        event: 'push',
+        status: 'completed',
+        head_sha: (offset === 0 ? 'a' : 'd').repeat(40),
+        head_branch: 'main',
+        path: `.github/workflows/${workflow}`,
+        conclusion: offset === 0 ? 'failure' : 'success',
+        repository: { full_name: 'Vmoosky/SlipStream' },
+        head_repository: { full_name: 'Vmoosky/SlipStream' },
+      };
+      const report = {
+        schemaVersion: 1,
+        kind,
+        revision: run.head_sha,
+        runId: String(run.id),
+        attempt: '1',
+        eventName: 'push',
+        workflow: `Vmoosky/SlipStream/${run.path}@refs/heads/main`,
+        headRevision: run.head_sha,
+        baseRevision: null,
+        passed: offset === 1,
+        errors:
+          offset === 1
+            ? []
+            : [
+                workflow === 'ci.yml'
+                  ? 'unit: required job did not succeed'
+                  : 'codeql: required analysis did not succeed',
+              ],
+      };
+      fs.writeFileSync(path.join(root, file), JSON.stringify(report));
+      const bytes = execFileSync(
+        'git',
+        ['archive', '--format=zip', `--add-file=${file}`, emptyTree],
+        { cwd: root },
+      );
+      const artifact = {
+        id: run.id + 1000,
+        name,
+        expired: false,
+        size_in_bytes: bytes.length,
+        digest: `sha256:${createHash('sha256').update(bytes).digest('hex')}`,
+        workflow_run: { id: run.id, head_sha: run.head_sha },
+      };
+      runs.push(run);
+      artifactLists.set(run.id, [artifact]);
+      archives.set(artifact.id, bytes);
+    }
+  }
+  const client = {
+    async json(resource) {
+      calls.push(resource);
+      const runId = Number(resource.match(/\/runs\/(\d+)/)?.[1]);
+      if (resource.includes('/artifacts?')) {
+        const artifacts = artifactLists.get(runId);
+        return { total_count: artifacts.length, artifacts };
+      }
+      if (runId) return runs.find((run) => run.id === runId);
+      const workflow = resource.includes('/ci.yml/') ? 'ci.yml' : 'security.yml';
+      return { workflow_runs: runs.filter((run) => run.path.endsWith(`/${workflow}`)) };
+    },
+    async archive(artifact) {
+      return archives.get(artifact.id);
+    },
+  };
+  return { root, emptyTree, runs, artifactLists, archives, calls, client };
+}
+
+test('improvement collection compares exact run artifacts and treats expiry as insufficient evidence', async (context) => {
+  const history = improvementHistory(context);
+  const options = { repository: 'Vmoosky/SlipStream', branch: 'main', client: history.client };
+  const report = await collectImprovementReports(options);
+  assert.equal(report.status, 'reported');
+  assert.equal(report.comparisons.length, 2);
+  assert.equal(report.evidence.length, 4);
+  assert.ok(report.comparisons.every((comparison) => comparison.findings[0].status === 'cleared'));
+  assert.ok(report.comparisons.every((comparison) => comparison.findings[0].fixVerified === false));
+  history.artifactLists.get(124)[0].expired = true;
+  const expired = await collectImprovementReports(options);
+  assert.equal(expired.status, 'insufficient-evidence');
+  assert.equal(expired.comparisons[0].findings[0].status, 'unverified');
+  assert.ok(expired.errors.some((error) => error.includes('run 124')));
+  history.artifactLists.get(124)[0].expired = false;
+  history.runs[1].head_repository.full_name = 'untrusted/fork';
+  assert.equal((await collectImprovementReports(options)).status, 'insufficient-evidence');
+});
+
+test('improvement registry connects an explicit run pair to a verified regression artifact', async (context) => {
+  const history = improvementHistory(context);
+  const options = { repository: 'Vmoosky/SlipStream', branch: 'main', client: history.client };
+  const initial = await collectImprovementReports(options);
+  const regression = {
+    findingId: initial.comparisons[0].findings[0].id,
+    job: 'linux-node24',
+    suite: 'unit-core.json',
+    testName: 'preserves regression input',
+    beforeRunId: '123',
+    afterRunId: '124',
+  };
+  const registry = { schemaVersion: 1, regressions: [regression] };
+  const { root, write } = fixture(context);
+  for (const run of history.runs.filter((entry) => entry.path.endsWith('/ci.yml'))) {
+    const passed = run.conclusion === 'success';
+    const tests = {
+      success: passed,
+      numTotalTests: 1,
+      numPassedTests: passed ? 1 : 0,
+      numFailedTests: passed ? 0 : 1,
+      numPendingTests: 0,
+      numFailedTestSuites: passed ? 0 : 1,
+      testResults: [
+        {
+          assertionResults: [
+            { fullName: regression.testName, status: passed ? 'passed' : 'failed' },
+          ],
+        },
+      ],
+    };
+    write(regression.suite, tests);
+    const unit = collectUnit(root, {
+      ...initial.comparisons[0][passed ? 'after' : 'before'],
+      job: regression.job,
+      steps: { ...unitSteps, tests: { outcome: passed ? 'success' : 'failure' } },
+    });
+    fs.writeFileSync(path.join(history.root, 'ci-unit.json'), JSON.stringify(unit));
+    fs.writeFileSync(path.join(history.root, regression.suite), JSON.stringify(tests));
+    const bytes = execFileSync(
+      'git',
+      [
+        'archive',
+        '--format=zip',
+        '--add-file=ci-unit.json',
+        `--add-file=${regression.suite}`,
+        history.emptyTree,
+      ],
+      { cwd: history.root },
+    );
+    const artifact = {
+      id: run.id + 2000,
+      name: `ci-unit-${regression.job}`,
+      expired: false,
+      size_in_bytes: bytes.length,
+      digest: `sha256:${createHash('sha256').update(bytes).digest('hex')}`,
+      workflow_run: { id: run.id, head_sha: run.head_sha },
+    };
+    history.artifactLists.get(run.id).push(artifact);
+    history.archives.set(artifact.id, bytes);
+  }
+  const report = await collectImprovementReports({ ...options, registry });
+  assert.equal(report.status, 'reported');
+  assert.equal(report.regressions[0].verified, true);
+  assert.equal(report.regressions[0].reviewRequired, true);
+  assert.equal(report.evidence.length, 6);
+  const invalid = structuredClone(registry);
+  invalid.regressions[0].testName = 'unobserved test';
+  assert.equal(
+    (await collectImprovementReports({ ...options, registry: invalid })).status,
+    'insufficient-evidence',
+  );
+  assert.throws(() =>
+    validateImprovementRegistry({ schemaVersion: 1, regressions: [regression, regression] }),
+  );
+  assert.throws(() =>
+    validateImprovementRegistry({
+      schemaVersion: 1,
+      regressions: [{ ...regression, command: 'not allowed' }],
+    }),
+  );
+  assert.throws(() =>
+    validateImprovementRegistry({
+      schemaVersion: 1,
+      regressions: [{ ...regression, afterRunId: '122' }],
+    }),
+  );
+});
+
+test('improvement workflow is opt-in, default-branch-only, read-only and artifact-producing', () => {
+  const workflow = parse(
+    fs.readFileSync(path.join(REPO, '.github/workflows/improvement.yml'), 'utf8'),
+  );
+  assert.deepEqual(Object.keys(workflow.on).sort(), ['schedule', 'workflow_dispatch']);
+  assert.equal(workflow.on.schedule[0].cron, '0 8 * * *');
+  assert.deepEqual(workflow.permissions, { contents: 'read' });
+  assert.equal(workflow.concurrency['cancel-in-progress'], false);
+  const job = workflow.jobs.report;
+  assert.equal(job.if, "${{ vars.SLIPSTREAM_IMPROVEMENT_ENABLED == 'true' }}");
+  assert.deepEqual(job.permissions, { contents: 'read', actions: 'read' });
+  assert.equal(job['timeout-minutes'], 10);
+  assert.equal(job['continue-on-error'], undefined);
+  assert.match(job.steps[0].run, /test "\$GITHUB_REF" = "refs\/heads\/\$DEFAULT_BRANCH"/);
+  const checkout = job.steps.find((step) => step.uses?.startsWith('actions/checkout@'));
+  assert.equal(checkout.with.ref, '${{ github.sha }}');
+  assert.equal(checkout.with['persist-credentials'], false);
+  assert.ok(job.steps.every((step) => !step.uses || /@[a-f0-9]{40}$/.test(step.uses)));
+  assert.ok(job.steps.every((step) => step['continue-on-error'] === undefined));
+  const retained = job.steps.find((step) => step.uses?.startsWith('actions/upload-artifact@'));
+  assert.match(retained.if, /always\(\)/);
+  assert.equal(retained.with['retention-days'], 7);
+  assert.equal(retained.with['if-no-files-found'], 'error');
+  assert.match(retained.with.path, /report\.json/);
+  assert.ok(job.steps.some((step) => step.run === 'npm run improvement:report'));
+  const registry = JSON.parse(
+    fs.readFileSync(path.join(REPO, '.github/improvement-regressions.json'), 'utf8'),
+  );
+  assert.ok(Array.isArray(validateImprovementRegistry(registry)));
+});
+
+test('improvement runner preserves the checkout and separates local from workflow evidence', async (context) => {
+  const history = improvementHistory(context);
+  fs.mkdirSync(path.join(history.root, '.github'), { recursive: true });
+  fs.writeFileSync(
+    path.join(history.root, '.github/improvement-regressions.json'),
+    JSON.stringify({ schemaVersion: 1, regressions: [] }),
+  );
+  const event = { repository: { full_name: 'Vmoosky/SlipStream', default_branch: 'main' } };
+  const env = {
+    GITHUB_ACTIONS: 'true',
+    SLIPSTREAM_IMPROVEMENT_ENABLED: 'true',
+    GITHUB_REPOSITORY: 'Vmoosky/SlipStream',
+    GITHUB_REF: 'refs/heads/main',
+    GITHUB_WORKFLOW_REF: 'Vmoosky/SlipStream/.github/workflows/improvement.yml@refs/heads/main',
+    GITHUB_EVENT_NAME: 'schedule',
+    GITHUB_SHA: 'f'.repeat(40),
+    GITHUB_RUN_ID: '300',
+    GITHUB_RUN_ATTEMPT: '1',
+    GITHUB_SERVER_URL: 'https://github.com',
+    GITHUB_API_URL: 'https://api.github.com',
+  };
+  const result = await runImprovementReview(history.root, { env, event, client: history.client });
+  assert.equal(result.report.status, 'reported');
+  assert.equal(result.report.collector.revision, env.GITHUB_SHA);
+  assert.equal(result.report.source, 'github-actions');
+  assert.ok(fs.existsSync(path.join(history.root, result.outputDirectory, 'report.json')));
+  assert.ok(fs.existsSync(path.join(history.root, result.outputDirectory, 'summary.md')));
+  assert.equal(
+    fs.readFileSync(path.join(history.root, '.slipstream/user-sentinel'), 'utf8'),
+    'Do not touch user data',
+  );
+  for (const invalid of [
+    { SLIPSTREAM_IMPROVEMENT_ENABLED: '' },
+    { GITHUB_REF: 'refs/heads/other' },
+    { GITHUB_EVENT_NAME: 'pull_request' },
+    { GITHUB_WORKFLOW_REF: 'untrusted' },
+    { GITHUB_REPOSITORY: 'untrusted/fork' },
+    { GITHUB_API_URL: 'https://untrusted.invalid' },
+    { GITHUB_RUN_ID: '' },
+    { GITHUB_SHA: 'HEAD' },
+  ])
+    assert.throws(() => improvementIdentity({ ...env, ...invalid }, event));
+  const input = path.join(history.root, 'local-evidence.json');
+  fs.writeFileSync(
+    input,
+    JSON.stringify({
+      schemaVersion: 1,
+      before: improvementSnapshot('123', 'a'.repeat(40), ['unit: required job did not succeed']),
+      after: improvementSnapshot('124', 'd'.repeat(40)),
+    }),
+  );
+  const local = await runImprovementReview(history.root, { env: {}, input });
+  assert.equal(local.report.source, 'local-unverified');
+  assert.equal(local.report.collector, undefined);
+  assert.equal(local.report.comparisons[0].findings[0].fixVerified, false);
+  assert.notEqual(local.outputDirectory, result.outputDirectory);
+  await assert.rejects(runImprovementReview(history.root, { env, event, input }));
+  const command = [path.join(REPO, 'scripts/check-improvement.mjs'), '--input', input];
+  const commandOptions = {
+    cwd: history.root,
+    env: { ...process.env, GITHUB_ACTIONS: 'false' },
+    encoding: 'utf8',
+    stdio: 'pipe',
+    timeout: 30_000,
+  };
+  const cli = JSON.parse(execFileSync(process.execPath, command, commandOptions));
+  assert.equal(cli.source, 'local-unverified');
+  assert.equal(cli.status, 'reported');
+  assert.match(cli.outputDirectory, /^test-results\/improvement\/run-[A-Za-z0-9]{6}$/);
+  const cliOutput = path.join(REPO, cli.outputDirectory);
+  context.after(() => fs.rmSync(cliOutput, { recursive: true, force: true }));
+  const retained = JSON.parse(fs.readFileSync(path.join(cliOutput, 'report.json'), 'utf8'));
+  assert.equal(retained.source, 'local-unverified');
+  assert.equal(retained.comparisons[0].findings[0].fixVerified, false);
+  fs.writeFileSync(input, 'not json');
+  assert.throws(() => execFileSync(process.execPath, command, commandOptions));
 });
 
 test('missing artifacts or an artifact from another revision or attempt fail closed', (context) => {

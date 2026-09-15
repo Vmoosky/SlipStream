@@ -86,6 +86,66 @@ required checks actually being enforced. The
 [readiness reassessment](docs/readiness-assessment.md) records the local progress,
 verified snapshot, evaluator limitations, and outstanding activation steps.
 
+## Continuous Improvement
+
+The [improvement workflow](.github/workflows/improvement.yml) is prepared but
+disabled by default. After reviewing the change and verifying required checks,
+the owner may enable `SLIPSTREAM_IMPROVEMENT_ENABLED=true`. It runs daily at
+08:00 UTC or by manual dispatch on the default branch. Disable that variable to
+pause it. This change does not activate the workflow or alter required gates.
+
+The read-only collector compares the two newest completed default-branch push
+runs for CI and Security, inspecting at most ten recent runs per workflow.
+It fingerprints fixed gate and artifact failures as `new`, `recurring`, `cleared`,
+or `unverified`. Recurrence is at the gate/artifact level, not proof of a common
+root cause. A cleared finding requires valid success evidence on a different
+revision; reruns, cancellation, missing history, expired artifacts, and invalid
+provenance cannot clear a finding. PR and fork artifacts are not consumed.
+
+Reports include source/run identities and downloaded artifact digests. Push base
+revisions are report-declared; run, attempt, workflow, and head are checked against
+GitHub API metadata. Only allowlisted JSON is read in memory with size and time
+limits. No artifact is extracted or executed, and credentials are never sent to
+the signed download host. The collector never retries jobs, edits source,
+creates issues or PRs, commits, pushes, merges, or changes the runtime store.
+
+To connect a recurring finding to a regression, propose a reviewed entry in the
+[regression registry](.github/improvement-regressions.json). It intentionally
+starts empty; do not invent history or seed successful-looking proof. Each entry
+has exactly these fields:
+
+- `findingId`: the full fingerprint from a CI comparison report.
+- `beforeRunId` and `afterRunId`: decimal strings identifying two distinct,
+  first-attempt CI push runs on the default branch, in that order.
+- `job`: an existing unit matrix ID, such as `linux-node24`.
+- `suite`: an existing retained unit report, such as `unit-core.json`.
+- `testName`: the exact Vitest `fullName`, unique within that suite.
+
+The registry accepts at most four entries and no commands. The collector verifies
+the same named test failed before and passed afterward, on different revisions,
+with matching unit-summary provenance and test counts. An unrelated test, skipped
+test, same-revision rerun, or successful aggregate alone cannot verify a repair.
+The resulting regression proof still requires review; it does not establish
+causality, an approval, or a merge. Keep the real review and merge links with the
+ordinary change record. Review replacement or removal of stale registry entries
+as source changes; expired evidence becomes insufficient, never implicitly valid.
+
+`npm run improvement:report` is the authenticated workflow command. For local
+comparison without GitHub access, use
+`npm run improvement:report -- --input <bundle.json>`. A local bundle has
+`schemaVersion: 1` and `before`/`after` snapshots, each with an `expected` CI
+identity plus `kind` and `conclusion`, and the corresponding aggregate `report`.
+Local output is explicitly `local-unverified`, not observed GitHub evidence.
+The [readiness tests](tests/readiness.test.mjs) contain synthetic examples.
+
+Each invocation writes a fresh `test-results/improvement/run-*` report and
+summary. The workflow also posts counts to its job summary and retains those
+files for seven days. Insufficient evidence produces a nonzero exit status while
+retaining the report. The existing five-sample offline outcome proof remains
+evidence about its synthetic workload, not proof that an arbitrary source fix
+worked. Workflow presence or local fixtures do not establish an observed
+continuous-improvement loop, agent throughput, or live-provider quality.
+
 ## Bounded Maintenance
 
 The [maintenance workflow](.github/workflows/maintenance.yml) is prepared but
