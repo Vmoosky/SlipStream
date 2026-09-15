@@ -567,13 +567,15 @@ Supported Node.js: >=20. The pinned development runtime is in [.node-version](..
 
 | Root npm Script | Command |
 | --- | --- |
+| setup | node scripts/develop.mjs setup |
+| validate | node scripts/develop.mjs validate |
 | build | npm run build --workspaces --if-present |
 | test | npm run test:scripts && npm run test --workspaces --if-present |
 | test:scripts | node --test tests/dashboard-cli.test.mjs tests/benchmark-report.test.mjs tests/copilot-plugin-install.test.mjs tests/outcome-proof.test.mjs tests/check-docs.test.mjs tests/readiness.test.mjs |
 | test:dashboard | playwright test tests/dashboard.smoke.spec.ts |
 | typecheck | npm run typecheck --workspaces --if-present |
 | lint | eslint . --max-warnings 0 |
-| format:check | prettier --check eslint.config.mjs playwright.config.ts scripts/check-*.mjs scripts/maintenance.mjs tests/check-docs.test.mjs tests/readiness.test.mjs .github/workflows/*.yml .github/dependabot.yml |
+| format:check | prettier --check eslint.config.mjs playwright.config.ts scripts/check-*.mjs scripts/develop.mjs scripts/maintenance.mjs tests/check-docs.test.mjs tests/readiness.test.mjs .github/workflows/*.yml .github/dependabot.yml |
 | check:docs | node scripts/check-docs.mjs |
 | docs:write | node scripts/check-docs.mjs --write |
 | maintenance:docs | node scripts/maintenance.mjs |
@@ -595,5 +597,5 @@ Supported Node.js: >=20. The pinned development runtime is in [.node-version](..
 | purge:copilot | node packages/copilot-plugin/dist/hook.js purge |
 | clean | node -e "for (const p of ['copilot-plugin','core','hook-runtime','mcp-server','extension']) require('fs').rmSync('packages/'+p+'/dist',{recursive:true,force:true})" |
 
-<!-- source-sha256: f2947df7a558359f1bacd0a06cff75d499650160157a45a2ec74c2f9bdbe70d9 -->
+<!-- source-sha256: 0412c4d00f3a2f1fa7176a7af13154c7dca084087b2c5ac1bc9a16e5386c4b1c -->
 <!-- slipstream-reference:build:end -->

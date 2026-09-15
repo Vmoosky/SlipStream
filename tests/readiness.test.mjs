@@ -6,6 +6,7 @@ import * as path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { execFileSync } from 'node:child_process';
 import { parse } from 'yaml';
+import { developmentPlan, runDevelopmentCommand, runDevelopment } from '../scripts/develop.mjs';
 import {
   IMPROVEMENT_LIMITS,
   readImprovementArchive,
@@ -55,10 +56,7 @@ const unitSteps = Object.fromEntries(
   ]),
 );
 const browserSteps = Object.fromEntries(
-  ['install', 'build', 'chromium', 'browser', 'docs', 'proof', 'package'].map((name) => [
-    name,
-    { outcome: 'success' },
-  ]),
+  ['setup', 'chromium', 'validate'].map((name) => [name, { outcome: 'success' }]),
 );
 
 function fixture(context) {
@@ -139,6 +137,185 @@ test('workspaces build in dependency order including the source-bundled plugin',
     }
   }
   assert.ok(names.indexOf('@slipstream/core') < names.indexOf('@slipstream/copilot-plugin'));
+});
+
+function developmentFixture(context) {
+  const { root: parent } = fixture(context);
+  const root = path.join(parent, 'checkout with spaces');
+  const npmCli = path.join(root, 'npm tools', 'npm-cli.js');
+  fs.mkdirSync(path.dirname(npmCli), { recursive: true });
+  fs.writeFileSync(path.join(root, '.node-version'), '24.14.1\n');
+  fs.writeFileSync(npmCli, 'process.exit(0);\n');
+  return { root, npmCli, nodeVersion: '24.14.1', log: () => {} };
+}
+
+test('development setup rejects invalid modes and Node pins before running commands', async (context) => {
+  const options = developmentFixture(context);
+  let calls = 0;
+  options.runCommand = async () => {
+    calls += 1;
+  };
+  await assert.rejects(
+    runDevelopment(options.root, 'unknown', options),
+    /Expected setup or validate/,
+  );
+  await assert.rejects(
+    runDevelopment(options.root, 'setup', { ...options, nodeVersion: '22.23.2' }),
+    /Use Node.js 24\.14\.1/,
+  );
+  await assert.rejects(
+    runDevelopment(options.root, 'setup', { ...options, npmCli: 'npm-cli.js' }),
+    /Invoke this runner with npm/,
+  );
+  fs.writeFileSync(path.join(options.root, '.node-version'), '24\n');
+  await assert.rejects(runDevelopment(options.root, 'setup', options), /Invalid .node-version/);
+  assert.equal(calls, 0);
+});
+
+test('development setup uses the root and npm entry point in fixed dependency order', async (context) => {
+  const options = developmentFixture(context);
+  const calls = [];
+  options.runCommand = async (command, args, settings) => calls.push({ command, args, settings });
+  const result = await runDevelopment(options.root, 'setup', options);
+  assert.deepEqual(result, { mode: 'setup', nodeVersion: '24.14.1', commands: 3 });
+  assert.equal(calls[0].command, 'git');
+  assert.deepEqual(calls[0].args, ['--version']);
+  assert.deepEqual(
+    calls.slice(1).map((call) => call.args),
+    [
+      [options.npmCli, '--version'],
+      [options.npmCli, 'ci'],
+      [options.npmCli, 'run', 'build'],
+      [options.npmCli, 'exec', '--', 'playwright', 'install', 'chromium'],
+    ],
+  );
+  assert.ok(calls.slice(1).every((call) => call.command === process.execPath));
+  assert.ok(calls.every((call) => call.settings.cwd === options.root));
+});
+
+test('development validation retains all existing gates and CI evidence outputs', (context) => {
+  const { root, nodeVersion } = developmentFixture(context);
+  assert.deepEqual(developmentPlan(root, 'validate', nodeVersion), [
+    ['run', 'build'],
+    ['run', 'typecheck'],
+    ['test'],
+    ['run', 'lint'],
+    ['run', 'format:check'],
+    ['run', 'check:docs', '--', '--report', 'test-results/docs.json'],
+    ['run', 'test:dashboard'],
+    [
+      'run',
+      'outcome-proof',
+      '--',
+      '--runs',
+      '5',
+      '--json',
+      '--out',
+      'test-results/outcome-proof.json',
+    ],
+    ['run', 'package:extension'],
+  ]);
+});
+
+test('development commands stop on every failed prerequisite or gate without retries', async (context) => {
+  const options = developmentFixture(context);
+  for (const mode of ['setup', 'validate']) {
+    const commandCount = developmentPlan(options.root, mode, options.nodeVersion).length + 2;
+    for (let failureIndex = 0; failureIndex < commandCount; failureIndex += 1) {
+      let calls = 0;
+      const failure = new Error('synthetic command failure');
+      await assert.rejects(
+        runDevelopment(options.root, mode, {
+          ...options,
+          runCommand: async () => {
+            calls += 1;
+            if (calls === failureIndex + 1) throw failure;
+          },
+        }),
+        (error) => error === failure,
+      );
+      assert.equal(calls, failureIndex + 1);
+    }
+  }
+  assert.equal(fs.readFileSync(path.join(options.root, '.node-version'), 'utf8'), '24.14.1\n');
+});
+
+test('development commands handle spaces, failed exits, timeouts and cancellation', async (context) => {
+  const { root, npmCli } = developmentFixture(context);
+  await runDevelopmentCommand(process.execPath, [npmCli], { cwd: root });
+  await assert.rejects(
+    runDevelopmentCommand(process.execPath, ['-e', 'process.exit(7)'], { cwd: root }),
+    (error) => error.exitCode === 7,
+  );
+  await assert.rejects(
+    runDevelopmentCommand('slipstream-missing-development-command', [], { cwd: root }),
+    { code: 'ENOENT' },
+  );
+  await assert.rejects(
+    runDevelopmentCommand(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], {
+      cwd: root,
+      timeoutMs: 50,
+    }),
+    /timed out/,
+  );
+  const controller = new AbortController();
+  const running = runDevelopmentCommand(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], {
+    cwd: root,
+    signal: controller.signal,
+  });
+  controller.abort();
+  await assert.rejects(running, /cancelled/);
+  await assert.rejects(
+    runDevelopmentCommand(process.execPath, [npmCli], { cwd: root, signal: controller.signal }),
+    /cancelled/,
+  );
+  await assert.rejects(
+    runDevelopmentCommand(process.execPath, [npmCli], { cwd: root, timeoutMs: 0 }),
+    /timeout must be/,
+  );
+});
+
+test('development CI executes the public commands on clean pinned Windows and Linux jobs', () => {
+  const manifest = JSON.parse(fs.readFileSync(path.join(REPO, 'package.json'), 'utf8'));
+  const workflow = parse(fs.readFileSync(path.join(REPO, '.github/workflows/ci.yml'), 'utf8'));
+  const job = workflow.jobs['browser-proof'];
+  assert.equal(manifest.scripts.setup, 'node scripts/develop.mjs setup');
+  assert.equal(manifest.scripts.validate, 'node scripts/develop.mjs validate');
+  assert.deepEqual(job.strategy.matrix.include, [
+    { id: 'linux-node24', os: 'ubuntu-latest' },
+    { id: 'windows-node24', os: 'windows-latest' },
+  ]);
+  assert.deepEqual(
+    job.steps.filter((step) => step.id).map(({ id, run }) => [id, run]),
+    [
+      ['setup', 'npm run setup'],
+      ['chromium', job.steps.find((step) => step.id === 'chromium').run],
+      ['validate', 'npm run validate'],
+    ],
+  );
+  assert.match(
+    job.steps.find((step) => step.id === 'chromium').run,
+    /install --with-deps chromium/,
+  );
+  const nodeSetup = job.steps.find((step) => step.uses?.startsWith('actions/setup-node@'));
+  assert.equal(nodeSetup.with['node-version-file'], '.node-version');
+  assert.equal(nodeSetup.with.cache, 'npm');
+  assert.equal(nodeSetup.with['cache-dependency-path'], 'package-lock.json');
+});
+
+test('development CI rejects failed, cancelled, skipped or absent commands despite valid reports', (context) => {
+  const { root } = fixture(context);
+  for (const name of Object.keys(browserSteps)) {
+    for (const outcome of ['failure', 'cancelled', 'skipped', undefined]) {
+      const report = collectBrowser(root, {
+        ...META,
+        job: BROWSER_JOBS[0],
+        steps: { ...browserSteps, [name]: { outcome } },
+      });
+      assert.equal(report.passed, false);
+      assert.deepEqual(report.errors, [`${name}: required command did not succeed`]);
+    }
+  }
 });
 
 test('valid unit and browser evidence records exact provenance', (context) => {

@@ -160,15 +160,7 @@ export function collectUnit(root, options) {
 export function collectBrowser(root, options) {
   const metadata = identity(options);
   if (!BROWSER_JOBS.includes(options.job)) throw new Error('Unknown browser job');
-  const errors = successfulSteps(options.steps, [
-    'install',
-    'build',
-    'chromium',
-    'browser',
-    'docs',
-    'proof',
-    'package',
-  ]);
+  const errors = successfulSteps(options.steps, ['setup', 'chromium', 'validate']);
   const browser = inspect(errors, 'browser/report.json', () => {
     const { stats, errors: failures } = readJson(root, 'browser/report.json');
     expect(
