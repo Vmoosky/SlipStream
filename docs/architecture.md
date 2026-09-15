@@ -489,6 +489,22 @@ imports resolve through the root dependencies. Scratch copies are removed on
 exit. A timeout, spawn error, or failed repaired test/build is a failed proof,
 not a successful task with a small captured output.
 
+## CI Failure Containment
+
+[check-ci.mjs](../scripts/check-ci.mjs) keeps required-check enforcement separate
+from diagnosis. After the CI and security aggregate gates run, an `always()` step
+classifies failed jobs and retained validation errors into a fixed set of
+dependency, build, test, validation, security, or evidence categories. The
+schema-versioned containment report records the exact revision, workflow, run,
+attempt, head, and base identities and is retained with the aggregate evidence.
+
+Containment is deliberately read-only. It does not retry jobs, execute report
+content, edit the checkout, create commits, open pull requests, or change a failed
+gate to success. Missing, oversized, or malformed evidence becomes an explicit
+evidence finding. The report provides bounded local reproduction guidance for a
+human or a separately approved repair workflow; it is not proof that a repair was
+attempted or successful.
+
 ## Documentation Contracts
 
 [check-docs.mjs](../scripts/check-docs.mjs) checks all maintained Markdown and
