@@ -39,6 +39,11 @@ exact Node pin. On Windows the Vitest configs select `vmThreads`; do not pass th
 flag through the mixed-runner root `npm test`. See the
 [package map](docs/architecture.md).
 
+`npm run test:e2e` runs the [browser E2E suite](e2e/dashboard.smoke.spec.ts) after
+setup. `test:dashboard` remains a compatibility alias, including forwarded
+Playwright arguments. Both browser-proof PR jobs run E2E once through `validate`;
+`ci-required` rejects missing, failed, or skipped browser evidence.
+
 Browser tests start temporary loopback servers and cover desktop/mobile layouts.
 They do not need a running dashboard or the user's savings store. The
 [offline workload](tests/fixtures/outcome-workload) deliberately fails before the
