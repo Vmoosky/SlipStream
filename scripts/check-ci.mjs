@@ -16,6 +16,33 @@ export const DOC_CONTRACTS = [
   'packages/extension/README.md',
   'docs/mcp.md',
 ];
+const CONTAINMENT_RULES = [
+  {
+    category: 'dependency',
+    pattern: /\binstall\b/i,
+    action: 'Inspect dependency installation output.',
+  },
+  {
+    category: 'build',
+    pattern: /\b(build|types)\b/i,
+    action: 'Reproduce the build or typecheck locally.',
+  },
+  {
+    category: 'test',
+    pattern: /\b(tests?|browser)\b/i,
+    action: 'Reproduce the failing test suite locally.',
+  },
+  {
+    category: 'validation',
+    pattern: /\b(lint|format|docs|proof|package)\b/i,
+    action: 'Run the named validation command locally.',
+  },
+  {
+    category: 'security',
+    pattern: /\b(secrets|codeql|dependency-review)\b/i,
+    action: 'Review the corresponding security job without exposing findings.',
+  },
+];
 
 function hasExpectedDocContracts(contracts) {
   return (
@@ -295,6 +322,56 @@ export function verifySecurity(options) {
   };
 }
 
+export function classifyFailureContainment(root, options, scope) {
+  if (!['ci', 'security'].includes(scope)) throw new Error('Unknown containment scope');
+  const metadata = identity(options);
+  const gate = scope === 'ci' ? verifyRequired(root, options) : verifySecurity(options);
+  const failures = [...gate.errors];
+  if (scope === 'ci') {
+    const reports = [
+      ...UNIT_JOBS.map((job) => `ci-unit-${job}/ci-unit.json`),
+      ...BROWSER_JOBS.map((job) => `ci-browser-${job}/ci-browser.json`),
+    ];
+    for (const file of reports) {
+      try {
+        const report = readJson(root, file);
+        if (!Array.isArray(report.errors)) throw new Error('invalid errors');
+        for (const error of report.errors.slice(0, 20)) {
+          if (typeof error === 'string' && error.length <= 500) failures.push(`${file}: ${error}`);
+        }
+      } catch {
+        failures.push(`${file}: evidence unavailable or invalid`);
+      }
+    }
+  }
+  const uniqueFailures = [...new Set(failures)].slice(0, 100);
+  const categories = [
+    ...new Set(
+      uniqueFailures.map(
+        (failure) =>
+          CONTAINMENT_RULES.find((rule) => rule.pattern.test(failure))?.category ?? 'evidence',
+      ),
+    ),
+  ].sort();
+  const actions = categories.map((category) =>
+    category === 'evidence'
+      ? 'Inspect missing or invalid CI evidence before retrying.'
+      : CONTAINMENT_RULES.find((rule) => rule.category === category).action,
+  );
+  return {
+    schemaVersion: 1,
+    kind: 'failure-containment',
+    ...metadata,
+    scope,
+    status: uniqueFailures.length === 0 ? 'clear' : 'contained',
+    automaticRetry: false,
+    automaticRepair: false,
+    failures: uniqueFailures,
+    categories,
+    actions,
+  };
+}
+
 function main() {
   const [mode] = process.argv.slice(2);
   const event = JSON.parse(fs.readFileSync(process.env.GITHUB_EVENT_PATH, 'utf8'));
@@ -316,11 +393,18 @@ function main() {
   else if (mode === 'browser') report = collectBrowser(reports, options);
   else if (mode === 'required') report = verifyRequired(path.join(ROOT, 'artifacts'), options);
   else if (mode === 'security') report = verifySecurity(options);
-  else throw new Error('Usage: check-ci.mjs unit|browser|required|security');
+  else if (mode === 'contain-ci')
+    report = classifyFailureContainment(path.join(ROOT, 'artifacts'), options, 'ci');
+  else if (mode === 'contain-security')
+    report = classifyFailureContainment(path.join(ROOT, 'artifacts'), options, 'security');
+  else
+    throw new Error(
+      'Usage: check-ci.mjs unit|browser|required|security|contain-ci|contain-security',
+    );
   fs.mkdirSync(reports, { recursive: true });
   fs.writeFileSync(path.join(reports, `ci-${mode}.json`), `${JSON.stringify(report, null, 2)}\n`);
   console.log(JSON.stringify(report, null, 2));
-  process.exitCode = report.passed ? 0 : 1;
+  process.exitCode = mode.startsWith('contain-') || report.passed ? 0 : 1;
 }
 
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) main();

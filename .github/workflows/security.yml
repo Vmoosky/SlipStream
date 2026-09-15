@@ -69,11 +69,18 @@ jobs:
         env:
           CI_NEEDS: ${{ toJSON(needs) }}
         run: node scripts/check-ci.mjs security
+      - name: Classify failures for bounded containment
+        if: ${{ always() }}
+        env:
+          CI_NEEDS: ${{ toJSON(needs) }}
+        run: node scripts/check-ci.mjs contain-security
       - name: Retain security check result
         if: ${{ always() }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: security-required
-          path: test-results/ci-security.json
+          path: |
+            test-results/ci-security.json
+            test-results/ci-contain-security.json
           if-no-files-found: error
           retention-days: 7

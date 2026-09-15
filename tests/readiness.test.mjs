@@ -11,6 +11,7 @@ import {
   collectBrowser,
   verifyRequired,
   verifySecurity,
+  classifyFailureContainment,
   UNIT_JOBS,
   BROWSER_JOBS,
   UNIT_REPORTS,
@@ -204,6 +205,51 @@ test('failed commands and cancelled or skipped jobs fail the required gate', (co
   );
 });
 
+test('failure containment stays clear for successful CI evidence', (context) => {
+  const { root, options } = artifacts(context);
+  assert.deepEqual(classifyFailureContainment(root, options, 'ci'), {
+    schemaVersion: 1,
+    kind: 'failure-containment',
+    ...META,
+    scope: 'ci',
+    status: 'clear',
+    automaticRetry: false,
+    automaticRepair: false,
+    failures: [],
+    categories: [],
+    actions: [],
+  });
+});
+
+test('failure containment classifies bounded diagnostics and fails closed on missing evidence', (context) => {
+  const { root, options } = artifacts(context);
+  const failedUnit = collectUnit(root, {
+    ...META,
+    job: UNIT_JOBS[0],
+    steps: { ...unitSteps, tests: { outcome: 'failure' } },
+  });
+  fs.writeFileSync(
+    path.join(root, `ci-unit-${UNIT_JOBS[0]}`, 'ci-unit.json'),
+    JSON.stringify(failedUnit),
+  );
+  fs.rmSync(path.join(root, `ci-browser-${BROWSER_JOBS[0]}`, 'ci-browser.json'));
+  const report = classifyFailureContainment(
+    root,
+    { ...options, needs: { ...options.needs, unit: { result: 'failure' } } },
+    'ci',
+  );
+  assert.equal(report.status, 'contained');
+  assert.equal(report.automaticRetry, false);
+  assert.equal(report.automaticRepair, false);
+  assert.deepEqual(report.categories, ['evidence', 'test']);
+  assert.ok(report.failures.some((failure) => failure.includes('tests: required command')));
+  assert.ok(report.failures.some((failure) => failure.includes('evidence unavailable or invalid')));
+  assert.deepEqual(report.actions, [
+    'Inspect missing or invalid CI evidence before retrying.',
+    'Reproduce the failing test suite locally.',
+  ]);
+});
+
 test('missing artifacts or an artifact from another revision or attempt fail closed', (context) => {
   const { root, options, write } = artifacts(context);
   assert.equal(verifyRequired(root, options).passed, true);
@@ -327,6 +373,15 @@ test('security workflow isolates write permission and never builds untrusted PR 
   assert.ok(workflow.jobs.codeql.steps.every((step) => !step.run));
   assert.equal(workflow.jobs['security-required'].if, '${{ always() }}');
   assert.deepEqual(workflow.jobs['security-required'].needs, ['codeql', 'dependency-review']);
+  const containment = workflow.jobs['security-required'].steps.find((step) =>
+    step.run?.endsWith('check-ci.mjs contain-security'),
+  );
+  assert.equal(containment.if, '${{ always() }}');
+  assert.equal(containment.env.CI_NEEDS, '${{ toJSON(needs) }}');
+  const retained = workflow.jobs['security-required'].steps.find((step) =>
+    step.uses?.startsWith('actions/upload-artifact@'),
+  );
+  assert.match(retained.with.path, /test-results\/ci-contain-security\.json/);
   assert.equal(workflow.jobs['dependency-review'].if, "${{ github.event_name == 'pull_request' }}");
   for (const job of Object.values(workflow.jobs)) {
     assert.equal(job['continue-on-error'], undefined);
@@ -350,6 +405,15 @@ test('required CI has no path bypass, unpinned actions, or success-by-skipping p
   assert.deepEqual(workflow.permissions, { contents: 'read' });
   assert.equal(workflow.jobs['ci-required'].if, '${{ always() }}');
   assert.deepEqual(workflow.jobs['ci-required'].needs, ['unit', 'browser-proof', 'secrets']);
+  const containment = workflow.jobs['ci-required'].steps.find((step) =>
+    step.run?.endsWith('check-ci.mjs contain-ci'),
+  );
+  assert.equal(containment.if, '${{ always() }}');
+  assert.equal(containment.env.CI_NEEDS, '${{ toJSON(needs) }}');
+  const retained = workflow.jobs['ci-required'].steps.find((step) =>
+    step.uses?.startsWith('actions/upload-artifact@'),
+  );
+  assert.match(retained.with.path, /test-results\/ci-contain-ci\.json/);
   assert.deepEqual(
     workflow.jobs.unit.strategy.matrix.include.map((entry) => entry.id),
     UNIT_JOBS,
