@@ -83,10 +83,8 @@ jobs:
           node-version-file: .node-version
           cache: npm
           cache-dependency-path: package-lock.json
-      - id: install
-        run: npm ci
-      - id: build
-        run: npm run build
+      - id: setup
+        run: npm run setup
       - id: chromium
         shell: bash
         run: |
@@ -95,14 +93,8 @@ jobs:
           else
             npm exec -- playwright install chromium
           fi
-      - id: browser
-        run: npm run test:dashboard
-      - id: docs
-        run: npm run check:docs -- --report test-results/docs.json
-      - id: proof
-        run: npm run outcome-proof -- --runs 5 --json --out test-results/outcome-proof.json
-      - id: package
-        run: npm run package:extension
+      - id: validate
+        run: npm run validate
       - name: Verify browser and proof evidence
         if: ${{ always() }}
         env:

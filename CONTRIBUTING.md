@@ -2,32 +2,42 @@
 
 ## Bootstrap
 
-Run commands from the repository root. Use the Node version in
-[.node-version](.node-version) for development; compatibility CI also covers the
-Node 20 and 22 release lines. Install once at the root, not inside a package.
+Install Git and the exact Node version in [.node-version](.node-version), including
+its bundled npm. Run these commands from the repository root on Windows or Linux:
 
 ```sh
-npm ci
-npm run build
-npm run typecheck
-npm test
-npm run lint
-npm run format:check
-npm run check:docs
+npm run setup
+npm run validate
 ```
 
-The workspace order builds core before its consumers. On Windows the Vitest
-configs select `vmThreads`; do not pass that flag through the root `npm test`,
-which also runs Node's test runner. See the [package map](docs/architecture.md).
+The dependency-free [runner](scripts/develop.mjs) checks the Node pin, Git, and npm
+before running any setup or validation commands. `setup` runs `npm ci`, builds the
+workspaces in dependency order, and downloads Playwright Chromium. Repeating it
+reinstalls locked dependencies; do not install separately inside a package.
 
-Install Chromium once with `npm exec -- playwright install chromium` (CI Linux
-uses `--with-deps`), then run the remaining local gates:
+On a minimal Linux host, Chromium also needs system libraries. After setup, install
+them with the following command, which may require administrator privileges. The
+runner does not elevate privileges automatically; CI provisions these libraries
+explicitly with Playwright's `--with-deps` option.
 
 ```sh
-npm run test:dashboard
-npm run outcome-proof -- --runs 5
-npm run package:extension
+npm exec -- playwright install-deps chromium
 ```
+
+`validate` rebuilds before typechecking and running the script and workspace tests,
+lint, formatting, documentation contracts, browser tests, the five-run offline
+proof, and extension packaging. It writes the documentation, browser, and proof
+reports under `test-results/`. It does not install the VSIX, register plugins, or
+change user stores. Each command stops on failure or cancellation without retries
+and has a ten-minute deadline (ten seconds for prerequisite checks).
+
+The Linux and Windows browser-proof CI jobs run these same commands from a fresh
+checkout and require both successful commands and valid report contents. Node 20
+and 22 compatibility jobs retain the individual `npm ci`, `build`, `typecheck`,
+`test`, `lint`, and `format:check` commands; only the developer runner enforces the
+exact Node pin. On Windows the Vitest configs select `vmThreads`; do not pass that
+flag through the mixed-runner root `npm test`. See the
+[package map](docs/architecture.md).
 
 Browser tests start temporary loopback servers and cover desktop/mobile layouts.
 They do not need a running dashboard or the user's savings store. The

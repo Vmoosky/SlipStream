@@ -14,13 +14,15 @@
     "node": ">=20"
   },
   "scripts": {
+    "setup": "node scripts/develop.mjs setup",
+    "validate": "node scripts/develop.mjs validate",
     "build": "npm run build --workspaces --if-present",
     "test": "npm run test:scripts && npm run test --workspaces --if-present",
     "test:scripts": "node --test tests/dashboard-cli.test.mjs tests/benchmark-report.test.mjs tests/copilot-plugin-install.test.mjs tests/outcome-proof.test.mjs tests/check-docs.test.mjs tests/readiness.test.mjs",
     "test:dashboard": "playwright test tests/dashboard.smoke.spec.ts",
     "typecheck": "npm run typecheck --workspaces --if-present",
     "lint": "eslint . --max-warnings 0",
-    "format:check": "prettier --check eslint.config.mjs playwright.config.ts scripts/check-*.mjs scripts/maintenance.mjs tests/check-docs.test.mjs tests/readiness.test.mjs .github/workflows/*.yml .github/dependabot.yml",
+    "format:check": "prettier --check eslint.config.mjs playwright.config.ts scripts/check-*.mjs scripts/develop.mjs scripts/maintenance.mjs tests/check-docs.test.mjs tests/readiness.test.mjs .github/workflows/*.yml .github/dependabot.yml",
     "check:docs": "node scripts/check-docs.mjs",
     "docs:write": "node scripts/check-docs.mjs --write",
     "maintenance:docs": "node scripts/maintenance.mjs",
