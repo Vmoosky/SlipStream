@@ -22,7 +22,7 @@ export function developmentPlan(root, mode, nodeVersion = process.versions.node)
         ['run', 'lint'],
         ['run', 'format:check'],
         ['run', 'check:docs', '--', '--report', 'test-results/docs.json'],
-        ['run', 'test:dashboard'],
+        ['run', 'test:e2e'],
         [
           'run',
           'outcome-proof',

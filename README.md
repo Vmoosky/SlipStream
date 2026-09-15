@@ -701,6 +701,7 @@ packages/hook-runtime stateful Copilot CLI hook and local daemon
 packages/copilot-plugin installable hooks plus retrieval-only MCP server
 packages/extension    VS Code extension: LM tools, status bar, dashboard
 tests/fixtures/       isolated workloads for regression and offline proof
+e2e/                  Playwright browser tests for desktop and mobile
 docs/                 architecture reference, integration and packaging notes
 scripts/benchmark.mjs measures savings and verifies recoverability
 scripts/outcome-proof.mjs paired baseline/compression/policy outcome proof
@@ -708,7 +709,7 @@ scripts/outcome-proof.mjs paired baseline/compression/policy outcome proof
 
 ```bash
 npm test                      # all script, unit, and integration tests
-npm run test:dashboard        # browser smoke for the dashboard
+npm run test:e2e              # dashboard browser E2E, also required on PRs
 node scripts/benchmark.mjs    # regenerate the results table
 npm run benchmark:snapshot    # write test-results/slipstream-benchmark-snapshot.md
 npm run outcome-proof         # paired comparison over an isolated test fixture
