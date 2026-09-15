@@ -95,6 +95,7 @@ jobs:
             npm exec -- playwright install chromium
           fi
       - id: validate
+        name: Validate repository and browser E2E
         env:
           SLIPSTREAM_DOCS_CI: 'true'
         run: npm run validate

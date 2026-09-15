@@ -238,7 +238,7 @@ test('development validation retains all existing gates and CI evidence outputs'
     ['run', 'lint'],
     ['run', 'format:check'],
     ['run', 'check:docs', '--', '--report', 'test-results/docs.json'],
-    ['run', 'test:dashboard'],
+    ['run', 'test:e2e'],
     [
       'run',
       'outcome-proof',
@@ -311,12 +311,20 @@ test('development commands handle spaces, failed exits, timeouts and cancellatio
   );
 });
 
-test('development CI executes the public commands on clean pinned Windows and Linux jobs', () => {
+test('development CI executes E2E through the public commands on pinned Windows and Linux jobs', () => {
   const manifest = JSON.parse(fs.readFileSync(path.join(REPO, 'package.json'), 'utf8'));
   const workflow = parse(fs.readFileSync(path.join(REPO, '.github/workflows/ci.yml'), 'utf8'));
   const job = workflow.jobs['browser-proof'];
   assert.equal(manifest.scripts.setup, 'node scripts/develop.mjs setup');
   assert.equal(manifest.scripts.validate, 'node scripts/develop.mjs validate');
+  assert.equal(manifest.scripts['test:e2e'], 'playwright test');
+  assert.equal(manifest.scripts['test:dashboard'], 'npm run test:e2e --');
+  assert.ok(fs.existsSync(path.join(REPO, 'e2e/dashboard.smoke.spec.ts')));
+  assert.equal(fs.existsSync(path.join(REPO, 'tests/dashboard.smoke.spec.ts')), false);
+  assert.equal(
+    job.steps.find((step) => step.id === 'validate').name,
+    'Validate repository and browser E2E',
+  );
   assert.deepEqual(job.strategy.matrix.include, [
     { id: 'linux-node24', os: 'ubuntu-latest' },
     { id: 'windows-node24', os: 'windows-latest' },

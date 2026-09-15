@@ -1,7 +1,7 @@
 import { defineConfig } from '@playwright/test';
 
 export default defineConfig({
-  testDir: './tests',
+  testDir: './e2e',
   testMatch: 'dashboard.smoke.spec.ts',
   forbidOnly: Boolean(process.env.CI),
   retries: 0,

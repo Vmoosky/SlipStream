@@ -391,7 +391,7 @@ shared storage dir and your events join the same dashboard.
 npm run build         # all workspaces
 npm run typecheck
 npm test              # scripts + unit + integration
-npm run test:dashboard    # Playwright browser smoke
+npm run test:e2e          # Playwright browser E2E, required on PRs
 npm run proof-table       # regenerate the measured savings table
 npm run outcome-proof     # paired baseline/compression/policy outcome proof
 ```
@@ -582,7 +582,8 @@ Supported Node.js: >=20. The pinned development runtime is in [.node-version](..
 | build | npm run build --workspaces --if-present |
 | test | npm run test:scripts && npm run test --workspaces --if-present |
 | test:scripts | node --test tests/dashboard-cli.test.mjs tests/benchmark-report.test.mjs tests/copilot-plugin-install.test.mjs tests/outcome-proof.test.mjs tests/check-docs.test.mjs tests/readiness.test.mjs |
-| test:dashboard | playwright test tests/dashboard.smoke.spec.ts |
+| test:e2e | playwright test |
+| test:dashboard | npm run test:e2e -- |
 | typecheck | npm run typecheck --workspaces --if-present |
 | lint | eslint . --max-warnings 0 |
 | format:check | prettier --check eslint.config.mjs playwright.config.ts scripts/check-*.mjs scripts/develop.mjs scripts/maintenance.mjs tests/check-docs.test.mjs tests/readiness.test.mjs .github/workflows/*.yml .github/dependabot.yml |
@@ -607,5 +608,5 @@ Supported Node.js: >=20. The pinned development runtime is in [.node-version](..
 | purge:copilot | node packages/copilot-plugin/dist/hook.js purge |
 | clean | node -e "for (const p of ['copilot-plugin','core','hook-runtime','mcp-server','extension']) require('fs').rmSync('packages/'+p+'/dist',{recursive:true,force:true})" |
 
-<!-- source-sha256: 3e63d368dbac5d41d7456c96392b45e06d82b1e01746a3a3109209933a9ac8ce -->
+<!-- source-sha256: 0ede7a2b33344c30d8d9a5fbc972aa806d40e4a9fd10c0530e9a4fea2def5bd4 -->
 <!-- slipstream-reference:build:end -->
