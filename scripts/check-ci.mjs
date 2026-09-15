@@ -170,36 +170,9 @@ export function collectBrowser(root, options) {
     );
     return { contracts: report.contracts, coverage: report.coverage, residual: report.residual };
   });
-  const proof = inspect(errors, 'outcome-proof.json', () => {
-    const report = readJson(root, 'outcome-proof.json');
-    expect(
-      report.proof === 'hc08-outcome-paired-comparison' &&
-        report.gate?.passed === true &&
-        report.task?.verifiedSuccess === true &&
-        report.runs === 5,
-    );
-    expect(
-      Array.isArray(report.gate.checks) &&
-        report.gate.checks.length > 0 &&
-        report.gate.checks.every((check) => check.pass === true),
-    );
-    expect(
-      Array.isArray(report.arms) &&
-        ['baseline', 'compressed', 'policy'].every((name) =>
-          report.arms.some((arm) => arm.arm === name),
-        ) &&
-        report.arms.length === 3,
-    );
-    expect(
-      report.arms.find((arm) => arm.arm === 'policy').policySimulated === true &&
-        report.measurementCoverage?.notCovered?.length > 0,
-    );
-    return {
-      runs: report.runs,
-      gate: report.gate,
-      measurementCoverage: report.measurementCoverage,
-    };
-  });
+  const proof = inspect(errors, 'outcome-proof.json', () =>
+    validateProofReport(readJson(root, 'outcome-proof.json')),
+  );
   return {
     schemaVersion: 1,
     kind: 'browser-proof-validation',
@@ -210,6 +183,36 @@ export function collectBrowser(root, options) {
     docs,
     proof,
     errors,
+  };
+}
+
+export function validateProofReport(report) {
+  expect(
+    report.proof === 'hc08-outcome-paired-comparison' &&
+      report.gate?.passed === true &&
+      report.task?.verifiedSuccess === true &&
+      report.runs === 5,
+  );
+  expect(
+    Array.isArray(report.gate.checks) &&
+      report.gate.checks.length > 0 &&
+      report.gate.checks.every((check) => check.pass === true),
+  );
+  expect(
+    Array.isArray(report.arms) &&
+      ['baseline', 'compressed', 'policy'].every((name) =>
+        report.arms.some((arm) => arm.arm === name),
+      ) &&
+      report.arms.length === 3,
+  );
+  expect(
+    report.arms.find((arm) => arm.arm === 'policy').policySimulated === true &&
+      report.measurementCoverage?.notCovered?.length > 0,
+  );
+  return {
+    runs: report.runs,
+    gate: report.gate,
+    measurementCoverage: report.measurementCoverage,
   };
 }
 

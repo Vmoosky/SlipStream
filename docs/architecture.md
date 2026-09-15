@@ -533,9 +533,10 @@ Supported Node.js: >=20. The pinned development runtime is in [.node-version](..
 | test:dashboard | playwright test tests/dashboard.smoke.spec.ts |
 | typecheck | npm run typecheck --workspaces --if-present |
 | lint | eslint . --max-warnings 0 |
-| format:check | prettier --check eslint.config.mjs playwright.config.ts scripts/check-*.mjs tests/check-docs.test.mjs tests/readiness.test.mjs .github/workflows/*.yml |
+| format:check | prettier --check eslint.config.mjs playwright.config.ts scripts/check-*.mjs scripts/maintenance.mjs tests/check-docs.test.mjs tests/readiness.test.mjs .github/workflows/*.yml .github/dependabot.yml |
 | check:docs | node scripts/check-docs.mjs |
 | docs:write | node scripts/check-docs.mjs --write |
+| maintenance:docs | node scripts/maintenance.mjs |
 | benchmark:snapshot | node scripts/benchmark.mjs --markdown |
 | benchmark:recommendations | node scripts/benchmark.mjs --model-recommendations |
 | proof-table | node scripts/proof-table.mjs |
@@ -553,5 +554,5 @@ Supported Node.js: >=20. The pinned development runtime is in [.node-version](..
 | purge:copilot | node packages/copilot-plugin/dist/hook.js purge |
 | clean | node -e "for (const p of ['copilot-plugin','core','hook-runtime','mcp-server','extension']) require('fs').rmSync('packages/'+p+'/dist',{recursive:true,force:true})" |
 
-<!-- source-sha256: 1306d5644608d507ca90689cb91b515c4c7939b5db1d6a9b3ae0376c101162dd -->
+<!-- source-sha256: ffdbaa28d71fc5b78aef08db0ca7757d93def6e56e0bcfc285b9cbcfea64ef70 -->
 <!-- slipstream-reference:build:end -->

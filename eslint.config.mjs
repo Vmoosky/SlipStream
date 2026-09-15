@@ -35,6 +35,7 @@ export default [
   {
     files: [
       'scripts/check-*.mjs',
+      'scripts/maintenance.mjs',
       'tests/check-docs.test.mjs',
       'tests/readiness.test.mjs',
       'eslint.config.mjs',

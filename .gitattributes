@@ -2,6 +2,8 @@
 eslint.config.mjs text eol=lf
 playwright.config.ts text eol=lf
 scripts/check-*.mjs text eol=lf
+scripts/maintenance.mjs text eol=lf
 tests/check-docs.test.mjs text eol=lf
 tests/readiness.test.mjs text eol=lf
 .github/workflows/*.yml text eol=lf
+.github/dependabot.yml text eol=lf

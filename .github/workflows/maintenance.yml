@@ -1,0 +1,97 @@
+name: Maintenance
+
+on:
+  schedule:
+    - cron: '0 7 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: maintenance-${{ github.repository }}
+  cancel-in-progress: false
+
+jobs:
+  maintenance:
+    if: ${{ vars.SLIPSTREAM_MAINTENANCE_ENABLED == 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      SLIPSTREAM_MAINTENANCE_ENABLED: ${{ vars.SLIPSTREAM_MAINTENANCE_ENABLED }}
+    steps:
+      - id: context
+        name: Require the trusted default branch
+        shell: bash
+        env:
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          set -euo pipefail
+          test -n "$DEFAULT_BRANCH"
+          test "$SLIPSTREAM_MAINTENANCE_ENABLED" = 'true'
+          test "$GITHUB_REF" = "refs/heads/$DEFAULT_BRANCH"
+          test "$GITHUB_WORKFLOW_REF" = "$GITHUB_REPOSITORY/.github/workflows/maintenance.yml@refs/heads/$DEFAULT_BRANCH"
+          case "$GITHUB_EVENT_NAME" in
+            schedule|workflow_dispatch) ;;
+            *) exit 1 ;;
+          esac
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version-file: .node-version
+          cache: npm
+          cache-dependency-path: package-lock.json
+      - id: install
+        timeout-minutes: 5
+        run: npm ci
+      - id: build
+        timeout-minutes: 3
+        run: npm run build
+      - id: tests
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        timeout-minutes: 2
+        run: node --test tests/check-docs.test.mjs tests/readiness.test.mjs
+      - id: audit
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        timeout-minutes: 1
+        shell: bash
+        run: |
+          mkdir -p test-results
+          npm audit --json --audit-level=moderate > test-results/maintenance-audit.json
+      - id: docs
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        timeout-minutes: 5
+        run: node scripts/maintenance.mjs --revision "$GITHUB_SHA"
+      - id: proof
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        timeout-minutes: 6
+        run: npm run outcome-proof -- --runs 5 --json --out test-results/maintenance-proof.json
+      - id: verify
+        name: Require matching evidence and all independent checks
+        if: ${{ always() && steps.context.outcome == 'success' }}
+        timeout-minutes: 1
+        env:
+          CI_STEPS: ${{ toJSON(steps) }}
+          MAINTENANCE_REPORT: ${{ steps.docs.outputs.report_path }}
+        run: node scripts/maintenance.mjs --verify
+      - name: Retain maintenance evidence
+        if: ${{ always() && steps.context.outcome == 'success' }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: maintenance-evidence-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            test-results/maintenance/run-*/report.json
+            test-results/maintenance/run-*/summary.json
+          if-no-files-found: error
+          retention-days: 7
+      - name: Retain a fully verified proposal
+        if: ${{ !cancelled() && steps.verify.outcome == 'success' && steps.verify.outputs.proposal_path != '' }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: maintenance-proposal-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ steps.verify.outputs.proposal_path }}
+          if-no-files-found: error
+          retention-days: 7
