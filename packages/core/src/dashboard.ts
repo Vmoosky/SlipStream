@@ -1548,7 +1548,7 @@ function formatBytes(value: number): string {
 }
 
 function escapeMarkdownCell(value: string): string {
-  return value.replace(/\|/g, '\\|').replace(/\r?\n/g, ' ');
+  return value.replace(/\\/g, '\\\\').replace(/\|/g, '\\|').replace(/\r?\n/g, ' ');
 }
 
 function escapeCsvCell(value: string): string {

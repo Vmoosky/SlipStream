@@ -80,7 +80,7 @@ test('dashboard management finds the local tracking runtime without launching VS
   available = false;
   const failed = await request();
   assert.equal(failed.status, 500);
-  assert.match((await failed.json()).error, /tracking runtime is unavailable/);
+  assert.deepEqual(await failed.json(), { error: 'Internal server error.' });
   await new Promise((resolve) => runtime.close(resolve));
   assert.equal((await request()).status, 500);
 });

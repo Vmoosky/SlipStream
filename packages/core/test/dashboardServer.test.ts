@@ -298,10 +298,72 @@ describe('dashboard server content', () => {
       launchFails = true;
       const failed = await manage('manage');
       expect(failed.status).toBe(500);
-      expect(await failed.json()).toEqual({ error: 'Launcher unavailable' });
+      expect(await failed.json()).toEqual({ error: 'Internal server error.' });
     } finally {
       await standalone.close();
     }
+  });
+
+  it.each([
+    new Error('EACCES C:\\synthetic-private-store\\savings.jsonl'),
+    'synthetic-private-token',
+  ])('does not expose unexpected configuration errors: %j', async (failure) => {
+    const update = vi.spyOn(engine, 'updateConfig').mockImplementationOnce(() => { throw failure; });
+    try {
+      const response = await fetch(`${base}/api/config`, {
+        method: 'POST', body: JSON.stringify({ enabled: true }),
+      });
+      expect(response.status).toBe(500);
+      expect(await response.json()).toEqual({ error: 'Internal server error.' });
+      expect(update).toHaveBeenCalledOnce();
+    } finally {
+      update.mockRestore();
+    }
+  });
+
+  it('does not expose filesystem error details from baseline persistence', async () => {
+    const save = vi.spyOn(engine.baseline, 'save').mockImplementationOnce(() => {
+      throw new Error('EACCES C:\\synthetic-private-store\\baseline.json');
+    });
+    try {
+      const response = await fetch(`${base}/api/baseline`, { method: 'POST' });
+      expect(response.status).toBe(500);
+      expect(await response.json()).toEqual({ error: 'Internal server error.' });
+      expect(save).toHaveBeenCalledOnce();
+    } finally {
+      save.mockRestore();
+    }
+  });
+
+  it('does not echo malformed JSON in configuration or policy responses', async () => {
+    const save = vi.fn(async () => {});
+    const writable = await startDashboardServer(engine, { port: 0, costPolicy: { canEdit: () => true, save } });
+    try {
+      for (const [endpoint, message] of [
+        ['/api/config', 'Invalid configuration request.'],
+        ['/api/cost-policy', 'Invalid cost policy request.'],
+      ]) {
+        const response = await fetch(new URL(endpoint!, writable.url), {
+          method: 'POST', body: '{"synthetic-private-token": invalid}',
+        });
+        expect(response.status).toBe(400);
+        expect(await response.json()).toEqual({ error: message });
+      }
+      expect(save).not.toHaveBeenCalled();
+    } finally {
+      await writable.close();
+    }
+  });
+
+  it.each([
+    [{ profile: 'synthetic-private-token' }, 'Unknown compression profile'],
+    [{ enabled: 'synthetic-private-token' }, 'enabled must be a boolean'],
+    [{ maxFileLines: -1 }, 'maxFileLines must be between 50 and 20000'],
+    [{ usdPerMillionTokens: -1 }, 'Fallback input rate must be a non-negative finite number'],
+  ])('keeps known configuration validation useful without echoing values: %j', async (patch, message) => {
+    const response = await fetch(`${base}/api/config`, { method: 'POST', body: JSON.stringify(patch) });
+    expect(response.status).toBe(400);
+    expect(await response.json()).toEqual({ error: message });
   });
 
   it('restricts model tracking actions and reports sanitized connection status', async () => {
