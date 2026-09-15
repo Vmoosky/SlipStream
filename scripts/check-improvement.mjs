@@ -128,6 +128,60 @@ function validateRetainedRun(run, repository, branch, workflow, events) {
   requireEvidence(['success', 'failure'].includes(run.conclusion));
 }
 
+function validateCompletionTrigger(trigger) {
+  requireEvidence(trigger && typeof trigger === 'object' && !Array.isArray(trigger));
+  requireEvidence(
+    Object.keys(trigger).sort().join(',') ===
+      'attempt,conclusion,eventName,revision,runId,workflow,workflowId',
+  );
+  const source = SOURCES.find((entry) => entry.workflow === trigger.workflow);
+  requireEvidence(source);
+  for (const field of ['runId', 'workflowId'])
+    requireEvidence(
+      typeof trigger[field] === 'string' &&
+        /^[1-9]\d{0,15}$/.test(trigger[field]) &&
+        Number.isSafeInteger(Number(trigger[field])),
+    );
+  requireEvidence(trigger.attempt === '1' && trigger.eventName === 'push');
+  requireEvidence(typeof trigger.revision === 'string' && /^[a-f0-9]{40}$/.test(trigger.revision));
+  requireEvidence(
+    [
+      'success',
+      'failure',
+      'cancelled',
+      'timed_out',
+      'neutral',
+      'skipped',
+      'action_required',
+      'stale',
+      'startup_failure',
+    ].includes(trigger.conclusion),
+  );
+  return source;
+}
+
+function completionTrigger(run, repository, branch) {
+  const source = SOURCES.find((entry) => run?.path === `.github/workflows/${entry.workflow}`);
+  requireEvidence(source && run.name === source.name);
+  requireEvidence(Number.isSafeInteger(run.id) && run.id > 0 && run.run_attempt === 1);
+  requireEvidence(Number.isSafeInteger(run.workflow_id) && run.workflow_id > 0);
+  requireEvidence(
+    run.repository?.full_name === repository && run.head_repository?.full_name === repository,
+  );
+  requireEvidence(run.event === 'push' && run.head_branch === branch && run.status === 'completed');
+  const trigger = {
+    workflow: source.workflow,
+    workflowId: String(run.workflow_id),
+    runId: String(run.id),
+    attempt: '1',
+    revision: run.head_sha,
+    eventName: 'push',
+    conclusion: run.conclusion,
+  };
+  validateCompletionTrigger(trigger);
+  return trigger;
+}
+
 function validateArtifactMetadata(artifact, run, name, allowExpired = false) {
   requireEvidence(artifact?.name === name);
   requireEvidence(Number.isSafeInteger(artifact.id) && artifact.id > 0);
@@ -165,6 +219,7 @@ export async function readRetainedImprovementEvidence(
   validateRetainedRun(run, repository, branch, 'improvement.yml', [
     'schedule',
     'workflow_dispatch',
+    'workflow_run',
   ]);
   requireEvidence(run.conclusion === 'success');
   validateArtifactMetadata(artifact, run, `continuous-improvement-evidence-${run.id}-1`);
@@ -183,6 +238,10 @@ export async function readRetainedImprovementEvidence(
   requireEvidence(
     Object.entries(collector).every(([key, value]) => bundle.collector?.[key] === value),
   );
+  if (run.event === 'workflow_run') {
+    validateCompletionTrigger(bundle.collector.trigger);
+    requireEvidence(Number(bundle.collector.trigger.runId) < run.id);
+  } else requireEvidence(bundle.collector.trigger === undefined);
   requireEvidence(
     Array.isArray(bundle.entries) && bundle.entries.length <= IMPROVEMENT_LIMITS.retainedArchives,
   );
@@ -445,12 +504,14 @@ export function createImprovementClient(repository, token, fetcher = fetch) {
 
 const SOURCES = [
   {
+    name: 'CI',
     workflow: 'ci.yml',
     artifact: 'ci-required',
     file: 'ci-required.json',
     kind: 'required-validation',
   },
   {
+    name: 'Security',
     workflow: 'security.yml',
     artifact: 'security-required',
     file: 'ci-security.json',
@@ -505,11 +566,14 @@ export async function collectImprovementReports({
   repository,
   branch,
   client,
+  trigger,
   registry = { schemaVersion: 1, regressions: [] },
 }) {
   const regressions = validateImprovementRegistry(registry);
   requireEvidence(/^[\w.-]+\/[\w.-]+$/.test(repository) && repository.length <= 200);
   requireEvidence(typeof branch === 'string' && /^[\w./-]+$/.test(branch) && branch.length <= 200);
+  const sources = trigger === undefined ? SOURCES : [validateCompletionTrigger(trigger)];
+  let triggerVerified = false;
   const evidence = [];
   const errors = [];
   const comparisons = [];
@@ -580,6 +644,7 @@ export async function collectImprovementReports({
           validateRetainedRun(run, repository, branch, 'improvement.yml', [
             'schedule',
             'workflow_dispatch',
+            'workflow_run',
           ]);
           requireEvidence(run.conclusion === 'success');
           const name = `continuous-improvement-evidence-${run.id}-1`;
@@ -705,8 +770,18 @@ export async function collectImprovementReports({
     snapshots.set(run.id, value);
     return value;
   };
-  for (const source of SOURCES) {
+  for (const source of sources) {
     try {
+      let completedRun;
+      if (trigger) {
+        completedRun = await client.json(`/actions/runs/${trigger.runId}`);
+        requireEvidence(
+          Object.entries(completionTrigger(completedRun, repository, branch)).every(
+            ([key, value]) => trigger[key] === value,
+          ),
+        );
+        triggerVerified = true;
+      }
       const listing = await client.json(
         `/actions/workflows/${source.workflow}/runs?branch=${encodeURIComponent(branch)}&event=push&status=completed&per_page=${IMPROVEMENT_LIMITS.runsPerWorkflow}`,
       );
@@ -717,13 +792,25 @@ export async function collectImprovementReports({
       const runs = listing.workflow_runs;
       runs.forEach((run) => {
         expectedRun(run, source);
+        if (trigger && run.id === completedRun.id)
+          requireEvidence(
+            Object.entries(completionTrigger(run, repository, branch)).every(
+              ([key, value]) => trigger[key] === value,
+            ),
+          );
         knownRuns.set(run.id, run);
       });
       requireEvidence(new Set(runs.map((run) => run.id)).size === runs.length);
       const latest = runs
-        .slice()
+        .filter((run) => !trigger || run.id < completedRun.id)
         .sort((left, right) => left.id - right.id)
-        .slice(-2);
+        .slice(trigger ? -1 : -2);
+      if (trigger) {
+        latest.push(completedRun);
+        knownRuns.set(completedRun.id, completedRun);
+        if (latest.length < 2)
+          errors.push(`${source.workflow}: no older completed run in the bounded history window`);
+      }
       const history = [];
       for (const run of latest) history.push(await snapshot(run, source));
       comparisons.push({
@@ -823,6 +910,13 @@ export async function collectImprovementReports({
     source: 'github-actions',
     repository,
     branch,
+    trigger: trigger
+      ? {
+          ...trigger,
+          verified: triggerVerified,
+          url: `https://github.com/${repository}/actions/runs/${trigger.runId}`,
+        }
+      : null,
     status:
       comparisons.every((report) => report.status === 'reported') &&
       proofs.every((proof) => proof.verified) &&
@@ -861,6 +955,7 @@ export async function collectImprovementReports({
     limits: IMPROVEMENT_LIMITS,
     residual: [
       'Only completed default-branch push runs are compared; PR and fork artifacts are not consumed.',
+      'Completion reports use the exact triggering run and its newest older run within the bounded history window.',
       'API metadata binds run, attempt, workflow and head; push base revisions remain report-declared.',
       'Only registered pairs can recover originals from authenticated successful first-attempt improvement runs.',
       'Retained capture timestamps are not renewed by copying; repository retention policy may shorten availability.',
@@ -882,7 +977,10 @@ export function improvementIdentity(env, event) {
     env.GITHUB_WORKFLOW_REF ===
       `${repository}/.github/workflows/improvement.yml@refs/heads/${branch}`,
   );
-  requireEvidence(['schedule', 'workflow_dispatch'].includes(env.GITHUB_EVENT_NAME));
+  requireEvidence(
+    ['schedule', 'workflow_dispatch', 'workflow_run'].includes(env.GITHUB_EVENT_NAME),
+  );
+  if (env.GITHUB_EVENT_NAME === 'workflow_run') requireEvidence(event.action === 'completed');
   requireEvidence(
     env.GITHUB_SERVER_URL === 'https://github.com' &&
       env.GITHUB_API_URL === 'https://api.github.com',
@@ -893,12 +991,18 @@ export function improvementIdentity(env, event) {
       Number.isSafeInteger(Number(env.GITHUB_RUN_ID)) &&
       env.GITHUB_RUN_ATTEMPT === '1',
   );
+  const trigger =
+    env.GITHUB_EVENT_NAME === 'workflow_run'
+      ? completionTrigger(event.workflow_run, repository, branch)
+      : undefined;
+  if (trigger) requireEvidence(Number(trigger.runId) < Number(env.GITHUB_RUN_ID));
   return {
     revision: env.GITHUB_SHA,
     workflow: env.GITHUB_WORKFLOW_REF,
     eventName: env.GITHUB_EVENT_NAME,
     runId: env.GITHUB_RUN_ID,
     attempt: env.GITHUB_RUN_ATTEMPT,
+    ...(trigger ? { trigger } : {}),
   };
 }
 
@@ -943,6 +1047,7 @@ export async function runImprovementReview(
       repository,
       branch: event.repository.default_branch,
       client: client ?? createImprovementClient(repository, env.GITHUB_TOKEN),
+      trigger: collector.trigger,
       registry,
     });
     const { retainedEvidence: originals, ...compactReport } = collected;
@@ -964,6 +1069,14 @@ export async function runImprovementReview(
     '## Continuous Improvement',
     '',
     `Source: ${report.source}. Result: ${report.status}.`,
+    ...(report.trigger
+      ? [
+          '',
+          `Trigger: [${report.trigger.workflow} run ${report.trigger.runId}, attempt ${report.trigger.attempt}](${report.trigger.url}).`,
+          `Source revision: ${report.trigger.revision}; conclusion: ${report.trigger.conclusion}; API identity verified: ${report.trigger.verified}.`,
+          `Collector revision: ${report.collector.revision}.`,
+        ]
+      : []),
     '',
     '| New | Recurring | Cleared CI Symptoms | Unverified | Verified Regression Pairs |',
     '| --- | --- | --- | --- | --- |',
@@ -976,6 +1089,7 @@ export async function runImprovementReview(
         ? `- Verified history: ${repair.pullRequestUrl}; fix ${repair.fixCommit}; merge ${repair.mergeCommit}.`
         : `- Missing history for ${repair.findingId}: ${repair.missing.join(', ')}.`,
     ),
+    ...report.errors.map((error) => `- Missing or invalid evidence: ${error}.`),
     '',
     'CI recovery is not causal or automatic repair proof. Evidence still requires human review.',
     'Only authenticated retained originals can outlive source expiry; copying does not renew capture time.',
@@ -996,9 +1110,24 @@ export async function runImprovementReview(
       path.join(outputDirectory, 'evidence.json'),
       `${JSON.stringify(retainedEvidence, null, 2)}\n`,
     );
-    if (env.GITHUB_OUTPUT)
-      fs.appendFileSync(env.GITHUB_OUTPUT, `evidence-path=${relativeDirectory}/evidence.json\n`);
   }
+  if (report.collector && env.GITHUB_OUTPUT)
+    fs.appendFileSync(
+      env.GITHUB_OUTPUT,
+      `${Object.entries({
+        status: report.status,
+        'report-path': `${relativeDirectory}/report.json`,
+        'evidence-path': `${relativeDirectory}/evidence.json`,
+        'trigger-workflow': report.trigger?.workflow ?? '',
+        'trigger-run-id': report.trigger?.runId ?? '',
+        'trigger-attempt': report.trigger?.attempt ?? '',
+        'trigger-revision': report.trigger?.revision ?? '',
+        'trigger-conclusion': report.trigger?.conclusion ?? '',
+        'trigger-verified': report.trigger?.verified ?? '',
+      })
+        .map(([key, value]) => `${key}=${value}`)
+        .join('\n')}\n`,
+    );
   if (report.collector && env.GITHUB_STEP_SUMMARY)
     fs.appendFileSync(env.GITHUB_STEP_SUMMARY, summary);
   return {
