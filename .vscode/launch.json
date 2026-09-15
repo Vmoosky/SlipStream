@@ -10,7 +10,7 @@
         "${workspaceFolder}"
       ],
       "outFiles": ["${workspaceFolder}/packages/extension/dist/**/*.js"],
-      "preLaunchTask": "npm: build - packages/extension"
+      "preLaunchTask": "Slipstream: Build"
     }
   ]
 }
