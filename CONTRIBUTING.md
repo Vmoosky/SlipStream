@@ -124,7 +124,9 @@ It fingerprints fixed gate and artifact failures as `new`, `recurring`, `cleared
 or `unverified`. Recurrence is at the gate/artifact level, not proof of a common
 root cause. A cleared finding requires valid success evidence on a different
 revision; reruns, cancellation, missing history, expired artifacts, and invalid
-provenance cannot clear a finding. PR and fork artifacts are not consumed.
+provenance cannot clear a finding. PR and fork artifacts are not consumed. A
+registered historical pair may instead use authenticated retained originals as
+described below; unregistered comparisons still require live artifacts.
 
 Reports include source/run identities and downloaded artifact digests. Push base
 revisions are report-declared; run, attempt, workflow, and head are checked against
@@ -136,7 +138,7 @@ creates issues or PRs, commits, pushes, merges, or changes the runtime store.
 To connect a recurring finding to a regression, propose a reviewed entry in the
 [regression registry](.github/improvement-regressions.json). Entries must refer
 to genuine history; do not invent failures or seed successful-looking proof.
-Each entry has exactly these fields:
+Each entry requires these fields:
 
 - `findingId`: the full fingerprint from a CI comparison report.
 - `beforeRunId` and `afterRunId`: decimal strings identifying two distinct,
@@ -145,14 +147,65 @@ Each entry has exactly these fields:
 - `suite`: an existing retained unit report, such as `unit-core.json`.
 - `testName`: the exact Vitest `fullName`, unique within that suite.
 
+An optional `repair` object has exactly `fixCommit` (a full commit SHA) and
+`pullRequest` (a positive integer). It must name a real repair, not the later PR
+that merely registers its evidence. Read-only GitHub queries check that the fix
+belongs to that same-repository PR, its merge commit is the passing run's
+revision, and the failing revision is an ancestor of the merge. A non-author
+human owner, member, or collaborator must approve the final PR head before merge,
+with no unresolved request for changes. Stale, dismissed, bot, self, or post-merge
+approval does not qualify. Lists with 100 or more commits or reviews are
+conservatively incomplete. Later successful revisions do not substitute for
+GitHub's exact PR merge SHA.
+
+`repairHistoryStatus` is separate from the named regression result. An omitted
+reference is explicitly `insufficient-evidence`, even if regression collection
+succeeds. A configured but invalid repair reference also fails the report.
+Verified history supplies canonical PR and review links plus fix and merge
+identities. It does not establish causality, agent authorship, automatic repair,
+or remove the need to review the evidence. No historical approval is inferred
+for direct pushes.
+
 The registry accepts at most four entries and no commands. The collector verifies
 the same named test failed before and passed afterward, on different revisions,
 with matching unit-summary provenance and test counts. An unrelated test, skipped
 test, same-revision rerun, or successful aggregate alone cannot verify a repair.
-The resulting regression proof still requires review; it does not establish
-causality, an approval, or a merge. Keep the real review and merge links with the
-ordinary change record. Review replacement or removal of stale registry entries
-as source changes; expired evidence becomes insufficient, never implicitly valid.
+The named regression proof still requires review; review and merge history are
+verified separately through the optional reference. Review replacement or removal
+of stale entries as source changes. Insufficient evidence is never implicitly valid.
+
+### Retained Repair Evidence
+
+The workflow requests 90-day retention for its compact report and a separate
+`evidence.json` artifact, subject to repository policy. The latter contains
+bounded base64 copies of the original CI ZIPs for verified registered pairs,
+their original SHA-256 digests, minimal source-run metadata, capture timestamps,
+and the collector identity. At most 16 original archives totaling 4 MiB are
+retained. Over-limit evidence is reported as incomplete; the collector never
+truncates a proof or silently claims it was preserved. The existing CI report
+allowlist and synthetic-data restrictions still apply. Retained ZIPs may contain
+only the aggregate/containment JSON or the unit-summary and unit-report JSON;
+unexpected filenames and malformed JSON are rejected. An over-limit collection
+does not export a partial evidence bundle.
+
+After source artifacts expire or disappear, the collector inspects at most ten
+recent improvement runs. Recovery requires a successful first-attempt schedule
+or manual run on the same repository's default branch, a live retained artifact,
+and its API-provided SHA-256 digest. Collector reruns are rejected at entry.
+It verifies the producer, collector identity,
+original ZIP hashes and source-run identities against current API metadata. If
+original artifact metadata remains available, its identity and digest must still
+agree. Named-test and unit/aggregate checks run again on the original JSON;
+archived success booleans alone never count. Repair, review, and merge metadata
+are queried live on every collection, not copied as approvals.
+
+Recovered copies preserve their live capture time and become ineligible after
+90 days; copying them does not renew that deadline. This is bounded retention,
+not permanent storage. Missing producer runs, deleted retained artifacts, reruns,
+changed digests, and the bounded history window can make evidence insufficient
+sooner. A local file cannot seed authenticated recovery. Only a successful
+workflow run establishes retained provenance; local tests and generated bundles
+are not observed GitHub retention.
 
 ### Historical Dashboard Regression
 
@@ -180,10 +233,12 @@ historical regression pair, not repeated failure, causal attribution, automatic
 repair, or a completed human-reviewed loop. GitHub returned no PR associated with
 the repair commit; no historical PR approval or merge is claimed.
 
-The earliest required artifact expires at **2026-09-22 10:24:12 UTC**. Review and
-retire this entry before then if no longer needed. An expired or deleted artifact
-must make the collector report insufficient evidence; an archived local copy or
-an unrelated successful run must not substitute for live provenance.
+The earliest source artifact expires at **2026-09-22 10:24:12 UTC**. A successful
+run of the reviewed retention workflow must capture it before expiry to preserve
+this pair beyond that date; this implementation alone does not do so. Otherwise
+review and retire the entry when no longer needed. A local copy or an unrelated
+successful run must not substitute for authenticated provenance. This entry still
+has no historical PR approval or merge evidence.
 
 ### Repair Review And Rollback
 
@@ -208,8 +263,9 @@ Local output is explicitly `local-unverified`, not observed GitHub evidence.
 The [readiness tests](tests/readiness.test.mjs) contain synthetic examples.
 
 Each invocation writes a fresh `test-results/improvement/run-*` report and
-summary. The workflow also posts counts to its job summary and retains those
-files for seven days. Insufficient evidence produces a nonzero exit status while
+summary. Authenticated invocations also write the separate original-evidence
+bundle. The workflow posts counts and missing repair evidence to its job summary
+and requests 90-day retention. Insufficient evidence produces a nonzero exit while
 retaining the report. The existing five-sample offline outcome proof remains
 evidence about its synthetic workload, not proof that an arbitrary source fix
 worked. Workflow presence or local fixtures do not establish an observed
