@@ -4,23 +4,44 @@ on:
   schedule:
     - cron: '0 8 * * *'
   workflow_dispatch:
+  workflow_run:
+    workflows: [CI, Security]
+    types: [completed]
 
 permissions:
   contents: read
 
 concurrency:
-  group: improvement-${{ github.repository }}
+  group: improvement-${{ github.repository }}-${{ github.event.workflow_run.id || 'scheduled' }}
   cancel-in-progress: false
 
 jobs:
   report:
-    if: ${{ vars.SLIPSTREAM_IMPROVEMENT_ENABLED == 'true' }}
+    if: >-
+      ${{ vars.SLIPSTREAM_IMPROVEMENT_ENABLED == 'true' &&
+      (github.event_name != 'workflow_run' ||
+      (github.event.action == 'completed' &&
+      github.event.workflow_run.event == 'push' &&
+      github.event.workflow_run.head_branch == github.event.repository.default_branch &&
+      github.event.workflow_run.repository.full_name == github.repository &&
+      github.event.workflow_run.head_repository.full_name == github.repository &&
+      github.event.workflow_run.run_attempt == 1)) }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
       contents: read
       actions: read
       pull-requests: read
+    outputs:
+      status: ${{ steps.review.outputs.status }}
+      report-path: ${{ steps.review.outputs.report-path }}
+      evidence-path: ${{ steps.review.outputs.evidence-path }}
+      trigger-workflow: ${{ steps.review.outputs.trigger-workflow }}
+      trigger-run-id: ${{ steps.review.outputs.trigger-run-id }}
+      trigger-attempt: ${{ steps.review.outputs.trigger-attempt }}
+      trigger-revision: ${{ steps.review.outputs.trigger-revision }}
+      trigger-conclusion: ${{ steps.review.outputs.trigger-conclusion }}
+      trigger-verified: ${{ steps.review.outputs.trigger-verified }}
     env:
       SLIPSTREAM_IMPROVEMENT_ENABLED: ${{ vars.SLIPSTREAM_IMPROVEMENT_ENABLED }}
     steps:
@@ -29,6 +50,11 @@ jobs:
         shell: bash
         env:
           DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          SOURCE_EVENT: ${{ github.event.workflow_run.event }}
+          SOURCE_BRANCH: ${{ github.event.workflow_run.head_branch }}
+          SOURCE_REPOSITORY: ${{ github.event.workflow_run.repository.full_name }}
+          SOURCE_HEAD_REPOSITORY: ${{ github.event.workflow_run.head_repository.full_name }}
+          SOURCE_ATTEMPT: ${{ github.event.workflow_run.run_attempt }}
         run: |
           set -euo pipefail
           test -n "$DEFAULT_BRANCH"
@@ -38,6 +64,13 @@ jobs:
           test "$GITHUB_RUN_ATTEMPT" = '1'
           case "$GITHUB_EVENT_NAME" in
             schedule|workflow_dispatch) ;;
+            workflow_run)
+              test "$SOURCE_EVENT" = 'push'
+              test "$SOURCE_BRANCH" = "$DEFAULT_BRANCH"
+              test "$SOURCE_REPOSITORY" = "$GITHUB_REPOSITORY"
+              test "$SOURCE_HEAD_REPOSITORY" = "$GITHUB_REPOSITORY"
+              test "$SOURCE_ATTEMPT" = '1'
+              ;;
             *) exit 1 ;;
           esac
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683

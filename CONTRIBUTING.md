@@ -129,11 +129,26 @@ verified snapshot, evaluator limitations, and outstanding activation steps.
 The [improvement workflow](.github/workflows/improvement.yml) is prepared but
 disabled by default. After reviewing the change and verifying required checks,
 the owner may enable `SLIPSTREAM_IMPROVEMENT_ENABLED=true`. It runs daily at
-08:00 UTC or by manual dispatch on the default branch. Disable that variable to
-pause it. This change does not activate the workflow or alter required gates.
+08:00 UTC, by manual dispatch on the default branch, and when CI or Security
+completes a first-attempt default-branch push run, including unsuccessful runs.
+Disable that variable to pause it. This change does not activate the workflow or
+alter required gates.
 
-The read-only collector compares the two newest completed default-branch push
-runs for CI and Security, inspecting at most ten recent runs per workflow.
+For scheduled and manual reporting, the read-only collector compares the two
+newest completed default-branch push runs for CI and Security, inspecting at most
+ten recent runs per workflow. Completion reporting instead queries the exact
+triggering run and verifies its ID, attempt, workflow ID and path, repository,
+branch, event, conclusion, and revision against live GitHub metadata. It compares
+only that pipeline with its newest older run in the bounded history window.
+Newer runs cannot replace the trigger; absent older history is insufficient
+evidence. Separate concurrency groups prevent distinct source-run completions
+from replacing one another.
+
+PRs, forks, non-default branches, and source reruns are excluded before checkout.
+The collector runs from its own default-branch revision, never from the triggering
+run's checkout or downloaded code. Collector and source revisions are recorded
+separately. The job keeps read-only permissions and rejects collector reruns.
+
 It fingerprints fixed gate and artifact failures as `new`, `recurring`, `cleared`,
 or `unverified`. Recurrence is at the gate/artifact level, not proof of a common
 root cause. A cleared finding requires valid success evidence on a different
@@ -203,9 +218,11 @@ unexpected filenames and malformed JSON are rejected. An over-limit collection
 does not export a partial evidence bundle.
 
 After source artifacts expire or disappear, the collector inspects at most ten
-recent improvement runs. Recovery requires a successful first-attempt schedule
-or manual run on the same repository's default branch, a live retained artifact,
-and its API-provided SHA-256 digest. Collector reruns are rejected at entry.
+recent improvement runs. Recovery requires a successful first-attempt schedule,
+manual, or trusted CI-completion run on the same repository's default branch, a
+live retained artifact, and its API-provided SHA-256 digest. A completion producer
+must also record a valid source-trigger identity. Collector reruns are rejected
+at entry.
 It verifies the producer, collector identity,
 original ZIP hashes and source-run identities against current API metadata. If
 original artifact metadata remains available, its identity and digest must still
@@ -279,8 +296,16 @@ The [readiness tests](tests/readiness.test.mjs) contain synthetic examples.
 Each invocation writes a fresh `test-results/improvement/run-*` report and
 summary. Authenticated invocations also write the separate original-evidence
 bundle. The workflow posts counts and missing repair evidence to its job summary
-and requests 90-day retention. Insufficient evidence produces a nonzero exit while
-retaining the report. The existing five-sample offline outcome proof remains
+and requests 90-day retention. Completion summaries also link the triggering run
+and show its attempt, revision, conclusion, API-identity verification, and separate
+collector revision. Job outputs expose `status`, `report-path`, `evidence-path`,
+`trigger-workflow`, `trigger-run-id`, `trigger-attempt`, `trigger-revision`,
+`trigger-conclusion`, and `trigger-verified`; trigger outputs are empty for daily
+and manual invocations. `reported` means the comparison has sufficient evidence,
+not that CI succeeded or a repair was verified. Insufficient evidence produces a
+nonzero exit while retaining the report and its missing-evidence details.
+
+The existing five-sample offline outcome proof remains
 evidence about its synthetic workload, not proof that an arbitrary source fix
 worked. Workflow presence or local fixtures do not establish an observed
 continuous-improvement loop, agent throughput, or live-provider quality.

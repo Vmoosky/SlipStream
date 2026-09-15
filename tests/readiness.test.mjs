@@ -988,6 +988,8 @@ function improvementHistory(context) {
       const run = {
         id: firstId + offset,
         run_attempt: 1,
+        workflow_id: workflow === 'ci.yml' ? 10 : 20,
+        name: workflow === 'ci.yml' ? 'CI' : 'Security',
         event: 'push',
         status: 'completed',
         head_sha: (offset === 0 ? 'a' : 'd').repeat(40),
@@ -1114,6 +1116,47 @@ test('improvement retained evidence requires an authenticated producer and intac
   const retained = await check();
   assert.equal(retained.size, 1);
   assert.deepEqual(retained.get('123/ci-required').bytes, history.archives.get(sourceArtifact.id));
+  const completionBundle = structuredClone(bundle);
+  completionBundle.collector.eventName = 'workflow_run';
+  completionBundle.collector.trigger = {
+    workflow: 'ci.yml',
+    workflowId: '10',
+    runId: '124',
+    attempt: '1',
+    revision: 'd'.repeat(40),
+    eventName: 'push',
+    conclusion: 'success',
+  };
+  const completed = await check(
+    completionBundle,
+    (options) => (options.run.event = 'workflow_run'),
+  );
+  assert.equal(completed.size, 1);
+  assert.equal(completed.get('123/ci-required').capturedAt, bundle.entries[0].capturedAt);
+  for (const trigger of [
+    undefined,
+    ...[
+      { workflow: 'maintenance.yml' },
+      { workflowId: '0' },
+      { runId: '../124' },
+      { runId: '300' },
+      { attempt: '2' },
+      { revision: 'HEAD' },
+      { eventName: 'pull_request' },
+      { conclusion: null },
+      { unexpected: 'extra' },
+    ].map((change) => ({ ...completionBundle.collector.trigger, ...change })),
+  ]) {
+    const invalid = structuredClone(completionBundle);
+    invalid.collector.trigger = trigger;
+    await assert.rejects(check(invalid, (options) => (options.run.event = 'workflow_run')));
+  }
+  const manualBundle = structuredClone(bundle);
+  manualBundle.collector.eventName = 'workflow_dispatch';
+  assert.equal(
+    (await check(manualBundle, (options) => (options.run.event = 'workflow_dispatch'))).size,
+    1,
+  );
   fs.writeFileSync(path.join(history.root, 'unexpected.json'), '{"synthetic":"unrequested"}');
   const unexpectedBytes = execFileSync(
     'git',
@@ -1178,6 +1221,125 @@ test('improvement collection compares exact run artifacts and treats expiry as i
   history.artifactLists.get(124)[0].expired = false;
   history.runs[1].head_repository.full_name = 'untrusted/fork';
   assert.equal((await collectImprovementReports(options)).status, 'insufficient-evidence');
+});
+
+test('improvement completion collection stays bound to its triggering run and API identity', async (context) => {
+  const history = improvementHistory(context);
+  const options = { repository: 'Vmoosky/SlipStream', branch: 'main', client: history.client };
+  const trigger = {
+    workflow: 'ci.yml',
+    workflowId: '10',
+    runId: '124',
+    attempt: '1',
+    revision: 'd'.repeat(40),
+    eventName: 'push',
+    conclusion: 'success',
+  };
+  history.runs.push({ ...history.runs[1], id: 125, head_sha: 'e'.repeat(40) });
+  const report = await collectImprovementReports({ ...options, trigger });
+  assert.equal(report.status, 'reported');
+  assert.equal(report.comparisons.length, 1);
+  assert.equal(report.comparisons[0].before.runId, '123');
+  assert.equal(report.comparisons[0].after.runId, '124');
+  assert.deepEqual(report.trigger, {
+    ...trigger,
+    verified: true,
+    url: 'https://github.com/Vmoosky/SlipStream/actions/runs/124',
+  });
+  assert.deepEqual(
+    report.evidence.map((entry) => entry.runId),
+    ['123', '124'],
+  );
+  assert.ok(history.calls.includes('/actions/runs/124'));
+  assert.ok(history.calls.every((resource) => !/security\.yml|\/runs\/125/.test(resource)));
+  const security = await collectImprovementReports({
+    ...options,
+    trigger: { ...trigger, workflow: 'security.yml', workflowId: '20', runId: '224' },
+  });
+  assert.equal(security.status, 'reported');
+  assert.equal(security.comparisons.length, 1);
+  assert.equal(security.comparisons[0].after.runId, '224');
+  for (const invalid of [
+    { id: 125 },
+    { run_attempt: 2 },
+    { workflow_id: 20 },
+    { name: 'Security' },
+    { path: '.github/workflows/security.yml' },
+    { head_sha: 'e'.repeat(40) },
+    { conclusion: 'failure' },
+    { event: 'pull_request' },
+    { status: 'in_progress' },
+    { head_branch: 'other' },
+    { repository: { full_name: 'untrusted/fork' } },
+    { head_repository: { full_name: 'untrusted/fork' } },
+  ]) {
+    const rejected = await collectImprovementReports({
+      ...options,
+      trigger,
+      client: {
+        ...history.client,
+        async json(resource) {
+          const result = await history.client.json(resource);
+          return resource === '/actions/runs/124' ? { ...result, ...invalid } : result;
+        },
+      },
+    });
+    assert.equal(rejected.status, 'insufficient-evidence');
+    assert.equal(rejected.trigger.verified, false);
+    assert.deepEqual(rejected.evidence, []);
+  }
+  const missing = await collectImprovementReports({
+    ...options,
+    trigger,
+    client: {
+      ...history.client,
+      async json(resource) {
+        const result = await history.client.json(resource);
+        return resource.includes('/workflows/ci.yml/runs')
+          ? { workflow_runs: result.workflow_runs.filter((run) => run.id > 124) }
+          : result;
+      },
+    },
+  });
+  assert.equal(missing.status, 'insufficient-evidence');
+  assert.equal(missing.comparisons[0].before, null);
+  assert.equal(missing.comparisons[0].after.runId, '124');
+  assert.ok(missing.errors.some((error) => error.includes('no older completed run')));
+  for (const conclusion of ['failure', 'cancelled', 'timed_out', 'skipped']) {
+    history.runs[1].conclusion = conclusion;
+    const failed = await collectImprovementReports({
+      ...options,
+      trigger: { ...trigger, conclusion },
+    });
+    assert.equal(failed.trigger.verified, true);
+    assert.equal(failed.trigger.conclusion, conclusion);
+    assert.equal(failed.status, 'insufficient-evidence');
+    assert.ok(failed.comparisons[0].findings.every((finding) => finding.status !== 'cleared'));
+  }
+  history.runs[1].conclusion = 'failure';
+  const artifact = history.artifactLists.get(124)[0];
+  const failedAggregate = (
+    await readImprovementArchive(history.archives.get(artifact.id), ['ci-required.json'])
+  ).get('ci-required.json');
+  failedAggregate.passed = false;
+  failedAggregate.errors = ['unit: required job did not succeed'];
+  fs.writeFileSync(path.join(history.root, 'ci-required.json'), JSON.stringify(failedAggregate));
+  const failedBytes = execFileSync(
+    'git',
+    ['archive', '--format=zip', '--add-file=ci-required.json', history.emptyTree],
+    { cwd: history.root },
+  );
+  artifact.size_in_bytes = failedBytes.length;
+  artifact.digest = `sha256:${createHash('sha256').update(failedBytes).digest('hex')}`;
+  history.archives.set(artifact.id, failedBytes);
+  const failureReport = await collectImprovementReports({
+    ...options,
+    trigger: { ...trigger, conclusion: 'failure' },
+  });
+  assert.equal(failureReport.status, 'reported');
+  assert.equal(failureReport.trigger.conclusion, 'failure');
+  assert.equal(failureReport.comparisons[0].findings[0].status, 'recurring');
+  assert.equal(failureReport.comparisons[0].findings[0].fixVerified, false);
 });
 
 test('improvement registry connects an explicit run pair to a verified regression artifact', async (context) => {
@@ -1409,6 +1571,33 @@ test('improvement registry connects an explicit run pair to a verified regressio
     recovered.retainedEvidence.entries.map((entry) => entry.capturedAt),
     report.retainedEvidence.entries.map((entry) => entry.capturedAt),
   );
+  producer.event = 'workflow_run';
+  retainedBundle.collector.eventName = 'workflow_run';
+  retainedBundle.collector.trigger = {
+    workflow: 'ci.yml',
+    workflowId: '10',
+    runId: '124',
+    attempt: '1',
+    revision: 'd'.repeat(40),
+    eventName: 'push',
+    conclusion: 'success',
+  };
+  fs.writeFileSync(path.join(history.root, 'evidence.json'), JSON.stringify(retainedBundle));
+  const completionBytes = execFileSync(
+    'git',
+    ['archive', '--format=zip', '--add-file=evidence.json', history.emptyTree],
+    { cwd: history.root },
+  );
+  retainedArtifact.size_in_bytes = completionBytes.length;
+  retainedArtifact.digest = `sha256:${createHash('sha256').update(completionBytes).digest('hex')}`;
+  history.archives.set(retainedArtifact.id, completionBytes);
+  const completionRecovery = await collectImprovementReports({ ...options, registry });
+  assert.equal(completionRecovery.status, 'reported');
+  assert.equal(completionRecovery.retention.recoveredArchives, 4);
+  assert.deepEqual(
+    completionRecovery.retainedEvidence.entries.map((entry) => entry.capturedAt),
+    report.retainedEvidence.entries.map((entry) => entry.capturedAt),
+  );
   retainedArtifact.expired = true;
   assert.equal(
     (await collectImprovementReports({ ...options, registry })).status,
@@ -1440,17 +1629,55 @@ test('improvement workflow is opt-in, default-branch-only, read-only and artifac
   const workflow = parse(
     fs.readFileSync(path.join(REPO, '.github/workflows/improvement.yml'), 'utf8'),
   );
-  assert.deepEqual(Object.keys(workflow.on).sort(), ['schedule', 'workflow_dispatch']);
+  assert.deepEqual(Object.keys(workflow.on).sort(), [
+    'schedule',
+    'workflow_dispatch',
+    'workflow_run',
+  ]);
   assert.equal(workflow.on.schedule[0].cron, '0 8 * * *');
+  assert.deepEqual(workflow.on.workflow_run, {
+    workflows: ['CI', 'Security'],
+    types: ['completed'],
+  });
+  assert.deepEqual(
+    workflow.on.workflow_run.workflows,
+    ['ci.yml', 'security.yml'].map(
+      (file) => parse(fs.readFileSync(path.join(REPO, '.github/workflows', file), 'utf8')).name,
+    ),
+  );
   assert.deepEqual(workflow.permissions, { contents: 'read' });
   assert.equal(workflow.concurrency['cancel-in-progress'], false);
+  assert.equal(
+    workflow.concurrency.group,
+    "improvement-${{ github.repository }}-${{ github.event.workflow_run.id || 'scheduled' }}",
+  );
   const job = workflow.jobs.report;
-  assert.equal(job.if, "${{ vars.SLIPSTREAM_IMPROVEMENT_ENABLED == 'true' }}");
+  assert.equal(
+    job.if.replace(/\s+/g, ' '),
+    [
+      "${{ vars.SLIPSTREAM_IMPROVEMENT_ENABLED == 'true' &&",
+      "(github.event_name != 'workflow_run' ||",
+      "(github.event.action == 'completed' &&",
+      "github.event.workflow_run.event == 'push' &&",
+      'github.event.workflow_run.head_branch == github.event.repository.default_branch &&',
+      'github.event.workflow_run.repository.full_name == github.repository &&',
+      'github.event.workflow_run.head_repository.full_name == github.repository &&',
+      'github.event.workflow_run.run_attempt == 1)) }}',
+    ].join(' '),
+  );
   assert.deepEqual(job.permissions, { contents: 'read', actions: 'read', 'pull-requests': 'read' });
   assert.equal(job['timeout-minutes'], 10);
   assert.equal(job['continue-on-error'], undefined);
   assert.match(job.steps[0].run, /test "\$GITHUB_REF" = "refs\/heads\/\$DEFAULT_BRANCH"/);
   assert.match(job.steps[0].run, /test "\$GITHUB_RUN_ATTEMPT" = '1'/);
+  for (const [variable, expected] of [
+    ['SOURCE_EVENT', "'push'"],
+    ['SOURCE_BRANCH', '"$DEFAULT_BRANCH"'],
+    ['SOURCE_REPOSITORY', '"$GITHUB_REPOSITORY"'],
+    ['SOURCE_HEAD_REPOSITORY', '"$GITHUB_REPOSITORY"'],
+    ['SOURCE_ATTEMPT', "'1'"],
+  ])
+    assert.ok(job.steps[0].run.includes(`test "$${variable}" = ${expected}`));
   const checkout = job.steps.find((step) => step.uses?.startsWith('actions/checkout@'));
   assert.equal(checkout.with.ref, '${{ github.sha }}');
   assert.equal(checkout.with['persist-credentials'], false);
@@ -1468,6 +1695,22 @@ test('improvement workflow is opt-in, default-branch-only, read-only and artifac
   assert.equal(originals.with['retention-days'], IMPROVEMENT_LIMITS.retentionDays);
   assert.equal(originals.with.path, '${{ steps.review.outputs.evidence-path }}');
   assert.equal(originals.with['if-no-files-found'], 'error');
+  assert.deepEqual(
+    job.outputs,
+    Object.fromEntries(
+      [
+        'status',
+        'report-path',
+        'evidence-path',
+        'trigger-workflow',
+        'trigger-run-id',
+        'trigger-attempt',
+        'trigger-revision',
+        'trigger-conclusion',
+        'trigger-verified',
+      ].map((name) => [name, `\${{ steps.review.outputs.${name} }}`]),
+    ),
+  );
   assert.ok(job.steps.some((step) => step.run === 'npm run improvement:report'));
   const registry = JSON.parse(
     fs.readFileSync(path.join(REPO, '.github/improvement-regressions.json'), 'utf8'),
@@ -1510,10 +1753,25 @@ test('improvement runner preserves the checkout and separates local from workflo
   assert.deepEqual(retainedBundle.collector, result.report.collector);
   assert.deepEqual(retainedBundle.entries, []);
   assert.equal(result.report.retainedEvidence, undefined);
-  assert.equal(
-    fs.readFileSync(env.GITHUB_OUTPUT, 'utf8'),
-    `evidence-path=${result.outputDirectory}/evidence.json\n`,
-  );
+  const outputs = (file) =>
+    Object.fromEntries(
+      fs
+        .readFileSync(file, 'utf8')
+        .trim()
+        .split('\n')
+        .map((line) => line.split('=')),
+    );
+  assert.deepEqual(outputs(env.GITHUB_OUTPUT), {
+    status: 'reported',
+    'report-path': `${result.outputDirectory}/report.json`,
+    'evidence-path': `${result.outputDirectory}/evidence.json`,
+    'trigger-workflow': '',
+    'trigger-run-id': '',
+    'trigger-attempt': '',
+    'trigger-revision': '',
+    'trigger-conclusion': '',
+    'trigger-verified': '',
+  });
   assert.equal(
     fs.readFileSync(path.join(history.root, '.slipstream/user-sentinel'), 'utf8'),
     'Do not touch user data',
@@ -1530,6 +1788,113 @@ test('improvement runner preserves the checkout and separates local from workflo
     { GITHUB_SHA: 'HEAD' },
   ])
     assert.throws(() => improvementIdentity({ ...env, ...invalid }, event));
+  const completionEnv = {
+    ...env,
+    GITHUB_EVENT_NAME: 'workflow_run',
+    GITHUB_OUTPUT: path.join(history.root, 'completion-outputs'),
+    GITHUB_STEP_SUMMARY: path.join(history.root, 'completion-summary'),
+  };
+  const completion = {
+    ...event,
+    action: 'completed',
+    workflow_run: {
+      id: 124,
+      run_attempt: 1,
+      workflow_id: 10,
+      name: 'CI',
+      path: '.github/workflows/ci.yml',
+      event: 'push',
+      status: 'completed',
+      conclusion: 'success',
+      head_sha: 'd'.repeat(40),
+      head_branch: 'main',
+      repository: { full_name: env.GITHUB_REPOSITORY },
+      head_repository: { full_name: env.GITHUB_REPOSITORY },
+    },
+  };
+  const identity = improvementIdentity(completionEnv, completion);
+  assert.equal(identity.revision, env.GITHUB_SHA);
+  assert.deepEqual(identity.trigger, {
+    workflow: 'ci.yml',
+    workflowId: '10',
+    runId: '124',
+    attempt: '1',
+    revision: 'd'.repeat(40),
+    eventName: 'push',
+    conclusion: 'success',
+  });
+  for (const invalid of [
+    { id: 0 },
+    { id: 300 },
+    { id: 301 },
+    { id: Number.MAX_SAFE_INTEGER + 1 },
+    { run_attempt: 2 },
+    { workflow_id: 0 },
+    { name: 'Security' },
+    { path: '.github/workflows/maintenance.yml' },
+    { event: 'pull_request' },
+    { status: 'in_progress' },
+    { conclusion: null },
+    { head_sha: 'HEAD' },
+    { head_branch: 'other' },
+    { repository: { full_name: 'untrusted/fork' } },
+    { head_repository: { full_name: 'untrusted/fork' } },
+  ])
+    assert.throws(() =>
+      improvementIdentity(completionEnv, {
+        ...completion,
+        workflow_run: { ...completion.workflow_run, ...invalid },
+      }),
+    );
+  assert.throws(() => improvementIdentity(completionEnv, { ...completion, action: 'requested' }));
+  assert.throws(() => improvementIdentity(completionEnv, event));
+  const completed = await runImprovementReview(history.root, {
+    env: completionEnv,
+    event: completion,
+    client: history.client,
+  });
+  assert.equal(completed.report.status, 'reported');
+  assert.equal(completed.report.comparisons.length, 1);
+  assert.deepEqual(completed.report.collector.trigger, identity.trigger);
+  assert.deepEqual(outputs(completionEnv.GITHUB_OUTPUT), {
+    status: 'reported',
+    'report-path': `${completed.outputDirectory}/report.json`,
+    'evidence-path': `${completed.outputDirectory}/evidence.json`,
+    'trigger-workflow': 'ci.yml',
+    'trigger-run-id': '124',
+    'trigger-attempt': '1',
+    'trigger-revision': 'd'.repeat(40),
+    'trigger-conclusion': 'success',
+    'trigger-verified': 'true',
+  });
+  const completionSummary = fs.readFileSync(completionEnv.GITHUB_STEP_SUMMARY, 'utf8');
+  assert.match(completionSummary, /ci\.yml run 124, attempt 1/);
+  const summaryUrls = completionSummary.match(/https?:\/\/[^\s)]+/g) ?? [];
+  assert.ok(
+    summaryUrls.some((value) => {
+      try {
+        const parsed = new URL(value);
+        return (
+          parsed.protocol === 'https:' &&
+          parsed.host === 'github.com' &&
+          parsed.pathname === '/Vmoosky/SlipStream/actions/runs/124'
+        );
+      } catch {
+        return false;
+      }
+    }),
+  );
+  assert.ok(completionSummary.includes(`Source revision: ${'d'.repeat(40)}`));
+  assert.ok(completionSummary.includes(`Collector revision: ${env.GITHUB_SHA}`));
+  history.runs[1].conclusion = 'failure';
+  const failed = await runImprovementReview(history.root, {
+    env: completionEnv,
+    event: { ...completion, workflow_run: { ...completion.workflow_run, conclusion: 'failure' } },
+    client: history.client,
+  });
+  assert.equal(failed.report.status, 'insufficient-evidence');
+  assert.equal(outputs(completionEnv.GITHUB_OUTPUT).status, 'insufficient-evidence');
+  assert.equal(outputs(completionEnv.GITHUB_OUTPUT)['trigger-conclusion'], 'failure');
   const input = path.join(history.root, 'local-evidence.json');
   fs.writeFileSync(
     input,
