@@ -146,6 +146,60 @@ required checks actually being enforced. The
 [readiness reassessment](docs/readiness-assessment.md) records the local progress,
 verified snapshot, evaluator limitations, and outstanding activation steps.
 
+## PR Observability
+
+The [observability workflow](.github/workflows/pr-observability.yml) is opt-in via
+`SLIPSTREAM_OBSERVABILITY_ENABLED=true`, after review and merge to the default
+branch. It runs on default-branch PR lifecycle events, including head/body edits
+and closure. A manual dispatch with a PR number refreshes review and validation
+links without rerunning CI. Approval and dismissal events alone do not refresh
+the snapshot; use the manual refresh when an immediate review update is needed.
+This change does not enable the variable or change required checks.
+
+The [collector](scripts/check-pr-observability.mjs) manages `area:core`,
+`area:extension`, `area:mcp`, `area:hooks`, `area:plugin`, `area:tooling`, and
+`area:docs` from a complete, bounded PR file inventory. These are area labels,
+not claims of automation origin. Other labels and human comments are preserved.
+It maintains one marked GitHub Actions comment linking the exact PR head, current
+PR checks, maintenance source and artifacts where verified, human review snapshot,
+and observation run. JSON and Markdown observations are retained for 30 days,
+subject to repository policy. They contain no PR body, review body, or source text.
+
+When opening a PR from a verified maintenance proposal, add one body line using
+the actual same-repository run and attempt URL:
+
+```text
+Maintenance-Run: https://github.com/OWNER/REPOSITORY/actions/runs/RUN_ID/attempts/1
+```
+
+Omit the line, or use `Maintenance-Run: none`, for ordinary changes. A link alone
+does not earn `automation:maintenance`. The collector requires a successful
+first-attempt scheduled/manual maintenance run on the default branch; API-bound
+artifact identities, sizes and SHA-256 digests; matching report and validation
+summary; and the exact permitted generated-document changes at the PR head.
+The maintenance source must be an ancestor of the PR base, with unchanged base
+document bytes. No-op proposals, fork-origin claims, extra edits, symlinks,
+expired/missing artifacts, source reruns, and incomplete lists remain unverified.
+
+Managed labels are reconciled at each observation, removing stale provenance.
+Head, base, body and state are rechecked before PR writes. A race aborts the
+update; subsequent PR events reconcile again. Labels describe the linked snapshot,
+not a merge gate or a guarantee that nothing changed afterward. Reviews distinguish
+current-head independent human approvals from stale, bot, self, dismissed, or
+post-merge approvals; outstanding change requests remain visible. Neither a label
+nor a report establishes agent authorship, successful current PR checks, or
+permission to merge.
+
+The privileged workflow checks out only its trusted default-branch SHA, never
+the PR head or a downloaded patch. Locked dependency lifecycle scripts are
+disabled. PR files are read as bounded Git blobs; archives are parsed in memory,
+not extracted or executed. Only pull-request metadata writes are permitted; there
+are no source pushes, merges, workflow retries, or new application permissions.
+At most 99 changed files, reviews, labels, and comments and fewer than ten source
+artifacts are accepted as complete. Over-limit or unavailable evidence is explicit
+and cannot grant maintenance provenance. Required CI and Security gates remain
+independent, and live operation must be observed after activation.
+
 ## Continuous Improvement
 
 The [improvement workflow](.github/workflows/improvement.yml) is prepared but

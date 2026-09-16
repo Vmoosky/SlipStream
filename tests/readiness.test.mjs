@@ -43,6 +43,22 @@ import {
   collectMaintenanceEvidence,
 } from '../scripts/maintenance.mjs';
 
+import {
+  PR_OBSERVABILITY_LIMITS,
+  parseMaintenanceRun,
+  pullRequestAreaLabels,
+  verifyMaintenanceProposal,
+  pullRequestReviewSummary,
+  readPrObservabilityArchive,
+  createPrObservabilityClient,
+  collectPrObservability,
+  publishPrObservability,
+  pullRequestSnapshot,
+  renderPrObservability,
+  PR_OBSERVABILITY_MARKER,
+  prObservabilityIdentity,
+} from '../scripts/check-pr-observability.mjs';
+
 const REPO = fileURLToPath(new URL('../', import.meta.url));
 const META = {
   revision: 'a'.repeat(40),
@@ -140,6 +156,522 @@ function artifacts(context) {
     },
   };
 }
+
+test('PR observability accepts only exact same-repository maintenance attempt references', () => {
+  const repository = 'Vmoosky/SlipStream';
+  const url = `https://github.com/${repository}/actions/runs/123/attempts/1`;
+  assert.deepEqual(parseMaintenanceRun(repository, `Maintenance-Run: ${url}`), {
+    runId: '123',
+    attempt: '1',
+    url,
+  });
+  assert.equal(parseMaintenanceRun(repository, 'Normal PR'), null);
+  assert.equal(parseMaintenanceRun(repository, 'Maintenance-Run: none'), null);
+  for (const value of [
+    url.replace(repository, 'other/repository'),
+    `${url}?query=1`,
+    `${url}#fragment`,
+    url.replace('/attempts/1', ''),
+    url.replace('/attempts/1', '/attempts/0'),
+    url.replace('/123/', '/9007199254740992/'),
+    `${url}/`,
+  ])
+    assert.throws(() => parseMaintenanceRun(repository, `Maintenance-Run: ${value}`), value);
+  assert.throws(() =>
+    parseMaintenanceRun(repository, `Maintenance-Run: ${url}\nMaintenance-Run: ${url}`),
+  );
+  assert.throws(() =>
+    parseMaintenanceRun(repository, 'x'.repeat(PR_OBSERVABILITY_LIMITS.bodyBytes + 1)),
+  );
+});
+
+test('PR observability labels complete file inventories without asserting automation origin', () => {
+  const files = [
+    {
+      filename: 'packages/core/src/engine.ts',
+      previous_filename: 'packages/extension/src/engine.ts',
+    },
+    { filename: 'docs/mcp.md' },
+    { filename: '.github/workflows/ci.yml' },
+  ];
+  assert.deepEqual(pullRequestAreaLabels(files, 3), [
+    'area:core',
+    'area:docs',
+    'area:extension',
+    'area:tooling',
+  ]);
+  assert.deepEqual(pullRequestAreaLabels([{ filename: 'README.md' }], 1), ['area:docs']);
+  for (const invalid of [
+    [],
+    [{}],
+    [{ filename: '../README.md' }],
+    [{ filename: 'C:/file' }],
+    [{ filename: 'README.md', previous_filename: '' }],
+    [{ filename: 'README.md' }, { filename: 'README.md' }],
+  ]) {
+    assert.throws(() => pullRequestAreaLabels(invalid, 1));
+  }
+  assert.throws(() => pullRequestAreaLabels(files, 4));
+});
+
+test('PR observability binds a maintenance proposal to its producer, validation and exact PR content', (context) => {
+  const fixture = maintenanceEvidence(context);
+  const change = documentationChange();
+  const patch = Buffer.from('Synthetic validated proposal');
+  const proposal = validateDocumentationProposal([change], patch);
+  const report = { ...fixture.report, outcome: 'proposed', proposal };
+  fixture.write(fixture.options.reportPath, report);
+  fs.writeFileSync(
+    path.join(fixture.root, fixture.options.reportPath.replace('report.json', 'proposal.patch')),
+    patch,
+  );
+  const summary = collectMaintenanceEvidence(fixture.root, fixture.options);
+  assert.equal(summary.passed, true);
+  const repository = 'Vmoosky/SlipStream';
+  const input = {
+    repository,
+    branch: 'main',
+    reference: { runId: '123', attempt: '1' },
+    pull: {
+      changed_files: 1,
+      base: { repo: { full_name: repository }, ref: 'main', sha: META.revision },
+      head: { repo: { full_name: repository }, sha: META.headRevision },
+    },
+    files: [
+      {
+        filename: change.path,
+        status: 'modified',
+        additions: change.added,
+        deletions: change.deleted,
+      },
+    ],
+    run: {
+      id: 123,
+      run_attempt: 1,
+      status: 'completed',
+      conclusion: 'success',
+      event: 'schedule',
+      repository: { full_name: repository },
+      head_repository: { full_name: repository },
+      head_branch: 'main',
+      head_sha: META.revision,
+      path: '.github/workflows/maintenance.yml',
+      name: 'Maintenance',
+      workflow_id: 456,
+    },
+    workflow: { id: 456, path: '.github/workflows/maintenance.yml' },
+    comparison: {
+      status: 'identical',
+      base_commit: { sha: META.revision },
+      merge_base_commit: { sha: META.revision },
+    },
+    reportBytes: fs.readFileSync(path.join(fixture.root, fixture.options.reportPath)),
+    summary,
+    patch,
+    changes: [{ ...change, base: change.before }],
+  };
+  assert.equal(verifyMaintenanceProposal(input).status, 'verified');
+  for (const mutation of [
+    { run: { ...input.run, run_attempt: 2 } },
+    { run: { ...input.run, conclusion: 'failure' } },
+    { run: { ...input.run, head_repository: { full_name: 'other/repo' } } },
+    { run: { ...input.run, event: 'pull_request' } },
+    { workflow: { ...input.workflow, id: 789 } },
+    { reference: { runId: '123', attempt: '2' } },
+    { summary: { ...summary, attempt: '2' } },
+    { summary: { ...summary, steps: { ...summary.steps, audit: 'failure' } } },
+    { reportBytes: Buffer.from(JSON.stringify({ ...report, cancelled: true })) },
+    { patch: Buffer.concat([patch, Buffer.from('altered')]) },
+    { files: [] },
+    { comparison: { ...input.comparison, status: 'diverged' } },
+    { changes: [{ ...change, base: Buffer.from('changed base') }] },
+    {
+      changes: [
+        {
+          ...change,
+          base: change.before,
+          after: Buffer.concat([change.after, Buffer.from('extra prose')]),
+        },
+      ],
+    },
+  ])
+    assert.equal(verifyMaintenanceProposal({ ...input, ...mutation }).status, 'unverified');
+});
+
+test('PR observability review snapshots reject stale, self, bot and dismissed approvals', () => {
+  const pull = { user: { id: 1 }, head: { sha: META.headRevision }, merged: false };
+  const approved = {
+    id: 2,
+    user: { id: 3, type: 'User' },
+    author_association: 'COLLABORATOR',
+    state: 'APPROVED',
+    commit_id: META.headRevision,
+    submitted_at: '2026-01-01T00:00:00Z',
+  };
+  assert.equal(pullRequestReviewSummary(pull, [approved]).status, 'approved-current-head');
+  assert.equal(pullRequestReviewSummary(pull, []).status, 'review-required');
+  for (const mutation of [
+    { commit_id: META.revision },
+    { user: { id: 1, type: 'User' } },
+    { user: { id: 3, type: 'Bot' } },
+    { state: 'DISMISSED' },
+    { author_association: 'CONTRIBUTOR' },
+  ])
+    assert.equal(
+      pullRequestReviewSummary(pull, [{ ...approved, ...mutation }]).status,
+      'review-required',
+    );
+  const later = {
+    ...approved,
+    id: 4,
+    submitted_at: '2026-01-02T00:00:00Z',
+    state: 'CHANGES_REQUESTED',
+  };
+  assert.equal(pullRequestReviewSummary(pull, [approved, later]).status, 'changes-requested');
+  assert.equal(
+    pullRequestReviewSummary(pull, [approved, { ...later, state: 'DISMISSED' }]).status,
+    'review-required',
+  );
+  assert.equal(pullRequestReviewSummary(pull, [approved, approved]).status, 'unavailable');
+  assert.equal(pullRequestReviewSummary(pull, Array(100).fill(approved)).status, 'unavailable');
+});
+
+test('PR observability API restricts writes to owned labels and marked comments', async () => {
+  const calls = [];
+  const client = createPrObservabilityClient(
+    'Vmoosky/SlipStream',
+    'synthetic-token',
+    async (url, options) => {
+      calls.push({ url, options });
+      return new Response('{}');
+    },
+  );
+  await client.json('/pulls/7');
+  await client.json('/issues/7/labels', { method: 'POST', body: { labels: ['area:docs'] } });
+  assert.equal(calls[0].options.redirect, 'error');
+  assert.equal(calls[0].options.headers.Authorization, 'Bearer synthetic-token');
+  for (const [resource, options] of [
+    ['/pulls/7/merge', { method: 'PUT' }],
+    ['/contents/package.json', { method: 'PUT' }],
+    ['/issues/7/labels', { method: 'POST', body: { labels: ['unowned'] } }],
+    ['/issues/7/comments', { method: 'POST', body: { body: 'Unmarked comment' } }],
+    ['/issues/7/labels/unowned', { method: 'DELETE' }],
+    ['https://other.invalid', {}],
+  ])
+    await assert.rejects(client.json(resource, options));
+  assert.equal(calls.length, 2);
+});
+
+test('PR observability archives reject unrelated files, traversal and oversized inputs', async (context) => {
+  const { root } = maintenanceRepository(context);
+  const archive = (extra = []) =>
+    execFileSync('git', ['archive', '--format=zip', ...extra, 'HEAD', 'package.json'], {
+      cwd: root,
+    });
+  await assert.rejects(readPrObservabilityArchive(archive(), 'evidence'));
+  await assert.rejects(readPrObservabilityArchive(archive(['--prefix=../']), 'evidence'));
+  await assert.rejects(readPrObservabilityArchive(Buffer.from('not a zip'), 'proposal'));
+  await assert.rejects(
+    readPrObservabilityArchive(Buffer.alloc(PR_OBSERVABILITY_LIMITS.archiveBytes + 1), 'evidence'),
+  );
+});
+
+test('PR observability collects ordinary PRs and withholds unverifiable automation labels', async () => {
+  const pull = {
+    number: 7,
+    changed_files: 1,
+    state: 'open',
+    body: '',
+    user: { id: 1 },
+    head: { sha: META.headRevision, repo: { full_name: 'Vmoosky/SlipStream' } },
+    base: { sha: META.baseRevision, ref: 'main', repo: { full_name: 'Vmoosky/SlipStream' } },
+  };
+  const calls = [];
+  const client = {
+    async json(resource) {
+      calls.push(resource);
+      if (resource.endsWith('/files?per_page=100'))
+        return [{ filename: 'README.md', status: 'modified' }];
+      if (resource.endsWith('/reviews?per_page=100')) return [];
+      if (resource === '/pulls/7') return pull;
+      throw new Error('Unavailable evidence');
+    },
+  };
+  const collect = () =>
+    collectPrObservability({ repository: 'Vmoosky/SlipStream', branch: 'main', number: 7, client });
+  const ordinary = await collect();
+  assert.deepEqual(ordinary.labels, ['area:docs']);
+  assert.equal(ordinary.maintenance.status, 'not-requested');
+  assert.equal(ordinary.review.status, 'review-required');
+  assert.equal(calls.length, 3);
+  pull.body = 'Maintenance-Run: https://github.com/Vmoosky/SlipStream/actions/runs/123/attempts/1';
+  const missing = await collect();
+  assert.equal(missing.maintenance.status, 'unverified');
+  assert.deepEqual(missing.labels, ['area:docs']);
+  pull.changed_files = 2;
+  const incomplete = await collect();
+  assert.deepEqual(incomplete.labels, []);
+  assert.equal(incomplete.errors.length, 1);
+});
+
+test('PR observability publication preserves other labels and comments and removes stale provenance', async () => {
+  const pull = {
+    number: 7,
+    body: '',
+    head: { sha: META.headRevision },
+    base: { sha: META.baseRevision },
+  };
+  const report = {
+    repository: 'Vmoosky/SlipStream',
+    number: 7,
+    head: META.headRevision,
+    checkedAt: '2026-01-01T00:00:00Z',
+    state: 'open',
+    snapshot: pullRequestSnapshot(pull),
+    labels: ['area:docs'],
+    maintenance: { status: 'not-requested' },
+    review: { status: 'review-required', reviews: [] },
+    errors: [],
+    checksUrl: 'https://github.com/Vmoosky/SlipStream/pull/7/checks',
+  };
+  const writes = [];
+  const client = {
+    async json(resource, options) {
+      if (options) {
+        writes.push({ resource, ...options });
+        return {};
+      }
+      if (resource === '/pulls/7') return pull;
+      if (resource.endsWith('/labels?per_page=100'))
+        return [{ name: 'human-label' }, { name: 'automation:maintenance' }];
+      if (resource.endsWith('/comments?per_page=100'))
+        return [
+          { id: 8, user: { type: 'User', login: 'someone' }, body: PR_OBSERVABILITY_MARKER },
+          {
+            id: 9,
+            user: { type: 'Bot', login: 'github-actions[bot]' },
+            body: `${PR_OBSERVABILITY_MARKER}\nOld snapshot`,
+          },
+        ];
+      if (resource === '/labels/area%3Adocs') return {};
+      throw new Error('Unexpected request');
+    },
+  };
+  await publishPrObservability(report, client);
+  assert.equal(report.publication, 'applied');
+  assert.deepEqual(
+    writes.map((write) => [write.method, write.resource]),
+    [
+      ['DELETE', '/issues/7/labels/automation%3Amaintenance'],
+      ['POST', '/issues/7/labels'],
+      ['PATCH', '/issues/comments/9'],
+    ],
+  );
+  assert.deepEqual(writes[1].body, { labels: ['area:docs'] });
+  assert.equal(writes[2].body.body, renderPrObservability(report));
+  writes.length = 0;
+  pull.head.sha = META.revision;
+  await publishPrObservability(report, client);
+  assert.equal(report.publication, 'stale-pr');
+  assert.equal(writes.length, 0);
+});
+
+test('PR observability runtime identity requires an enabled trusted default-branch workflow', () => {
+  const event = {
+    repository: { full_name: 'Vmoosky/SlipStream', default_branch: 'main' },
+    inputs: { pull_request: '7' },
+  };
+  const env = {
+    GITHUB_ACTIONS: 'true',
+    SLIPSTREAM_OBSERVABILITY_ENABLED: 'true',
+    GITHUB_REPOSITORY: 'Vmoosky/SlipStream',
+    GITHUB_REF: 'refs/heads/main',
+    GITHUB_WORKFLOW_REF:
+      'Vmoosky/SlipStream/.github/workflows/pr-observability.yml@refs/heads/main',
+    GITHUB_SERVER_URL: 'https://github.com',
+    GITHUB_API_URL: 'https://api.github.com',
+    GITHUB_SHA: META.revision,
+    GITHUB_RUN_ID: '123',
+    GITHUB_RUN_ATTEMPT: '1',
+    GITHUB_EVENT_NAME: 'workflow_dispatch',
+  };
+  assert.equal(prObservabilityIdentity(env, event).number, 7);
+  for (const mutation of [
+    { GITHUB_EVENT_NAME: 'pull_request' },
+    { GITHUB_REF: 'refs/pull/7/merge' },
+    { SLIPSTREAM_OBSERVABILITY_ENABLED: 'false' },
+    { GITHUB_API_URL: 'https://other.invalid' },
+    { GITHUB_SHA: 'main' },
+    { GITHUB_WORKFLOW_REF: 'untrusted' },
+  ]) {
+    assert.throws(() => prObservabilityIdentity({ ...env, ...mutation }, event));
+  }
+});
+
+test('PR observability validates real ZIPs and Git blobs before labeling a maintenance PR', async (context) => {
+  const fixture = maintenanceEvidence(context);
+  const change = documentationChange();
+  const patch = Buffer.from('Synthetic validated proposal');
+  const proposal = validateDocumentationProposal([change], patch);
+  const report = { ...fixture.report, outcome: 'proposed', proposal };
+  fixture.write(fixture.options.reportPath, report);
+  fs.writeFileSync(
+    path.join(fixture.root, fixture.options.reportPath.replace('report.json', 'proposal.patch')),
+    patch,
+  );
+  const summary = collectMaintenanceEvidence(fixture.root, fixture.options);
+  fixture.write(fixture.options.reportPath.replace('report.json', 'summary.json'), summary);
+  const git = (args) => execFileSync('git', args, { cwd: fixture.root, timeout: 30_000 });
+  git(['init', '--quiet']);
+  git(['add', '-f', '--', 'test-results/maintenance']);
+  git([
+    '-c',
+    'user.name=Fixture',
+    '-c',
+    'user.email=fixture@example.invalid',
+    'commit',
+    '-qm',
+    'Synthetic archive fixture',
+  ]);
+  const evidenceZip = git([
+    'archive',
+    '--format=zip',
+    'HEAD:test-results/maintenance',
+    'run-fixture/report.json',
+    'run-fixture/summary.json',
+  ]);
+  const proposalZip = git([
+    'archive',
+    '--format=zip',
+    'HEAD:test-results/maintenance/run-fixture',
+    'proposal.patch',
+  ]);
+  const repository = 'Vmoosky/SlipStream';
+  const baseTree = 'd'.repeat(40);
+  const headTree = 'e'.repeat(40);
+  const blob = (bytes) => ({
+    sha: createHash('sha1').update(`blob ${bytes.length}\0`).update(bytes).digest('hex'),
+    encoding: 'base64',
+    content: bytes.toString('base64'),
+    size: bytes.length,
+  });
+  const before = blob(change.before);
+  const after = blob(change.after);
+  const run = {
+    id: 123,
+    run_attempt: 1,
+    status: 'completed',
+    conclusion: 'success',
+    event: 'schedule',
+    repository: { id: 9, full_name: repository },
+    head_repository: { id: 9, full_name: repository },
+    head_branch: 'main',
+    head_sha: META.revision,
+    path: '.github/workflows/maintenance.yml',
+    name: 'Maintenance',
+    workflow_id: 456,
+  };
+  const artifacts = [evidenceZip, proposalZip].map((bytes, index) => ({
+    id: 100 + index,
+    name: `maintenance-${index ? 'proposal' : 'evidence'}-123-1`,
+    size_in_bytes: bytes.length,
+    digest: `sha256:${createHash('sha256').update(bytes).digest('hex')}`,
+    expired: false,
+    expires_at: '2099-01-01T00:00:00Z',
+    workflow_run: { id: 123, head_sha: META.revision, repository_id: 9, head_repository_id: 9 },
+  }));
+  const headEntries = [{ path: change.path, mode: '100644', type: 'blob', sha: after.sha }];
+  const responses = {
+    '/pulls/7': {
+      number: 7,
+      changed_files: 1,
+      state: 'open',
+      user: { id: 1 },
+      body: `Maintenance-Run: https://github.com/${repository}/actions/runs/123/attempts/1`,
+      head: { sha: META.headRevision, repo: { full_name: repository } },
+      base: { sha: META.revision, ref: 'main', repo: { full_name: repository } },
+    },
+    '/pulls/7/files?per_page=100': [
+      {
+        filename: change.path,
+        status: 'modified',
+        sha: after.sha,
+        additions: change.added,
+        deletions: change.deleted,
+      },
+    ],
+    '/pulls/7/reviews?per_page=100': [],
+    '/actions/runs/123': run,
+    '/actions/workflows/maintenance.yml': { id: 456, path: run.path },
+    '/actions/runs/123/artifacts?per_page=10': { total_count: 2, artifacts },
+    [`/git/commits/${META.revision}`]: { sha: META.revision, tree: { sha: baseTree } },
+    [`/git/commits/${META.headRevision}`]: { sha: META.headRevision, tree: { sha: headTree } },
+    [`/git/trees/${baseTree}?recursive=1`]: {
+      sha: baseTree,
+      truncated: false,
+      tree: [{ path: change.path, mode: '100644', type: 'blob', sha: before.sha }],
+    },
+    [`/git/trees/${headTree}?recursive=1`]: { sha: headTree, truncated: false, tree: headEntries },
+    [`/git/blobs/${before.sha}`]: before,
+    [`/git/blobs/${after.sha}`]: after,
+    [`/compare/${META.revision}...${META.revision}?per_page=1`]: {
+      status: 'identical',
+      base_commit: { sha: META.revision },
+      merge_base_commit: { sha: META.revision },
+    },
+  };
+  const client = {
+    async json(resource) {
+      assert.ok(Object.hasOwn(responses, resource), resource);
+      return responses[resource];
+    },
+    async archive(artifact) {
+      return artifact.id === 100 ? evidenceZip : proposalZip;
+    },
+  };
+  const collect = () => collectPrObservability({ repository, branch: 'main', number: 7, client });
+  const verified = await collect();
+  assert.equal(verified.maintenance.status, 'verified');
+  assert.ok(verified.labels.includes('automation:maintenance'));
+  assert.equal(verified.maintenance.artifacts.length, 2);
+  assert.match(renderPrObservability(verified), /artifacts\/100/);
+  headEntries[0].mode = '120000';
+  assert.equal((await collect()).maintenance.status, 'unverified');
+  headEntries[0].mode = '100644';
+  artifacts[0].expired = true;
+  assert.equal((await collect()).maintenance.status, 'unverified');
+  artifacts[0].expired = false;
+  artifacts[0].digest = `sha256:${'0'.repeat(64)}`;
+  assert.equal((await collect()).maintenance.status, 'unverified');
+});
+
+test('PR observability workflow writes metadata only from trusted default-branch code', () => {
+  const workflow = parse(
+    fs.readFileSync(path.join(REPO, '.github/workflows/pr-observability.yml'), 'utf8'),
+  );
+  assert.deepEqual(Object.keys(workflow.on).sort(), ['pull_request_target', 'workflow_dispatch']);
+  const job = workflow.jobs.observe;
+  assert.match(job.if, /SLIPSTREAM_OBSERVABILITY_ENABLED == 'true'/);
+  assert.match(job.if, /github.ref == format/);
+  assert.deepEqual(job.permissions, {
+    contents: 'read',
+    actions: 'read',
+    'pull-requests': 'write',
+  });
+  assert.equal(workflow.concurrency['cancel-in-progress'], false);
+  const checkout = job.steps.find((step) => step.uses?.startsWith('actions/checkout@'));
+  assert.deepEqual(checkout.with, { ref: '${{ github.sha }}', 'persist-credentials': false });
+  assert.ok(job.steps.some((step) => step.run === 'npm ci --ignore-scripts'));
+  for (const step of job.steps) {
+    if (step.uses) assert.match(step.uses, /@[a-f0-9]{40}$/);
+    assert.equal(step['continue-on-error'], undefined);
+    assert.doesNotMatch(step.run ?? '', /\$\{\{.*pull_request\.(head|body|title)/);
+  }
+  assert.equal(job.steps.filter((step) => step.env?.GITHUB_TOKEN).length, 1);
+  const upload = job.steps.find((step) => step.uses?.startsWith('actions/upload-artifact@'));
+  assert.equal(upload.with['if-no-files-found'], 'error');
+  assert.equal(upload.with['retention-days'], 30);
+});
 
 test('workspaces build in dependency order including the source-bundled plugin', () => {
   const manifest = JSON.parse(fs.readFileSync(path.join(REPO, 'package.json'), 'utf8'));
