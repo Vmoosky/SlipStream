@@ -1,3 +1,5 @@
+import type { ModelObservation, ToolObservation, ToolCallContext } from './types.js';
+
 export const PRICING_SOURCE = 'https://models.dev/api.json';
 export const PRICING_FRESH_MS = 24 * 60 * 60 * 1000;
 export const PRICING_MAX_AGE_MS = 7 * PRICING_FRESH_MS;
@@ -249,13 +251,108 @@ interface CostEntry {
   tokensBefore: number;
   tokensAfter: number;
   pricing?: PricingSnapshot;
+  ts?: number;
+  toolCall?: ToolCallContext;
+  modelObservation?: ModelObservation;
+  toolObservation?: ToolObservation;
+  telemetryConflict?: { traceId: string; spanId: string };
+  telemetrySource?: ToolCallContext['source'];
+}
+
+export function attributeSavingsPricing<Entry extends CostEntry>(entries: readonly Entry[]): Entry[] {
+  const modelSpans = new Map<string, CostEntry>();
+  const toolSpans = new Map<string, CostEntry>();
+  const models = new Map<string, CostEntry[]>();
+  const tools = new Map<string, CostEntry[]>();
+  const conflictingTraces = new Set<string>();
+  const callIds = new Map<string, Set<string>>();
+  const key = (...parts: unknown[]) => JSON.stringify(parts);
+  const session = (value: ToolObservation | ModelObservation) => value.chatSessionId ?? value.conversationId;
+  const validText = (value: unknown): value is string => typeof value === 'string' && value.length > 0 && value.length <= 256 && !/[\x00-\x1f\x7f]/.test(value);
+  const rawCallId = (context: ToolCallContext) => context.source === 'vscode'
+    ? context.toolCallId.replace(/__vscode-\d+$/, '') : context.toolCallId;
+  const contextKey = (context: ToolCallContext) => key(context.source, context.sessionId, context.toolName, rawCallId(context));
+  const validContext = (context: ToolCallContext | undefined): context is ToolCallContext => !!context
+    && (context.source === 'vscode' || context.source === 'cli')
+    && [context.sessionId, context.toolName, context.toolCallId].every(validText);
+  const store = (target: Map<string, CostEntry>, identity: string, entry: CostEntry, traceId: string) => {
+    const previous = target.get(identity);
+    if (previous === undefined) target.set(identity, entry);
+    else if (key(previous.modelObservation, previous.toolObservation, previous.pricing) !== key(entry.modelObservation, entry.toolObservation, entry.pricing)) {
+      conflictingTraces.add(key(entry.telemetrySource, traceId));
+    }
+  };
+  for (const entry of entries) {
+    if (entry.tool !== 'session' && validContext(entry.toolCall)) {
+      const identity = contextKey(entry.toolCall);
+      const ids = callIds.get(identity) ?? new Set<string>();
+      ids.add(entry.toolCall.toolCallId);
+      callIds.set(identity, ids);
+    }
+    const source = entry.telemetrySource;
+    if (entry.tool !== 'session' || (source !== 'vscode' && source !== 'cli')) continue;
+    if (entry.telemetryConflict) conflictingTraces.add(key(source, entry.telemetryConflict.traceId));
+    const observation = entry.modelObservation;
+    if (observation) {
+      store(modelSpans, key(source, observation.traceId, observation.spanId), entry, observation.traceId);
+    }
+    const tool = entry.toolObservation;
+    if (tool) store(toolSpans, key(source, tool.traceId, tool.spanId), entry, tool.traceId);
+  }
+  for (const [identity, entry] of modelSpans) {
+    const observation = entry.modelObservation!;
+    if (toolSpans.has(identity)) conflictingTraces.add(key(entry.telemetrySource, observation.traceId));
+    if (!validText(observation.parentSpanId) || !Array.isArray(observation.responseToolCalls) || observation.responseToolCalls.length > 128) continue;
+    for (const call of observation.responseToolCalls) {
+      if (!call || !validText(call.id) || !validText(call.name)) continue;
+      const identity = key(entry.telemetrySource, observation.traceId, observation.parentSpanId, call.name, call.id);
+      const group = models.get(identity) ?? [];
+      group.push(entry);
+      models.set(identity, group);
+    }
+  }
+  for (const entry of toolSpans.values()) {
+    const tool = entry.toolObservation!;
+    const identity = key(entry.telemetrySource, tool.toolName, tool.toolCallId);
+    const group = tools.get(identity) ?? [];
+    group.push(entry);
+    tools.set(identity, group);
+  }
+  return entries.map((entry) => {
+    const context = entry.toolCall;
+    if (entry.tool === 'session' || entry.pricing?.status === 'priced' && validRate(entry.pricing.inputUsdPerMillion)
+      || entry.pricing && entry.pricing.mode !== 'automatic'
+      || !validContext(context) || callIds.get(contextKey(context))?.size !== 1 || !Number.isFinite(entry.ts)) return entry;
+    const group = tools.get(key(context.source, context.toolName, rawCallId(context)));
+    const matches = (group ?? []).flatMap((toolEntry) => {
+      const tool = toolEntry.toolObservation!;
+      const candidates = models.get(key(context.source, tool.traceId, tool.parentSpanId, tool.toolName, tool.toolCallId)) ?? [];
+      return candidates.filter((candidate) => {
+        const observation = candidate.modelObservation!;
+        return observation.conversationId === context.sessionId || observation.chatSessionId === context.sessionId;
+      }).map((model) => ({ tool, model, candidateCount: candidates.length }));
+    });
+    if (matches.length !== 1 || matches[0]!.candidateCount !== 1) return entry;
+    const { tool, model } = matches[0]!;
+    const observation = model.modelObservation!;
+    const pricing = model.pricing;
+    const modelId = observation.responseModel ?? observation.requestModel;
+    const vendor = observation.provider === 'github' ? 'copilot' : observation.provider;
+    if (conflictingTraces.has(key(context.source, tool.traceId)) || !tool.success || !session(tool) || session(tool) !== session(observation)
+      || !pricing || pricing.mode !== 'automatic' || pricing.status !== 'priced' || !validRate(pricing.inputUsdPerMillion)
+      || pricing.detectedModel?.id !== modelId || pricing.detectedModel?.vendor !== vendor
+      || ![tool.startedAt, tool.endedAt, observation.startedAt, observation.endedAt].every(Number.isFinite)
+      || observation.startedAt > observation.endedAt || observation.endedAt > tool.startedAt
+      || entry.ts! < tool.startedAt || entry.ts! > tool.endedAt) return entry;
+    return { ...entry, pricing: { ...pricing, detectedModel: pricing.detectedModel ? { ...pricing.detectedModel } : undefined } };
+  });
 }
 
 export function aggregateCost(entries: readonly CostEntry[], kind: 'gross' | 'retrieval' | 'net' = 'gross', fallbackUsdPerMillion?: number): CostTotal {
   if (fallbackUsdPerMillion !== undefined && !validRate(fallbackUsdPerMillion)) throw new Error('Invalid fallback token price');
   const result: CostTotal = { usd: 0, knownUsd: 0, fallbackUsd: 0, fallbackUsdPerMillion: fallbackUsdPerMillion ?? null,
     coverage: 'complete', pricedEvents: 0, unpricedEvents: 0, pricedTokens: 0, unpricedTokens: 0 };
-  for (const entry of entries) {
+  for (const entry of attributeSavingsPricing(entries)) {
     if (entry.tool === 'session') continue;
     const retrieval = entry.tool === 'retrieve_artifact';
     if ((kind === 'gross' && retrieval) || (kind === 'retrieval' && !retrieval)) continue;

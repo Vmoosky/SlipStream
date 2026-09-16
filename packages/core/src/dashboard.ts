@@ -10,7 +10,7 @@ import { BENCHMARK_REFERENCE } from './benchmarkReference.js';
 import { COMPRESSION_PROFILES, type CompressionProfile } from './compressionProfiles.js';
 import type { SavingsBaseline } from './baselineStore.js';
 import { parseMarkers } from './markers.js';
-import { aggregateCost, formatCost, priceReportedInput, type CostTotal, type ModelInputCost, type PricingConfig } from './pricing.js';
+import { aggregateCost, attributeSavingsPricing, formatCost, priceReportedInput, type CostTotal, type ModelInputCost, type PricingConfig } from './pricing.js';
 import { buildTaskUsage, type TaskUsageSummary } from './taskUsage.js';
 import type { LedgerEntry, SavingsSummary } from './types.js';
 
@@ -30,7 +30,9 @@ export interface DashboardSummaryPayload {
   pricingStatus: ReturnType<CompressionEngine['pricing']['status']>;
   pricingSnapshot: ReturnType<CompressionEngine['pricing']['snapshot']>;
   modelDetectedAt: number | null;
-  modelObservation: LedgerEntry['modelObservation'] | null;
+  modelObservation: Pick<NonNullable<LedgerEntry['modelObservation']>,
+    'provider' | 'requestModel' | 'responseModel' | 'startedAt' | 'endedAt'
+    | 'inputTokens' | 'outputTokens' | 'cacheReadInputTokens' | 'cacheCreationInputTokens'> | null;
   modelObservations: DashboardModelObservationItem[];
   modelUsage: DashboardModelUsageItem[];
   contextGrowth: DashboardContextGrowth;
@@ -484,12 +486,24 @@ function pickDetectedModelEvent(entries: readonly LedgerEntry[]): LedgerEntry | 
 function recentDashboardEvents(entries: readonly LedgerEntry[], count: number): DashboardEvent[] {
   const occurrences = new Map<string, number>();
   const events: DashboardEvent[] = [];
+  const pricedEntries = attributeSavingsPricing(entries);
   entries.forEach((entry, index) => {
     const fingerprint = createHash('sha256').update(JSON.stringify(entry)).digest('hex');
     const occurrence = occurrences.get(fingerprint) ?? 0;
     occurrences.set(fingerprint, occurrence + 1);
     if (index >= entries.length - count) {
-      events.push({ ...entry, eventId: `${fingerprint}:${occurrence}` });
+      const event: DashboardEvent = { ...pricedEntries[index]!, eventId: `${fingerprint}:${occurrence}` };
+      delete event.toolCall;
+      delete event.toolObservation;
+      delete event.telemetryConflict;
+      delete event.modelObservation;
+      delete event.telemetrySource;
+      if (entry.modelObservation || entry.toolObservation || entry.telemetryConflict || entry.sessionId?.startsWith('copilot-otel:')) {
+        event.sessionId = `copilot-otel:${createHash('sha256').update(JSON.stringify([
+          entry.telemetrySource, entry.sessionId ?? entry.modelObservation?.traceId ?? entry.toolObservation?.traceId ?? entry.telemetryConflict?.traceId,
+        ])).digest('hex')}`;
+      }
+      events.push(event);
     }
   });
   return events.reverse();
@@ -504,6 +518,7 @@ export function buildSummaryPayload(
   const config = buildConfigPayload(engine);
   const retrievalAudit = buildRetrievalAudit(engine, events);
   const modelEvent = pickDetectedModelEvent(lifetimeEvents);
+  const observation = modelEvent?.modelObservation;
   const detectedModel = modelEvent?.detectedModel ?? modelEvent?.pricing?.detectedModel;
   const tasks = buildTaskUsage(lifetimeEvents);
   const outcomes = { 'verified-pass': 0, 'verified-fail': 0, 'user-reported': 0, cancelled: 0, unverified: 0 };
@@ -513,7 +528,12 @@ export function buildSummaryPayload(
     pricingStatus: engine.pricing.status(),
     pricingSnapshot: engine.pricing.snapshot({ mode: 'automatic' }, 0, detectedModel),
     modelDetectedAt: modelEvent?.ts ?? null,
-    modelObservation: modelEvent?.modelObservation ?? null,
+    modelObservation: observation ? {
+      provider: observation.provider, requestModel: observation.requestModel, responseModel: observation.responseModel,
+      startedAt: observation.startedAt, endedAt: observation.endedAt,
+      inputTokens: observation.inputTokens, outputTokens: observation.outputTokens,
+      cacheReadInputTokens: observation.cacheReadInputTokens, cacheCreationInputTokens: observation.cacheCreationInputTokens,
+    } : null,
     modelObservations: buildModelObservations(lifetimeEvents),
     modelUsage: buildModelUsage(engine, lifetimeEvents),
     contextGrowth: buildContextGrowth(lifetimeEvents),
@@ -623,9 +643,10 @@ function buildHistory(entries: readonly LedgerEntry[]): DashboardHistoryBucket[]
  * cost to put back. Buckets follow the strategy that produced each call.
  */
 function buildCostAttribution(
-  entries: readonly LedgerEntry[],
+  retainedEntries: readonly LedgerEntry[],
   usdPerMillionTokens: number,
 ): DashboardCostAttributionPayload {
+  const entries = attributeSavingsPricing(retainedEntries);
   const order = ['Log compression', 'Read lifecycle', 'Passthrough guard', 'Other'];
   const buckets = new Map<string, DashboardCostBucket>();
   const bucketEntries = new Map<string, LedgerEntry[]>();
@@ -2357,7 +2378,7 @@ export function renderDashboardHtml(nonce: string): string {
     <div class="stat"><span class="v" id="saved">0</span><span class="k">tokens saved</span></div>
     <div class="stat"><span class="v" id="before">0</span><span class="k">tokens in</span></div>
     <div class="stat"><span class="v" id="after">0</span><span class="k">forwarded</span></div>
-    <div class="stat"><span class="v" id="cost">$0.00</span><span class="k">est. saved</span></div>
+    <div class="stat"><span class="v" id="cost">$0.00</span><span class="k" id="costLabel">est. saved</span></div>
     <div class="stat" title="100% minus retrieval calls per compression, bounded at zero. Repeat retrievals count separately."><span class="v" id="retrievalAvoidance">N/A</span><span class="k">retrieval avoidance</span></div>
   </div>
 
@@ -3543,6 +3564,9 @@ export function renderDashboardHtml(nonce: string): string {
     const priceBreakdown = s.cost || {};
     const estimatedUsd = s.estimatedCostSavedUsd == null ? priceBreakdown.knownUsd || 0 : s.estimatedCostSavedUsd;
     $('cost').textContent = '$' + estimatedUsd.toFixed(2);
+    $('costLabel').textContent = priceBreakdown.unpricedEvents > 0
+      ? priceBreakdown.pricedEvents > 0 ? 'est. saved (mixed rates)' : 'est. saved @ $' + priceBreakdown.fallbackUsdPerMillion + '/1M'
+      : 'est. saved';
     $('cost').title = 'Recorded-rate savings: $' + (priceBreakdown.knownUsd || 0).toFixed(2) +
       '; default-rate estimate: $' + (priceBreakdown.fallbackUsd || 0).toFixed(2);
     $('retrievalAvoidance').textContent = s.compressions > 0

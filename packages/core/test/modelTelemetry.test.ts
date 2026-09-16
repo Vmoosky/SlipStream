@@ -7,7 +7,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 
 import { CompressionEngine } from '../src/engine.js';
 import { buildSummaryPayload } from '../src/dashboard.js';
-import { managedTelemetryEnv, parseModelTelemetry, recordModelObservation, startModelTelemetryReceiver, type ModelObservation, type ModelTelemetryReceiver } from '../src/modelTelemetry.js';
+import { managedTelemetryEnv, parseModelTelemetry, parseToolTelemetry, recordModelObservation, recordToolObservation, startModelTelemetryReceiver, type ModelObservation, type ToolObservation, type ModelTelemetryReceiver } from '../src/modelTelemetry.js';
 
 function span(attributes: Record<string, string | number> = {}, overrides: Record<string, unknown> = {}) {
   return {
@@ -54,6 +54,47 @@ describe('model telemetry metadata boundary', () => {
       span({ 'gen_ai.operation.name': 'execute_hook' }),
     ))).toEqual([]);
     expect(parseModelTelemetry({ resourceLogs: [{ body: 'PRIVATE' }] })).toEqual([]);
+  });
+
+  it('extracts only exact tool-call metadata from complete model responses and tool spans', () => {
+    const response = JSON.stringify([{ role: 'assistant', parts: [
+      { type: 'text', content: 'PRIVATE' },
+      { type: 'tool_call', id: 'call-one', name: 'slipstream_readFile', arguments: { input: 'PRIVATE' } },
+    ] }]);
+    const payload = batch(span({ 'gen_ai.output.messages': response }), span({
+      'gen_ai.operation.name': 'execute_tool', 'gen_ai.tool.call.id': 'call-one', 'gen_ai.tool.name': 'slipstream_readFile',
+      'gen_ai.tool.call.arguments': 'PRIVATE', 'gen_ai.tool.call.result': 'PRIVATE',
+    }, { spanId: 'd'.repeat(16), status: { code: 1, message: 'PRIVATE' } }));
+    const models = parseModelTelemetry(payload);
+    const tools = parseToolTelemetry(payload);
+    expect(models[0].responseToolCalls).toEqual([{ id: 'call-one', name: 'slipstream_readFile' }]);
+    expect(tools).toEqual([{
+      traceId: 'a'.repeat(32), spanId: 'd'.repeat(16), parentSpanId: 'c'.repeat(16),
+      conversationId: 'conversation-one', chatSessionId: 'chat-one', startedAt: 1789202408000, endedAt: 1789202409000,
+      toolCallId: 'call-one', toolName: 'slipstream_readFile', success: true,
+    }]);
+    expect(JSON.stringify({ models, tools })).not.toContain('PRIVATE');
+  });
+
+  it('does not recover tool identities from truncated, malformed, ambiguous, or oversized content', () => {
+    const part = { type: 'tool_call', id: 'call-one', name: 'slipstream_readFile' };
+    const message = (parts: unknown[]) => JSON.stringify([{ role: 'assistant', parts }]);
+    for (const response of [
+      message([part]).slice(0, -1), 'PRIVATE', '{}', message([{ ...part, id: '' }]),
+      message([{ ...part, name: 'PRIVATE\n' }]), message([part, part]), message(Array(129).fill(part)),
+      message([part, { type: 'text', content: 'PRIVATE'.repeat(10_000) }]),
+    ]) {
+      const [model] = parseModelTelemetry(batch(span({ 'gen_ai.output.messages': response })));
+      expect(model.responseToolCalls).toBeUndefined();
+      expect(model.inputTokens).toBe(1000);
+    }
+    for (const attributes of [{ 'gen_ai.tool.call.id': '' }, { 'gen_ai.tool.name': 'PRIVATE\n' }]) {
+      expect(parseToolTelemetry(batch(span({ 'gen_ai.operation.name': 'execute_tool',
+        'gen_ai.tool.call.id': 'call-one', 'gen_ai.tool.name': 'slipstream_readFile', ...attributes })))).toEqual([]);
+    }
+    expect(parseToolTelemetry(batch(...Array.from({ length: 1100 }, () => span({
+      'gen_ai.operation.name': 'execute_tool', 'gen_ai.tool.call.id': 'call-one', 'gen_ai.tool.name': 'slipstream_readFile',
+    }))))).toHaveLength(1024);
   });
 
   it('rejects invalid identities and incomplete spans without throwing', () => {
@@ -210,6 +251,28 @@ describe('local telemetry receiver', () => {
     expect(receiver.getHealth()).toMatchObject({ receivedExports: 2, acceptedObservations: 1 });
   });
 
+  it('delivers tool metadata only to opted-in callbacks without counting it as model usage', async () => {
+    const tools: ToolObservation[] = [];
+    let accept = false;
+    receiver = await startModelTelemetryReceiver({
+      onObservation: () => undefined,
+      onToolObservation: (tool) => { if (!accept) return false; tools.push(tool); },
+    });
+    const body = JSON.stringify(batch(span({ 'gen_ai.operation.name': 'execute_tool',
+      'gen_ai.tool.call.id': 'call-one', 'gen_ai.tool.name': 'slipstream_readFile', 'gen_ai.tool.call.result': 'PRIVATE',
+    }, { status: { code: 1 } })));
+    const send = () => fetch(`${receiver!.endpoint}/v1/traces`, { method: 'POST', body,
+      headers: { authorization: `Bearer ${receiver!.token}`, 'content-type': 'application/json' } });
+    expect((await send()).status).toBe(200);
+    expect(tools).toHaveLength(0);
+    accept = true;
+    expect((await send()).status).toBe(200);
+    expect((await send()).status).toBe(200);
+    expect(tools).toHaveLength(1);
+    expect(receiver.getHealth()).toMatchObject({ receivedExports: 3, acceptedObservations: 0, lastAcceptedAt: null });
+    expect(JSON.stringify(tools)).not.toContain('PRIVATE');
+  });
+
   it('preserves health across receiver restarts and isolates health listeners', async () => {
     receiver = await startModelTelemetryReceiver({ onObservation: () => { throw new Error('PRIVATE'); } });
     const response = await fetch(`${receiver.endpoint}/v1/traces`, {
@@ -236,6 +299,86 @@ describe('local telemetry receiver', () => {
 });
 
 describe('observed model accounting', () => {
+  it.each(['model', 'tool'])('invalidates conflicting %s retries without changing recorded usage or rates', async (kind) => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'slipstream-telemetry-conflict-'));
+    fs.writeFileSync(path.join(root, 'pricing-cache.json'), JSON.stringify({ version: 1, fetchedAt: Date.now(), revision: 'recorded', models: [
+      { providerId: 'openai', providerName: 'OpenAI', modelId: 'gpt-5.4', modelName: 'GPT-5.4', input: 5 },
+    ] }));
+    const engine = new CompressionEngine({ rootDir: root, workspaceRoots: [root], config: { pricing: { mode: 'automatic' } } });
+    const receiver = await startModelTelemetryReceiver({
+      onObservation: (observation) => recordModelObservation(engine, observation),
+      onToolObservation: (observation) => recordToolObservation(engine, observation),
+    });
+    try {
+      const response = JSON.stringify([{ role: 'assistant', parts: [
+        { type: 'tool_call', id: 'call-one', name: 'slipstream_readFile', arguments: { path: 'PRIVATE' } },
+      ] }]);
+      const model = span({ 'gen_ai.output.messages': response });
+      const tool = span({ 'gen_ai.operation.name': 'execute_tool', 'gen_ai.tool.call.id': 'call-one', 'gen_ai.tool.name': 'slipstream_readFile' }, {
+        spanId: 'd'.repeat(16), startTimeUnixNano: '1789202409000000000', endTimeUnixNano: '1789202410000000000', status: { code: 1 },
+      });
+      const send = (value: unknown) => fetch(`${receiver.endpoint}/v1/traces`, { method: 'POST', body: JSON.stringify(batch(value)),
+        headers: { authorization: `Bearer ${receiver.token}`, 'content-type': 'application/json' } });
+      engine.ledger.withToolCallContext({ source: 'vscode', sessionId: 'conversation-one', toolCallId: 'call-one__vscode-1', toolName: 'slipstream_readFile' }, () => {
+        engine.ledger.record({ ts: 1789202409500, tool: 'read_file', label: 'output', strategy: 'code', tokensBefore: 100_000, tokensAfter: 10_000,
+          bytesBefore: 100, bytesAfter: 10, linesBefore: 10, linesAfter: 1 });
+      });
+      expect((await send(tool)).status).toBe(200);
+      expect(engine.summary().cost.fallbackUsd).toBe(0.27);
+      expect((await send(model)).status).toBe(200);
+      expect(engine.summary().cost.knownUsd).toBe(0.45);
+      const recorded = fs.readFileSync(engine.ledger.path(), 'utf8');
+      expect((await send(model)).status).toBe(200);
+      expect((await send(tool)).status).toBe(200);
+      expect(fs.readFileSync(engine.ledger.path(), 'utf8')).toBe(recorded);
+      const conflict = kind === 'model'
+        ? span({ 'gen_ai.output.messages': response, 'gen_ai.response.model': 'other-model' })
+        : { ...tool, status: { code: 2, message: 'PRIVATE' } };
+      expect((await send(conflict)).status).toBe(200);
+      expect((await send(conflict)).status).toBe(200);
+      expect(engine.summary().cost).toMatchObject({ knownUsd: 0, fallbackUsd: 0.27, pricedEvents: 0 });
+      expect(receiver.getHealth().acceptedObservations).toBe(1);
+      expect(buildSummaryPayload(engine).modelUsage).toMatchObject([{ model: 'gpt-5.4', calls: 1, inputTokens: 1000 }]);
+      expect(engine.ledger.all().filter((entry) => entry.strategy === 'session:telemetry-conflict')).toHaveLength(1);
+      expect(JSON.stringify(buildSummaryPayload(engine))).not.toContain('a'.repeat(32));
+      const saved = fs.readFileSync(engine.ledger.path(), 'utf8');
+      expect(saved.startsWith(recorded)).toBe(true);
+      expect(saved).not.toContain('PRIVATE');
+      const reopened = new CompressionEngine({ rootDir: root, workspaceRoots: [root], config: { pricing: { mode: 'automatic' } } });
+      try {
+        expect(reopened.summary().cost.fallbackUsd).toBe(0.27);
+        expect(reopened.ledger.all().find((entry) => entry.modelObservation)?.pricing?.inputUsdPerMillion).toBe(5);
+      } finally { reopened.dispose(); }
+    } finally {
+      await receiver.close();
+      engine.dispose();
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('records only allowlisted tool metadata and retains exact source identities across restarts', () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'slipstream-tool-telemetry-'));
+    const engine = new CompressionEngine({ rootDir: root, workspaceRoots: [root], config: { pricing: { mode: 'automatic' } } });
+    try {
+      const [tool] = parseToolTelemetry(batch(span({ 'gen_ai.operation.name': 'execute_tool',
+        'gen_ai.tool.call.id': 'call-one', 'gen_ai.tool.name': 'slipstream_readFile',
+      }, { status: { code: 1 } })));
+      const before = engine.summary();
+      expect(recordToolObservation(engine, Object.assign({}, tool, { unexpected: 'PRIVATE' }))).toBe(true);
+      expect(recordToolObservation(engine, tool)).toBe(false);
+      const reader = new CompressionEngine({ rootDir: root, workspaceRoots: [root] });
+      try {
+        expect(recordToolObservation(reader, tool)).toBe(false);
+        expect(reader.ledger.all()[0]).toMatchObject({ tool: 'session', strategy: 'session:tool', telemetrySource: 'vscode', toolObservation: tool });
+      } finally { reader.dispose(); }
+      expect(engine.summary()).toEqual(before);
+      expect(fs.readFileSync(engine.ledger.path(), 'utf8')).not.toContain('PRIVATE');
+    } finally {
+      engine.dispose();
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
+
   it('preserves history, separates concurrent conversations, and never prices unrelated compressions', () => {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), 'slipstream-telemetry-'));
     const engine = new CompressionEngine({ rootDir: root, workspaceRoots: [root], config: { pricing: { mode: 'automatic' } } });

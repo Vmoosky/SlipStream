@@ -66,6 +66,26 @@ export interface LedgerMarker {
 /** How the model asked for omitted content back. */
 export type RetrievalMode = 'id' | 'grep';
 
+export interface ToolCallContext {
+  source: 'vscode' | 'cli';
+  sessionId: string;
+  toolCallId: string;
+  toolName: string;
+}
+
+export interface ToolObservation {
+  traceId: string;
+  spanId: string;
+  parentSpanId?: string;
+  conversationId?: string;
+  chatSessionId?: string;
+  startedAt: number;
+  endedAt: number;
+  success: boolean;
+  toolCallId: string;
+  toolName: string;
+}
+
 export interface ModelObservation {
   traceId: string;
   spanId: string;
@@ -75,6 +95,7 @@ export interface ModelObservation {
   provider: string;
   requestModel: string;
   responseModel?: string;
+  responseToolCalls?: { id: string; name: string }[];
   startedAt: number;
   endedAt: number;
   inputTokens?: number;
@@ -87,6 +108,10 @@ export interface LedgerEntry {
   pricing?: import('./pricing.js').PricingSnapshot;
   detectedModel?: import('./pricing.js').DetectedModel;
   modelObservation?: ModelObservation;
+  toolCall?: ToolCallContext;
+  toolObservation?: ToolObservation;
+  telemetryConflict?: { traceId: string; spanId: string };
+  telemetrySource?: ToolCallContext['source'];
   costPolicyAssessment?: import('./costPolicy.js').CostPolicyAssessment;
   taskUsage?: import('./taskUsage.js').TaskUsageEvent;
   nativeChat?: import('./nativeChat.js').NativeChatEvent;

@@ -4,13 +4,33 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { SavingsLedger } from '../src/savingsLedger.js';
 import { CompressionEngine } from '../src/engine.js';
-import { buildSummaryPayload, renderDashboardReportCsv, renderDashboardReportMarkdown } from '../src/dashboard.js';
+import { buildDetailPayload, buildSummaryPayload, renderDashboardReportCsv, renderDashboardReportJson, renderDashboardReportMarkdown } from '../src/dashboard.js';
 import { aggregateCost, priceReportedInput, priceReportedUsage, pricingFromEnvironment, resolvePricing, validatePricing, PRICING_MAX_AGE_MS, type PricingCatalog } from '../src/pricing.js';
 
 const catalog: PricingCatalog = { version: 1, fetchedAt: 100, revision: 'fixture', models: [
   { providerId: 'vendor', providerName: 'Vendor', modelId: 'model', modelName: 'Model', input: 5 },
 ] };
 const selection = { mode: 'catalog' as const, providerId: 'vendor', modelId: 'model' };
+
+function attributedRequest() {
+  const pricing = resolvePricing({ mode: 'automatic' }, 3, catalog, 101, { id: 'model', vendor: 'vendor', name: 'Model' });
+  const output = { ts: 105, tool: 'read_file', label: 'output', strategy: 'code', tokensBefore: 100_000, tokensAfter: 10_000,
+    bytesBefore: 100, bytesAfter: 10, linesBefore: 10, linesAfter: 1,
+    pricing: resolvePricing({ mode: 'automatic' }, 3),
+    toolCall: { source: 'vscode' as const, sessionId: 'native-session', toolCallId: 'call-one__vscode-123', toolName: 'slipstream_readFile' } };
+  const model = { ...output, tool: 'session', toolCall: undefined, tokensBefore: 0, tokensAfter: 0, pricing,
+    telemetrySource: 'vscode' as const,
+    modelObservation: { traceId: 'a'.repeat(32), spanId: 'b'.repeat(16), parentSpanId: 'f'.repeat(16),
+      conversationId: 'native-session', chatSessionId: 'host-session', provider: 'vendor', requestModel: 'model',
+      startedAt: 101, endedAt: 103, responseToolCalls: [{ id: 'call-one', name: 'slipstream_readFile' }] } };
+  const tool = { ...model, modelObservation: undefined, pricing: undefined,
+    toolObservation: { traceId: 'a'.repeat(32), spanId: 'c'.repeat(16),
+    parentSpanId: 'f'.repeat(16), conversationId: 'host-session', chatSessionId: 'host-session', startedAt: 104, endedAt: 106,
+    success: true, toolCallId: 'call-one', toolName: 'slipstream_readFile' } };
+  const nextModel = { ...model, pricing: { ...pricing, inputUsdPerMillion: 9 }, modelObservation: {
+    ...model.modelObservation, responseToolCalls: undefined, spanId: 'd'.repeat(16), startedAt: 107, endedAt: 109 } };
+  return { output, model, tool, nextModel };
+}
 
 describe('pricing', () => {
   it('splits observed input costs using only recorded rates and excludes output', () => {
@@ -254,6 +274,135 @@ describe('pricing', () => {
       expect(fs.readFileSync(ledger.path(), 'utf8')).toBe(recorded);
       engine.dispose();
     } finally { fs.rmSync(root, { recursive: true, force: true }); }
+  });
+
+  it('attributes exact tool calls using the calling request rate without changing events', () => {
+    const { output, model, tool, nextModel } = attributedRequest();
+    const entries = [output, model, tool, nextModel];
+    const original = JSON.stringify(entries);
+    expect(aggregateCost(entries, 'gross', 3)).toMatchObject({ usd: 0.45, knownUsd: 0.45, fallbackUsd: 0,
+      pricedEvents: 1, unpricedEvents: 0, pricedTokens: 90_000, coverage: 'complete' });
+    expect(aggregateCost([...entries].reverse(), 'gross', 99).usd).toBe(0.45);
+    expect(aggregateCost([...entries, model, tool], 'gross', 99).usd).toBe(0.45);
+    expect(JSON.stringify(entries)).toBe(original);
+    expect(aggregateCost([{ ...output, pricing: resolvePricing({ mode: 'manual' }, 7) }, model, tool, nextModel], 'gross', 3).usd).toBe(0.63);
+  });
+
+  it('reconciles late attribution across dashboard groups and reports without changing event identities or history', () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'slipstream-attributed-pricing-'));
+    const engine = new CompressionEngine({ rootDir: root, workspaceRoots: [root], config: { pricing: { mode: 'automatic' }, usdPerMillionTokens: 3 } });
+    try {
+      const { output, model, tool, nextModel } = attributedRequest();
+      engine.ledger.record(output);
+      const pending = buildSummaryPayload(engine);
+      const originalId = pending.events[0]!.eventId;
+      expect(pending.summary.cost.fallbackUsd).toBe(0.27);
+      engine.ledger.record(tool);
+      engine.ledger.record(model);
+      engine.ledger.record({ ...output, label: 'unmatched', toolCall: undefined, tokensBefore: 20_000 });
+      engine.ledger.record({ ...output, ts: 110, tool: 'retrieve_artifact', label: 'retrieval', tokensBefore: 0,
+        toolCall: { ...output.toolCall, toolCallId: 'retrieve-one__vscode-124', toolName: 'slipstream_retrieveArtifact' } });
+      engine.ledger.record({ ...nextModel, modelObservation: { ...nextModel.modelObservation,
+        responseToolCalls: [{ id: 'retrieve-one', name: 'slipstream_retrieveArtifact' }] } });
+      engine.ledger.record({ ...tool, toolObservation: { ...tool.toolObservation, spanId: 'e'.repeat(16),
+        toolCallId: 'retrieve-one', toolName: 'slipstream_retrieveArtifact', startedAt: 109, endedAt: 111 } });
+      const recorded = fs.readFileSync(engine.ledger.path(), 'utf8');
+      const payload = buildSummaryPayload(engine);
+      expect(payload.summary.estimatedCostSavedUsd).toBeCloseTo(0.48);
+      expect(payload.costAttribution.grossUsd).toBeCloseTo(0.48);
+      expect(payload.costAttribution.retrievalUsd).toBeCloseTo(0.09);
+      expect(payload.costAttribution.netUsd).toBeCloseTo(0.39);
+      expect(payload.costAttribution.cost).toMatchObject({ pricedEvents: 2, unpricedEvents: 1, fallbackUsd: 0.03 });
+      expect(payload.costAttribution.buckets.reduce((total, bucket) => total + (bucket.usd ?? 0), 0)).toBeCloseTo(0.48);
+      expect(payload.costAttribution.models.reduce((total, group) => total + (group.cost.usd ?? 0), 0)).toBeCloseTo(0.39);
+      expect(payload.events.find((entry) => entry.tool === 'read_file' && entry.label === 'output')?.eventId).toBe(originalId);
+      expect(renderDashboardReportMarkdown(engine)).toContain('| Default-rate estimate | $0.03 |');
+      expect(renderDashboardReportCsv(engine)).toContain('"fallbackEstimatedSubtotalUsd","0.03"');
+      engine.ledger.updateTokenPrice(7);
+      const updated = buildSummaryPayload(engine);
+      expect(updated.summary.estimatedCostSavedUsd).toBeCloseTo(0.52);
+      expect(updated.summary.cost.knownUsd).toBe(0.45);
+      expect(updated.events.find((entry) => entry.tool === 'read_file' && entry.label === 'output')?.eventId).toBe(originalId);
+      const reopened = new CompressionEngine({ rootDir: root, workspaceRoots: [root], config: { pricing: { mode: 'automatic' }, usdPerMillionTokens: 3 } });
+      try {
+        expect(buildSummaryPayload(reopened).costAttribution).toEqual(payload.costAttribution);
+      } finally { reopened.dispose(); }
+      expect(fs.readFileSync(engine.ledger.path(), 'utf8')).toBe(recorded);
+    } finally {
+      engine.dispose();
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('keeps fallback for incomplete, conflicting, or unrelated request evidence', () => {
+    const { output, model, tool, nextModel } = attributedRequest();
+    const variants = [
+      [output, tool, nextModel],
+      [output, model, nextModel],
+      [output, { ...model, modelObservation: { ...model.modelObservation, responseToolCalls: undefined } }, tool],
+      [output, { ...model, pricing: undefined }, tool],
+      [output, { ...model, modelObservation: { ...model.modelObservation, responseModel: 'other-model' } }, tool],
+      [output, model, { ...tool, telemetrySource: 'cli' as const }],
+      [output, model, { ...tool, toolObservation: { ...tool.toolObservation, parentSpanId: 'e'.repeat(16) } }],
+      [output, model, { ...tool, toolObservation: { ...tool.toolObservation, chatSessionId: 'another-session' } }],
+      [output, model, { ...tool, toolObservation: { ...tool.toolObservation, toolCallId: 'another-call' } }],
+      [output, model, { ...tool, toolObservation: { ...tool.toolObservation, success: false } }],
+      [{ ...output, ts: 200 }, model, tool],
+      [output, { ...output, toolCall: { ...output.toolCall, toolCallId: 'call-one__vscode-456' } }, model, tool],
+      [output, model, { ...model, modelObservation: { ...model.modelObservation, spanId: 'e'.repeat(16) } }, tool],
+      [output, model, { ...model, modelObservation: { ...model.modelObservation, spanId: 'e'.repeat(16), conversationId: 'another-session' } }, tool],
+      [output, model, tool, { ...tool, toolObservation: { ...tool.toolObservation, spanId: 'e'.repeat(16) } }],
+      [output, model, { ...tool, toolObservation: { ...tool.toolObservation, spanId: model.modelObservation.spanId } }],
+    ];
+    for (const entries of variants) {
+      const cost = aggregateCost(entries, 'gross', 3);
+      expect(cost.knownUsd).toBe(0);
+      expect(cost.fallbackUsd).toBeGreaterThan(0);
+      expect(cost.coverage).toBe('unpriced');
+    }
+  });
+
+  it('separates concurrent conversations with reused tool IDs and retains recorded zero rates', () => {
+    const { output, model, tool } = attributedRequest();
+    const otherOutput = { ...output, toolCall: { ...output.toolCall, sessionId: 'another-session', toolCallId: 'call-one__vscode-456' } };
+    const otherModel = { ...model, pricing: { ...model.pricing, inputUsdPerMillion: 0 }, modelObservation: {
+      ...model.modelObservation, traceId: 'e'.repeat(32), conversationId: 'another-session', chatSessionId: 'another-host',
+    } };
+    const otherTool = { ...tool, toolObservation: { ...tool.toolObservation, traceId: 'e'.repeat(32),
+      conversationId: 'another-host', chatSessionId: 'another-host' } };
+    expect(aggregateCost([otherTool, output, otherModel, tool, otherOutput, model], 'gross', 99)).toMatchObject({
+      knownUsd: 0.45, fallbackUsd: 0, pricedEvents: 2, pricedTokens: 180_000, unpricedEvents: 0,
+    });
+  });
+
+  it('keeps request correlation metadata out of dashboard payloads and share reports', () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'slipstream-pricing-privacy-'));
+    const engine = new CompressionEngine({ rootDir: root, workspaceRoots: [root], config: { pricing: { mode: 'automatic' } } });
+    try {
+      const { output, model, tool } = attributedRequest();
+      engine.ledger.record(output);
+      const originalId = buildSummaryPayload(engine).events[0]!.eventId;
+      engine.ledger.record({ ...model, sessionId: 'copilot-otel:native-session' });
+      engine.ledger.record({ ...tool, sessionId: 'copilot-otel:native-session' });
+      const payload = buildSummaryPayload(engine);
+      const event = payload.events.find((entry) => entry.tool === 'read_file')!;
+      expect(event.eventId).toBe(originalId);
+      expect(event.pricing?.inputUsdPerMillion).toBe(5);
+      expect(buildDetailPayload(engine, event.ts, originalId)?.eventId).toBe(originalId);
+      expect(payload.modelObservation).toMatchObject({ provider: 'vendor', requestModel: 'model', endedAt: 103 });
+      for (const report of [JSON.stringify(payload), renderDashboardReportJson(engine), renderDashboardReportCsv(engine), renderDashboardReportMarkdown(engine)]) {
+        for (const identity of ['native-session', 'host-session', 'call-one', 'a'.repeat(32), 'b'.repeat(16), 'f'.repeat(16)]) {
+          expect(report).not.toContain(identity);
+        }
+      }
+      const recorded = fs.readFileSync(engine.ledger.path(), 'utf8');
+      expect(recorded).toContain('native-session');
+      expect(recorded).toContain('call-one__vscode-123');
+      expect(engine.ledger.all()[0]!.pricing?.inputUsdPerMillion).toBeNull();
+    } finally {
+      engine.dispose();
+      fs.rmSync(root, { recursive: true, force: true });
+    }
   });
 
   it('resolves exact USD/M prices without using the manual default', () => {

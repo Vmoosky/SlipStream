@@ -27,6 +27,11 @@ vendor, and name to the request's tool events. Changing the model picker takes
 effect on the next request. Concurrent chats cannot change each other's rates.
 The selected model handles the response; pricing never selects a different model.
 
+Native Slipstream tools can also use a recorded model rate when a complete model
+response export explicitly identifies the tool call and the local execution
+metadata confirms the same call. Unmatched events continue to use the fallback;
+the latest observed model is not used as a substitute for this link.
+
 Model rates come from [Models.dev](https://models.dev) in the background. There is
 no provider or reference-model picker; the old `slipstream.pricing` setting is
 ignored. **Est. saved** combines recorded event rates with a configurable fallback
@@ -53,7 +58,9 @@ Connect and Disconnect are available directly in this section. **Connected** mea
 the local receiver is ready. While connected, fallback pricing, an unavailable
 rate, or a pending first model observation appears as a neutral information note,
 not a tracking error. Warning styling is reserved for tracking that is not
-connected. Connecting does not retroactively attach a model to earlier tool outputs.
+connected. Connecting cannot reconstruct identities missing from older tool
+outputs. Late exports can resolve outputs that already retained their tool-call
+identity, without rewriting those events.
 
 **Models > Receiver health** distinguishes a ready receiver from one that has
 actually received telemetry. It shows the last locally accepted observation's
@@ -652,14 +659,28 @@ guessing from helper traffic. Delayed spans cannot overwrite a newer chat
 observation; retried spans do not create duplicate ledger entries. A subsequent
 chat-associated call can update the cached model, including after a model change.
 
-Native tool invocations still do not expose a shared request ID to Slipstream.
-Telemetry alone is not proof of which model consumed a particular compression,
-especially with concurrent conversations or subagents. Use `@slipstream` for exact
-request-aware compression pricing; native tool and managed MCP savings use the
-fallback unless their event has a recorded rate. The latest observed model is never assigned
-globally or used to reprice history. Native telemetry records are zero-savings
-session events, not additional compressions or billable token deltas. Hooks still
-record activity separately, without prices or retained prompt contents.
+Native tool invocations do not expose `ChatRequest.model`. Instead, validated
+native context retains the full tool-call identity on each Slipstream output.
+For attribution, the receiver extracts only tool-call IDs and names from complete,
+valid `gen_ai.output.messages` assistant responses. A unique response reference
+must match a successful `execute_tool` span by tool name, raw call ID, trace,
+parent span, source, and session. The output must occur within that execution;
+timestamps alone never establish a match. Only the known numeric VS Code ID suffix
+is removed for comparison; the original identity stays in the ledger.
+
+Matched savings use the **calling model request's recorded standard input rate**.
+This is a reference valuation, not proof of the model that later consumed the
+output, cache savings, or Copilot charges. Another turn's rate, the agent's initial
+model, and the current catalog are not substitutes. Existing priced event
+snapshots remain authoritative, including explicit zero rates.
+
+Missing or truncated response metadata, absent rates, reused or ambiguous IDs,
+failed tool executions, and unsupported producer paths remain on fallback.
+Contradictory retries append a metadata-only conflict marker and invalidate the
+trace's derived attribution without duplicating model usage. Exact duplicate
+exports do not add records. Model, tool, and conflict observations are zero-savings
+session events, not additional compressions or billable token deltas. Managed MCP
+and CLI outputs without the complete identity chain remain unmatched.
 
 Model matching is exact. Known Copilot aliases map to exact original-provider
 catalog IDs; an ambiguous match, an unknown ID, or an unresolved Auto selection
@@ -675,9 +696,11 @@ models, so Slipstream reports that limitation instead of silently substituting.
 arguments/results, and hook input/output even with `captureContent: false`.
 Consent explicitly covers receiving this material locally. Slipstream discards
 content in memory before logging or storage and retains only the allowlisted
-model, correlation, timing, and token-count fields. Telemetry is never forwarded;
-raw exports are not written to a file. Model observations are included in local
-ledger history and JSON dashboard exports, so those reports still contain IDs.
+model, correlation, timing, and token-count fields, including tool-call IDs and
+names but not message text or tool arguments. Telemetry is never forwarded;
+raw exports are not written to a file. The local ledger retains correlation IDs.
+Dashboard payloads and Markdown, CSV, and JSON reports omit those trace, span,
+conversation, and tool-call IDs; telemetry producer groups use hashed identifiers.
 
 The receiver binds only to `127.0.0.1`, requires a randomly generated local bearer
 credential, rejects browser-origin requests, and bounds request size, duration,
@@ -686,7 +709,8 @@ storage and in Copilot's exporter headers in profile settings, never in the
 ledger or dashboard. It is not a GitHub credential. Content capture stays off,
 content attributes are limited to 256 characters upstream, and log/metric export
 bodies are discarded. These limits reduce exposure; they do not make the inbound
-payload metadata-only.
+payload metadata-only. The attribute limit is not increased for attribution:
+truncated response lists stay unmatched rather than being partially recovered.
 
 Consent changes `github.copilot.chat.otel.*` in the current VS Code profile,
 including its other local windows. Existing custom exporters, environment
@@ -801,6 +825,13 @@ catalog revision, stale status, and standard uncached-input assumption. A
 retrieval uses the retrieving producer's current rate, not the original event's.
 Refreshing prices affects future event snapshots only. Changing the default rate
 changes the fallback estimate for missing-rate entries, without rewriting the ledger.
+
+For a matched native tool event, the effective rate is a read-only projection of
+the calling model observation's stored snapshot. Model and tool exports may arrive
+out of order or after the output. Summaries resolve the full retained evidence
+before grouping or filtering, including after restart. Original events, recorded
+rates, and dashboard event selectors remain unchanged. If required evidence is
+missing or no longer retained, the event remains unmatched and uses fallback.
 
 - Gross saving estimate: signed removed tokens times each recorded input rate,
   or the configured fallback when that rate is missing.

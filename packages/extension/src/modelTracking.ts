@@ -6,7 +6,7 @@ import * as path from 'node:path';
 import type { CompressionEngine, DashboardModelTrackingStatus, ModelTelemetryHealth } from '@slipstream/core';
 import * as vscode from 'vscode';
 
-import { recordModelObservation, startModelTelemetryReceiver, type ModelTelemetryReceiver } from './modelTelemetry.js';
+import { recordModelObservation, recordToolObservation, startModelTelemetryReceiver, type ModelTelemetryReceiver } from './modelTelemetry.js';
 
 const CONNECTION_KEY = 'modelTracking.connection.v1';
 const OFFER_KEY = 'modelTracking.offered.v1';
@@ -277,19 +277,20 @@ export class ModelTrackingController {
   }
 
   private async startReceiver(token?: string, port?: number): Promise<ModelTelemetryReceiver> {
+    const accepts = (endedAt: number): boolean => {
+      const connection = this.connection();
+      if (this.disposed || this.blockedReason(true) || !connection || connection.phase !== 'connected' || endedAt > Date.now() + 60_000) return false;
+      const installed = installedSettings(connection, this.receiver?.token ?? token ?? '');
+      return SETTING_KEYS.every((key) => equal(vscode.workspace.getConfiguration(SECTION).get(key), installed[key]));
+    };
     const receiver = await startModelTelemetryReceiver({
       token, port, initialHealth: this.receiverHealth,
       onHealthChange: (health) => {
         this.receiverHealth = health;
         if (!this.disposed) this.onChange();
       },
-      onObservation: (observation) => {
-        const connection = this.connection();
-        if (this.disposed || this.blockedReason(true) || !connection || connection.phase !== 'connected' || observation.endedAt > Date.now() + 60_000) return false;
-        const installed = installedSettings(connection, this.receiver?.token ?? token ?? '');
-        if (SETTING_KEYS.some((key) => !equal(vscode.workspace.getConfiguration(SECTION).get(key), installed[key]))) return false;
-        return recordModelObservation(this.engine, observation);
-      },
+      onObservation: (observation) => accepts(observation.endedAt) && recordModelObservation(this.engine, observation),
+      onToolObservation: (observation) => accepts(observation.endedAt) && recordToolObservation(this.engine, observation),
     });
     if (this.disposed) {
       await receiver.close();

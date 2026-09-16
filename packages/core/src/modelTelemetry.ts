@@ -4,15 +4,16 @@ import * as http from 'node:http';
 import * as path from 'node:path';
 
 import type { CompressionEngine } from './engine.js';
-import type { ModelObservation } from './types.js';
+import type { ModelObservation, ToolObservation } from './types.js';
 
-export type { ModelObservation } from './types.js';
+export type { ModelObservation, ToolObservation } from './types.js';
 
 const MODEL_ATTRIBUTES = new Set([
   'gen_ai.operation.name', 'gen_ai.provider.name', 'gen_ai.request.model', 'gen_ai.response.model',
   'gen_ai.conversation.id', 'copilot_chat.session_id', 'copilot_chat.chat_session_id',
   'gen_ai.usage.input_tokens', 'gen_ai.usage.output_tokens',
   'gen_ai.usage.cache_read.input_tokens', 'gen_ai.usage.cache_creation.input_tokens',
+  'gen_ai.output.messages', 'gen_ai.tool.call.id', 'gen_ai.tool.name',
 ]);
 
 function object(value: unknown): Record<string, unknown> {
@@ -40,8 +41,34 @@ function timestamp(value: unknown): number | undefined {
   return Number.isSafeInteger(milliseconds) ? milliseconds : undefined;
 }
 
-export function parseModelTelemetry(payload: unknown): ModelObservation[] {
-  const observations: ModelObservation[] = [];
+function responseToolCalls(value: unknown): ModelObservation['responseToolCalls'] {
+  if (typeof value !== 'string' || value.length > 65_536) return undefined;
+  try {
+    const messages: unknown = JSON.parse(value);
+    if (!Array.isArray(messages) || messages.length > 128) return undefined;
+    const calls: NonNullable<ModelObservation['responseToolCalls']> = [];
+    const ids = new Set<string>();
+    for (const message of messages) {
+      const { role, parts } = object(message);
+      if (role !== 'assistant' || !Array.isArray(parts) || parts.length > 128) return undefined;
+      for (const part of parts) {
+        const call = object(part);
+        if (call.type !== 'tool_call') continue;
+        const id = text(call.id);
+        const name = text(call.name);
+        if (!id || !name || ids.has(id) || calls.length === 128) return undefined;
+        ids.add(id);
+        calls.push({ id, name });
+      }
+    }
+    return calls.length ? calls : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function parseTelemetry(payload: unknown): { models: ModelObservation[]; tools: ToolObservation[] } {
+  const observations: { models: ModelObservation[]; tools: ToolObservation[] } = { models: [], tools: [] };
   let visited = 0;
   for (const resource of items(object(payload).resourceSpans)) {
     for (const scope of items(object(resource).scopeSpans)) {
@@ -55,28 +82,42 @@ export function parseModelTelemetry(payload: unknown): ModelObservation[] {
           const data = object(entry.value);
           attributes.set(entry.key, data.stringValue ?? data.intValue);
         }
-        if (attributes.get('gen_ai.operation.name') !== 'chat') continue;
+        const operation = attributes.get('gen_ai.operation.name');
+        if (operation !== 'chat' && operation !== 'execute_tool') continue;
         const traceId = identifier(span.traceId, 32);
         const spanId = identifier(span.spanId, 16);
         const startedAt = timestamp(span.startTimeUnixNano);
         const endedAt = timestamp(span.endTimeUnixNano);
+        if (!traceId || !spanId || startedAt === undefined || endedAt === undefined || endedAt < startedAt) continue;
+        const identity = {
+          traceId, spanId,
+          parentSpanId: identifier(span.parentSpanId, 16),
+          conversationId: text(attributes.get('gen_ai.conversation.id')) ?? text(attributes.get('copilot_chat.session_id')),
+          chatSessionId: text(attributes.get('copilot_chat.chat_session_id')),
+          startedAt, endedAt,
+        };
+        if (operation === 'execute_tool') {
+          const toolCallId = text(attributes.get('gen_ai.tool.call.id'));
+          const toolName = text(attributes.get('gen_ai.tool.name'));
+          if (toolCallId && toolName) observations.tools.push({
+            ...identity, toolCallId, toolName, success: object(span.status).code === 1,
+          });
+          continue;
+        }
         const provider = text(attributes.get('gen_ai.provider.name'));
         const requestModel = text(attributes.get('gen_ai.request.model'));
-        if (!traceId || !spanId || startedAt === undefined || endedAt === undefined || endedAt < startedAt || !provider || !requestModel) continue;
+        if (!provider || !requestModel) continue;
         const tokens = (key: string): number | undefined => {
           const raw = attributes.get(key);
           if (typeof raw !== 'number' && (typeof raw !== 'string' || !/^\d{1,12}$/.test(raw))) return undefined;
           const count = Number(raw);
           return Number.isSafeInteger(count) && count >= 0 ? count : undefined;
         };
-        observations.push({
-          traceId, spanId,
-          parentSpanId: identifier(span.parentSpanId, 16),
-          conversationId: text(attributes.get('gen_ai.conversation.id')) ?? text(attributes.get('copilot_chat.session_id')),
-          chatSessionId: text(attributes.get('copilot_chat.chat_session_id')),
+        observations.models.push({
+          ...identity,
           provider, requestModel,
           responseModel: text(attributes.get('gen_ai.response.model')),
-          startedAt, endedAt,
+          responseToolCalls: responseToolCalls(attributes.get('gen_ai.output.messages')),
           inputTokens: tokens('gen_ai.usage.input_tokens'),
           outputTokens: tokens('gen_ai.usage.output_tokens'),
           cacheReadInputTokens: tokens('gen_ai.usage.cache_read.input_tokens'),
@@ -86,6 +127,14 @@ export function parseModelTelemetry(payload: unknown): ModelObservation[] {
     }
   }
   return observations;
+}
+
+export function parseModelTelemetry(payload: unknown): ModelObservation[] {
+  return parseTelemetry(payload).models;
+}
+
+export function parseToolTelemetry(payload: unknown): ToolObservation[] {
+  return parseTelemetry(payload).tools;
 }
 
 /**
@@ -101,29 +150,79 @@ export const MODEL_OBSERVATION_SOURCE_LABELS = {
 
 export type ModelObservationSource = keyof typeof MODEL_OBSERVATION_SOURCE_LABELS;
 
+function alreadyRecorded(
+  engine: CompressionEngine,
+  observation: ModelObservation | ToolObservation,
+  source: ModelObservationSource,
+  kind: 'modelObservation' | 'toolObservation',
+): boolean {
+  const entries = engine.ledger.all();
+  const previous = entries.find((entry) => {
+    const recorded = entry.modelObservation ?? entry.toolObservation;
+    const recordedSource = entry.telemetrySource ?? (entry.sessionLabel === MODEL_OBSERVATION_SOURCE_LABELS.cli ? 'cli' : 'vscode');
+    return recordedSource === source && recorded?.traceId === observation.traceId && recorded.spanId === observation.spanId;
+  });
+  if (!previous) return false;
+  if (JSON.stringify(previous[kind]) !== JSON.stringify(observation) && !entries.some((entry) => entry.telemetrySource === source
+    && entry.telemetryConflict?.traceId === observation.traceId && entry.telemetryConflict.spanId === observation.spanId)) {
+    engine.ledger.record({
+      ts: observation.endedAt, sessionId: `copilot-otel:${observation.traceId}`,
+      sessionLabel: MODEL_OBSERVATION_SOURCE_LABELS[source], telemetrySource: source,
+      telemetryConflict: { traceId: observation.traceId, spanId: observation.spanId },
+      tool: 'session', strategy: 'session:telemetry-conflict', outcomeReason: 'Session event', label: 'Conflicting telemetry',
+      tokensBefore: 0, tokensAfter: 0, bytesBefore: 0, bytesAfter: 0, linesBefore: 0, linesAfter: 0, durationMs: 0,
+    });
+  }
+  return true;
+}
+
 export function recordModelObservation(
   engine: CompressionEngine,
   observation: ModelObservation,
   source: ModelObservationSource = 'vscode',
 ): boolean {
-  if (engine.ledger.all().some((entry) => entry.modelObservation?.traceId === observation.traceId && entry.modelObservation?.spanId === observation.spanId)) return false;
   const id = observation.responseModel ?? observation.requestModel;
   const detectedModel = { id, vendor: observation.provider === 'github' ? 'copilot' : observation.provider, name: id };
   const modelObservation: ModelObservation = {
     traceId: observation.traceId, spanId: observation.spanId, parentSpanId: observation.parentSpanId,
     conversationId: observation.conversationId, chatSessionId: observation.chatSessionId,
     provider: observation.provider, requestModel: observation.requestModel, responseModel: observation.responseModel,
+    responseToolCalls: observation.responseToolCalls?.map(({ id, name }) => ({ id, name })),
     startedAt: observation.startedAt, endedAt: observation.endedAt,
     inputTokens: observation.inputTokens, outputTokens: observation.outputTokens,
     cacheReadInputTokens: observation.cacheReadInputTokens, cacheCreationInputTokens: observation.cacheCreationInputTokens,
   };
+  if (alreadyRecorded(engine, modelObservation, source, 'modelObservation')) return false;
   engine.ledger.record({
     ts: observation.endedAt,
     sessionId: `copilot-otel:${observation.conversationId ?? observation.chatSessionId ?? observation.traceId}`,
     sessionLabel: MODEL_OBSERVATION_SOURCE_LABELS[source],
     tool: 'session', strategy: 'session:model', outcomeReason: 'Session event',
-    label: detectedModel.name, detectedModel, modelObservation,
+    label: detectedModel.name, detectedModel, modelObservation, telemetrySource: source,
     pricing: engine.pricing.snapshot({ mode: 'automatic' }, 0, detectedModel),
+    tokensBefore: 0, tokensAfter: 0, bytesBefore: 0, bytesAfter: 0, linesBefore: 0, linesAfter: 0, durationMs: 0,
+  });
+  return true;
+}
+
+export function recordToolObservation(
+  engine: CompressionEngine,
+  observation: ToolObservation,
+  source: ModelObservationSource = 'vscode',
+): boolean {
+  const toolObservation: ToolObservation = {
+    traceId: observation.traceId, spanId: observation.spanId, parentSpanId: observation.parentSpanId,
+    conversationId: observation.conversationId, chatSessionId: observation.chatSessionId,
+    startedAt: observation.startedAt, endedAt: observation.endedAt, success: observation.success,
+    toolCallId: observation.toolCallId, toolName: observation.toolName,
+  };
+  if (alreadyRecorded(engine, toolObservation, source, 'toolObservation')) return false;
+  engine.ledger.record({
+    ts: observation.endedAt,
+    sessionId: `copilot-otel:${observation.conversationId ?? observation.chatSessionId ?? observation.traceId}`,
+    sessionLabel: MODEL_OBSERVATION_SOURCE_LABELS[source],
+    tool: 'session', strategy: 'session:tool', outcomeReason: 'Session event',
+    label: observation.toolName, toolObservation, telemetrySource: source,
     tokensBefore: 0, tokensAfter: 0, bytesBefore: 0, bytesAfter: 0, linesBefore: 0, linesAfter: 0, durationMs: 0,
   });
   return true;
@@ -213,6 +312,7 @@ export interface ModelTelemetryReceiver {
 
 export async function startModelTelemetryReceiver(options: {
   onObservation: (observation: ModelObservation) => unknown;
+  onToolObservation?: (observation: ToolObservation) => unknown;
   onHealthChange?: (health: ModelTelemetryHealth) => void;
   initialHealth?: ModelTelemetryHealth;
   token?: string;
@@ -223,7 +323,7 @@ export async function startModelTelemetryReceiver(options: {
   if (!/^[a-f\d]{64}$/.test(token)) throw new Error('Invalid local telemetry credential.');
   const expectedAuthorization = Buffer.from(`Bearer ${token}`);
   const maxBodyBytes = options.maxBodyBytes ?? 8 * 1024 * 1024;
-  const seen = new Set<string>();
+  const seen = new Map<string, string>();
   const health: ModelTelemetryHealth = options.initialHealth
     ? { ...options.initialHealth, rejectedExports: { ...options.initialHealth.rejectedExports } }
     : {
@@ -309,9 +409,9 @@ export async function startModelTelemetryReceiver(options: {
         reply(200);
         return;
       }
-      let observations: ModelObservation[];
+      let observations: ReturnType<typeof parseTelemetry>;
       try {
-        observations = parseModelTelemetry(JSON.parse(Buffer.concat(chunks).toString('utf8')));
+        observations = parseTelemetry(JSON.parse(Buffer.concat(chunks).toString('utf8')));
       } catch {
         reply(400, '{}', 'malformed');
         return;
@@ -319,14 +419,24 @@ export async function startModelTelemetryReceiver(options: {
         chunks.length = 0;
       }
       try {
-        for (const observation of observations) {
+        for (const observation of observations.models) {
           const key = `${observation.traceId}:${observation.spanId}`;
-          if (seen.has(key)) continue;
+          const fingerprint = JSON.stringify(observation);
+          if (seen.get(key) === fingerprint) continue;
           if (options.onObservation(observation) === false) continue;
-          health.acceptedObservations++;
-          health.lastAcceptedAt = Date.now();
-          seen.add(key);
-          if (seen.size > 4096) seen.delete(seen.values().next().value!);
+          if (!seen.has(key)) {
+            health.acceptedObservations++;
+            health.lastAcceptedAt = Date.now();
+          }
+          seen.set(key, fingerprint);
+          if (seen.size > 4096) seen.delete(seen.keys().next().value!);
+        }
+        if (options.onToolObservation) for (const observation of observations.tools) {
+          const key = `${observation.traceId}:${observation.spanId}`;
+          const fingerprint = JSON.stringify(observation);
+          if (seen.get(key) === fingerprint || options.onToolObservation(observation) === false) continue;
+          seen.set(key, fingerprint);
+          if (seen.size > 4096) seen.delete(seen.keys().next().value!);
         }
         reply(200);
       } catch {
