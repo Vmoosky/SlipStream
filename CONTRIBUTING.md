@@ -67,6 +67,28 @@ the full recommended JS rules to new readiness tooling. Formatting currently
 covers that tooling and workflows, not the entire historical source tree.
 Expand these scopes deliberately; avoid unrelated formatting churn.
 
+The [ESLint policy](eslint.config.mjs) also enforces these workspace dependency
+directions in the existing required CI lint gate:
+
+| Importing Workspace | Allowed Workspace Dependencies |
+| --- | --- |
+| `core` | None |
+| `hook-runtime`, `mcp-server` | `core` |
+| `copilot-plugin`, `extension` | `core`, `hook-runtime`, `mcp-server` |
+
+Cross-workspace imports must use the public package name, such as
+`@slipstream/core`, not a package subpath or another workspace's source, build,
+relative, or absolute path. Same-workspace internals remain available to local
+source and tests. The explicit allowlist does not widen when a manifest changes;
+new workspaces or dependency directions require a policy and regression review.
+
+The rule covers static imports, re-exports, TypeScript type imports, and literal
+`import()`/`require()` calls in workspace JS/TS, including CommonJS modules and
+tests. Computed module names and bundler configuration require review. Existing
+source bundle entries and aliases are unchanged; root integration scripts and
+E2E fixtures may still exercise compiled workspace internals. Boundary regressions
+run in `test:scripts` using the real ESLint configuration without executing imports.
+
 `check:docs` scans maintained `.md`, `.markdown`, and root `llms.txt` documents for
 manifest reference drift, broken local links and anchors, invalid JSON/JSONC and
 cost-policy examples, and missing npm scripts. Static `npm run`/`run-script`

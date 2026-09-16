@@ -3,9 +3,10 @@ import assert from 'node:assert/strict';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { execFileSync } from 'node:child_process';
 import { parse } from 'yaml';
+import { ESLint } from 'eslint';
 import { resolveConfig, resolveConfigFile } from 'prettier';
 import { developmentPlan, runDevelopmentCommand, runDevelopment } from '../scripts/develop.mjs';
 import {
@@ -153,6 +154,142 @@ test('workspaces build in dependency order including the source-bundled plugin',
     }
   }
   assert.ok(names.indexOf('@slipstream/core') < names.indexOf('@slipstream/copilot-plugin'));
+});
+
+test('workspace boundaries reject upward dependencies and private cross-package imports', async () => {
+  const linter = new ESLint({
+    cwd: REPO,
+    overrideConfigFile: path.join(REPO, 'eslint.config.mjs'),
+  });
+  const allowed = {
+    core: [],
+    'hook-runtime': ['core'],
+    'mcp-server': ['core'],
+    'copilot-plugin': ['core', 'hook-runtime', 'mcp-server'],
+    extension: ['core', 'hook-runtime', 'mcp-server'],
+  };
+  const manifest = JSON.parse(fs.readFileSync(path.join(REPO, 'package.json'), 'utf8'));
+  assert.deepEqual(
+    [...manifest.workspaces].sort(),
+    Object.keys(allowed)
+      .map((folder) => `packages/${folder}`)
+      .sort(),
+  );
+  const workspaces = manifest.workspaces.map((folder) => ({
+    folder: path.basename(folder),
+    manifest: JSON.parse(fs.readFileSync(path.join(REPO, folder, 'package.json'), 'utf8')),
+  }));
+  for (const owner of workspaces) {
+    const filePath = path.join(REPO, 'packages', owner.folder, 'src/boundary-probe.ts');
+    for (const target of workspaces) {
+      if (owner === target) continue;
+      const permitted = allowed[owner.folder].includes(target.folder);
+      if (Object.hasOwn(owner.manifest.dependencies ?? {}, target.manifest.name)) {
+        assert.ok(permitted, `${owner.manifest.name} declares prohibited ${target.manifest.name}`);
+      }
+      for (const specifier of [
+        target.manifest.name,
+        `${target.manifest.name}/dist/index.js`,
+        `../../${target.folder}/src/index.js`,
+      ]) {
+        const [result] = await linter.lintText(`import ${JSON.stringify(specifier)};`, {
+          filePath,
+        });
+        const rejected = !permitted || specifier !== target.manifest.name;
+        assert.equal(result.errorCount, Number(rejected), `${owner.folder}: ${specifier}`);
+        assert.equal(result.warningCount, 0);
+        if (rejected) {
+          assert.equal(result.messages[0].ruleId, 'workspace/import-boundaries');
+          assert.equal(result.messages[0].messageId, permitted ? 'publicEntry' : 'direction');
+        }
+      }
+    }
+    const [local] = await linter.lintText(
+      "import './config.js'; import '../src/config.js'; import 'node:path'; import '@slipstream/core-utils';",
+      { filePath },
+    );
+    assert.equal(local.errorCount, 0, JSON.stringify(local.messages));
+  }
+});
+
+test('workspace boundaries cover static import syntax and normalized workspace paths', async () => {
+  const linter = new ESLint({
+    cwd: REPO,
+    overrideConfigFile: path.join(REPO, 'eslint.config.mjs'),
+  });
+  const imports = [
+    (specifier) => `import ${JSON.stringify(specifier)};`,
+    (specifier) => `export * from ${JSON.stringify(specifier)};`,
+    (specifier) => `export { Config } from ${JSON.stringify(specifier)};`,
+    (specifier) => `import type { Config } from ${JSON.stringify(specifier)};`,
+    (specifier) => `type Config = import(${JSON.stringify(specifier)}).Config;`,
+    (specifier) => `import dependency = require(${JSON.stringify(specifier)});`,
+    (specifier) => `import(${JSON.stringify(specifier)});`,
+    (specifier) => `require(${JSON.stringify(specifier)});`,
+    (specifier) => `import(\`${specifier}\`);`,
+    (specifier) => `require(\`${specifier}\`);`,
+  ];
+  for (const statement of imports) {
+    for (const [specifier, messageId] of [
+      ['@slipstream/core', undefined],
+      ['@slipstream/copilot-plugin', 'direction'],
+      ['@slipstream/core/src/config.js', 'publicEntry'],
+    ]) {
+      const code = statement(specifier);
+      const [result] = await linter.lintText(code, {
+        filePath: path.join(REPO, 'packages/extension/src/boundary-probe.ts'),
+      });
+      assert.equal(result.errorCount, Number(Boolean(messageId)), code);
+      assert.equal(result.warningCount, 0);
+      if (messageId) {
+        assert.equal(result.messages[0].ruleId, 'workspace/import-boundaries', code);
+        assert.equal(result.messages[0].messageId, messageId, code);
+      }
+    }
+  }
+  for (const specifier of [
+    '../../core',
+    '../../core/',
+    '../../core/dist/index.js',
+    '../../extension/../core/src/index.js',
+    path.join(REPO, 'packages/core/src/index.js'),
+    pathToFileURL(path.join(REPO, 'packages/core/src/index.js')).href,
+  ]) {
+    const [result] = await linter.lintText(`import ${JSON.stringify(specifier)};`, {
+      filePath: path.join(REPO, 'packages/extension/src/boundary-probe.ts'),
+    });
+    assert.equal(result.errorCount, 1, specifier);
+    assert.equal(result.messages[0].ruleId, 'workspace/import-boundaries');
+    assert.equal(result.messages[0].messageId, 'publicEntry');
+  }
+});
+
+test('workspace boundaries apply to source and tests in every module format, not root integration tooling', async () => {
+  const linter = new ESLint({
+    cwd: REPO,
+    overrideConfigFile: path.join(REPO, 'eslint.config.mjs'),
+  });
+  for (const extension of ['js', 'mjs', 'cjs', 'ts', 'mts', 'cts']) {
+    for (const folder of ['src', 'test', 'src/nested']) {
+      const [result] = await linter.lintText("require('@slipstream/mcp-server');", {
+        filePath: path.join(REPO, 'packages/core', folder, `boundary-probe.${extension}`),
+      });
+      assert.equal(result.errorCount, 1, `${folder}/*.${extension}`);
+      assert.equal(result.messages[0].ruleId, 'workspace/import-boundaries');
+      assert.equal(result.messages[0].messageId, 'direction');
+    }
+  }
+  for (const filePath of [
+    'scripts/check-boundary-probe.mjs',
+    'tests/boundary-probe.mjs',
+    'e2e/boundary-probe.ts',
+  ]) {
+    const [result] = await linter.lintText("import '../packages/core/dist/index.js';", {
+      filePath: path.join(REPO, filePath),
+    });
+    assert.equal(result.errorCount, 0, JSON.stringify(result.messages));
+    assert.equal(result.warningCount, 0);
+  }
 });
 
 test('formatting discovers standalone Prettier settings in every workspace', async () => {
