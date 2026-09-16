@@ -4,6 +4,7 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { DOC_CONTRACTS } from './check-ci.mjs';
 import { collectMaintenanceEvidence } from './maintenance.mjs';
 
 export const AGENT_REVIEW_RUNTIME = Object.freeze({
@@ -365,6 +366,7 @@ export async function runBoundedAgentReview(root, options = {}) {
     wrapperRetries: 0,
     usage: null,
     response: null,
+    findingIds: [],
     humanApprovalRequired: true,
     automaticPublication: false,
     cleanup: true,
@@ -435,6 +437,7 @@ export async function runBoundedAgentReview(root, options = {}) {
     report.response = response;
     report.responseSha256 = digest(bytes);
     report.usage = usage;
+    report.findingIds = agentReviewFindingIds(report);
     report.status = 'reviewed';
   } catch {
     report.status = 'failed';
@@ -457,6 +460,233 @@ export async function runBoundedAgentReview(root, options = {}) {
 
 function digest(bytes) {
   return createHash('sha256').update(bytes).digest('hex');
+}
+
+function sortedReviewEvidence(report) {
+  return Object.keys(report.evidenceSha256)
+    .sort()
+    .map((file) => [file, report.evidenceSha256[file]]);
+}
+
+export function agentReviewFindingIds(report) {
+  return report.response.findings.map((finding, index) =>
+    digest(
+      JSON.stringify([
+        'agent-review-finding-v1',
+        report.workflow,
+        report.revision,
+        report.runId,
+        report.attempt,
+        sortedReviewEvidence(report),
+        report.inputSha256,
+        report.patchSha256,
+        report.responseSha256,
+        index,
+        finding.file,
+        finding.severity,
+        finding.message,
+      ]),
+    ),
+  );
+}
+
+function exactReviewKeys(value, keys) {
+  return (
+    value !== null &&
+    typeof value === 'object' &&
+    !Array.isArray(value) &&
+    Object.keys(value).length === keys.length &&
+    keys.every((key) => Object.hasOwn(value, key))
+  );
+}
+
+function parseReviewRecord(bytes, limit) {
+  if (!Buffer.isBuffer(bytes) || !bytes.length || bytes.length > limit) {
+    throw new Error('Review record exceeds its byte limit');
+  }
+  return JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes));
+}
+
+function reviewTimestamp(value) {
+  if (typeof value !== 'string') return NaN;
+  const timestamp = Date.parse(value);
+  if (!Number.isFinite(timestamp)) return NaN;
+  const canonical = new Date(timestamp).toISOString();
+  return value === canonical || value === canonical.replace('.000Z', 'Z') ? timestamp : NaN;
+}
+
+function dispositionSource(bytes) {
+  const report = parseReviewRecord(bytes, AGENT_REVIEW_LIMITS.inputBytes);
+  const evidence = report?.evidenceSha256;
+  if (
+    !report ||
+    report.schemaVersion !== 1 ||
+    report.kind !== 'bounded-agent-review' ||
+    report.status !== 'reviewed' ||
+    report.eventName !== 'schedule' ||
+    report.attempt !== '1' ||
+    typeof report.runId !== 'string' ||
+    !/^[1-9][0-9]{0,19}$/.test(report.runId) ||
+    typeof report.revision !== 'string' ||
+    !/^[a-f0-9]{40}$/.test(report.revision) ||
+    typeof report.workflow !== 'string' ||
+    report.workflow.length > 512 ||
+    !/^[A-Za-z0-9-]+\/[A-Za-z0-9_.-]+\/\.github\/workflows\/maintenance\.yml@refs\/heads\/[A-Za-z0-9._/-]+$/.test(
+      report.workflow,
+    ) ||
+    !['inputSha256', 'patchSha256', 'responseSha256'].every(
+      (key) => typeof report[key] === 'string' && /^[a-f0-9]{64}$/.test(report[key]),
+    ) ||
+    !evidence ||
+    typeof evidence !== 'object' ||
+    Array.isArray(evidence) ||
+    Object.keys(evidence).length !== 3 ||
+    !Object.hasOwn(evidence, 'test-results/maintenance-audit.json') ||
+    !Object.hasOwn(evidence, 'test-results/maintenance-proof.json') ||
+    !Object.keys(evidence).some((file) =>
+      /^test-results\/maintenance\/run-[A-Za-z0-9]+\/report\.json$/.test(file),
+    ) ||
+    !Object.values(evidence).every(
+      (value) => typeof value === 'string' && /^[a-f0-9]{64}$/.test(value),
+    ) ||
+    report.invocations !== 1 ||
+    report.wrapperRetries !== 0 ||
+    report.cleanup !== true ||
+    !Array.isArray(report.errors) ||
+    report.errors.length !== 0 ||
+    report.humanApprovalRequired !== true ||
+    report.automaticPublication !== false ||
+    !Number.isFinite(reviewTimestamp(report.startedAt)) ||
+    !Number.isFinite(reviewTimestamp(report.finishedAt)) ||
+    !Number.isSafeInteger(report.durationMs) ||
+    report.durationMs < 0 ||
+    report.durationMs !== reviewTimestamp(report.finishedAt) - reviewTimestamp(report.startedAt) ||
+    report.response?.humanApprovalRequired !== true ||
+    report.response?.automaticPublication !== false ||
+    report.policy?.enabled !== true ||
+    report.policy?.provider !== 'github-copilot-cli' ||
+    typeof report.policy?.model !== 'string' ||
+    !/^[a-z0-9][a-z0-9.-]{0,79}$/.test(report.policy.model) ||
+    report.policy.model === 'auto' ||
+    report.usage?.source !== 'copilot-cli-usage-file' ||
+    report.usage?.model !== report.policy.model ||
+    typeof report.usage?.sha256 !== 'string' ||
+    !/^[a-f0-9]{64}$/.test(report.usage.sha256) ||
+    report.usage.userRequests !== 1 ||
+    !Number.isSafeInteger(report.usage.nanoAiUnits) ||
+    report.usage.nanoAiUnits <= 0 ||
+    !Number.isFinite(report.usage.premiumRequestCost) ||
+    report.usage.premiumRequestCost < 0 ||
+    !Number.isFinite(report.usage.apiDurationMs) ||
+    report.usage.apiDurationMs < 0 ||
+    report.usage.providerRequests !== null ||
+    report.usage.providerRetries !== null ||
+    report.usage.billedUsd !== null
+  ) {
+    throw new Error('Disposition tracking requires a complete reviewed report');
+  }
+  const response = { ...report.response };
+  delete response.humanApprovalRequired;
+  delete response.automaticPublication;
+  validateAgentReviewResponse(Buffer.from(JSON.stringify(response)), {
+    inputSha256: report.inputSha256,
+    evidence: {
+      revision: report.revision,
+      documentation: {
+        proposal: {
+          patchSha256: report.patchSha256,
+          files: DOC_CONTRACTS.map((file) => ({ path: file })),
+        },
+      },
+    },
+  });
+  const findingIds = agentReviewFindingIds(report);
+  if (
+    Object.hasOwn(report, 'findingIds') &&
+    (!Array.isArray(report.findingIds) ||
+      report.findingIds.length !== findingIds.length ||
+      report.findingIds.some((findingId, index) => findingId !== findingIds[index]))
+  ) {
+    throw new Error('Stored finding IDs do not match the review');
+  }
+  const review = {
+    reportSha256: digest(bytes),
+    revision: report.revision,
+    runId: report.runId,
+    attempt: report.attempt,
+    workflow: report.workflow,
+    evidenceManifestSha256: digest(JSON.stringify(sortedReviewEvidence(report))),
+    inputSha256: report.inputSha256,
+    patchSha256: report.patchSha256,
+    responseSha256: report.responseSha256,
+  };
+  return { report, review, findingIds };
+}
+
+export function prepareAgentReviewDispositions(reportBytes) {
+  const { review } = dispositionSource(reportBytes);
+  return { schemaVersion: 1, kind: 'agent-review-dispositions', review, entries: [] };
+}
+
+export function validateAgentReviewDispositions(bytes, reportBytes) {
+  const { report, review, findingIds } = dispositionSource(reportBytes);
+  const record = parseReviewRecord(bytes, AGENT_REVIEW_LIMITS.outputBytes);
+  if (
+    !exactReviewKeys(record, ['schemaVersion', 'kind', 'review', 'entries']) ||
+    record.schemaVersion !== 1 ||
+    record.kind !== 'agent-review-dispositions' ||
+    !exactReviewKeys(record.review, Object.keys(review)) ||
+    !Object.keys(review).every((key) => record.review[key] === review[key]) ||
+    !Array.isArray(record.entries) ||
+    record.entries.length > AGENT_REVIEW_LIMITS.findings
+  ) {
+    throw new Error('Dispositions do not match the saved review');
+  }
+  const decisions = new Map();
+  for (const entry of record.entries) {
+    if (
+      !exactReviewKeys(entry, ['findingId', 'disposition', 'reason', 'recordedBy', 'recordedAt']) ||
+      !findingIds.includes(entry.findingId) ||
+      decisions.has(entry.findingId) ||
+      !['accepted', 'rejected', 'deferred'].includes(entry.disposition) ||
+      typeof entry.reason !== 'string' ||
+      !entry.reason.trim() ||
+      Buffer.byteLength(entry.reason) > 2_000 ||
+      Array.from(entry.reason).some((character) => {
+        const code = character.charCodeAt(0);
+        return code === 127 || (code < 32 && ![9, 10, 13].includes(code));
+      }) ||
+      typeof entry.recordedBy !== 'string' ||
+      !/^[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?$/.test(entry.recordedBy) ||
+      entry.recordedBy.includes('--') ||
+      !Number.isFinite(reviewTimestamp(entry.recordedAt)) ||
+      reviewTimestamp(entry.recordedAt) < reviewTimestamp(report.finishedAt)
+    ) {
+      throw new Error('Invalid, unknown or duplicate finding disposition');
+    }
+    decisions.set(entry.findingId, entry.disposition);
+  }
+  const counts = { total: findingIds.length, untriaged: 0, accepted: 0, rejected: 0, deferred: 0 };
+  const findings = findingIds.map((findingId) => {
+    const disposition = decisions.get(findingId) ?? 'untriaged';
+    counts[disposition]++;
+    return { findingId, disposition };
+  });
+  return {
+    schemaVersion: 1,
+    kind: 'agent-review-disposition-check',
+    passed: true,
+    evidence: 'local-consistency-only',
+    review,
+    dispositionsSha256: digest(bytes),
+    counts,
+    findings,
+    provenanceVerified: false,
+    identityVerified: false,
+    resolutionVerified: false,
+    humanApprovalRequired: true,
+    automaticPublication: false,
+  };
 }
 
 function readBoundedFile(root, file, limit) {
@@ -576,12 +806,27 @@ function workflowOutput(name, value) {
 
 async function main() {
   const args = process.argv.slice(2);
+  if (['--prepare-dispositions', '--validate-dispositions'].includes(args[0])) {
+    const prepare = args[0] === '--prepare-dispositions';
+    if (args.length !== (prepare ? 2 : 3)) {
+      throw new Error('Disposition commands require a report and, for validation, a record');
+    }
+    const reportBytes = readBoundedFile(process.cwd(), args[1], AGENT_REVIEW_LIMITS.inputBytes);
+    const result = prepare
+      ? prepareAgentReviewDispositions(reportBytes)
+      : validateAgentReviewDispositions(
+          readBoundedFile(process.cwd(), args[2], AGENT_REVIEW_LIMITS.outputBytes),
+          reportBytes,
+        );
+    console.log(JSON.stringify(result, null, 2));
+    return;
+  }
   if (
     args.length !== 1 ||
     !['--prepare-runtime', '--review', '--cleanup-runtime'].includes(args[0])
   ) {
     throw new Error(
-      'Usage: check-agent-review.mjs --prepare-runtime | --review | --cleanup-runtime',
+      'Usage: check-agent-review.mjs --prepare-runtime | --review | --cleanup-runtime | --prepare-dispositions REPORT | --validate-dispositions REPORT RECORD',
     );
   }
   const root = fileURLToPath(new URL('../', import.meta.url));
@@ -662,7 +907,9 @@ async function main() {
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   main().catch(() => {
     console.error(
-      'Agent review failed; verify policy, trusted evidence, runtime, and dedicated authentication.',
+      ['--prepare-dispositions', '--validate-dispositions'].includes(process.argv[2])
+        ? 'Disposition command failed; check the report, finding IDs, and decision record.'
+        : 'Agent review failed; verify policy, trusted evidence, runtime, and dedicated authentication.',
     );
     process.exitCode = 1;
   });

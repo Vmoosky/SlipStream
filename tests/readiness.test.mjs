@@ -12,11 +12,14 @@ import { developmentPlan, runDevelopmentCommand, runDevelopment } from '../scrip
 import {
   agentReviewArguments,
   agentReviewEnvironment,
+  agentReviewFindingIds,
   agentReviewPolicy,
   downloadAgentReviewArchive,
   runBoundedAgentReview,
   runAgentReviewProcess,
   prepareAgentReview,
+  prepareAgentReviewDispositions,
+  validateAgentReviewDispositions,
   validateAgentReviewResponse,
   validateAgentReviewUsage,
   verifyAgentReviewArchive,
@@ -3410,6 +3413,420 @@ function agentReviewUsage(model = 'synthetic-model') {
   };
 }
 
+test('bounded agent review finding IDs bind exact review identity and content', () => {
+  const finding = { file: 'docs/mcp.md', severity: 'warning', message: 'Synthetic concern' };
+  const report = {
+    ...META,
+    evidenceSha256: { 'first.json': 'c'.repeat(64), 'second.json': 'd'.repeat(64) },
+    inputSha256: 'e'.repeat(64),
+    patchSha256: 'f'.repeat(64),
+    responseSha256: '1'.repeat(64),
+    response: { findings: [finding, { ...finding }] },
+  };
+  const original = structuredClone(report);
+  const ids = agentReviewFindingIds(report);
+  assert.equal(ids.length, 2);
+  assert.match(ids[0], /^[a-f0-9]{64}$/);
+  assert.notEqual(ids[0], ids[1]);
+  assert.deepEqual(agentReviewFindingIds(JSON.parse(JSON.stringify(report))), ids);
+  assert.deepEqual(
+    agentReviewFindingIds({
+      ...report,
+      evidenceSha256: Object.fromEntries(Object.entries(report.evidenceSha256).reverse()),
+    }),
+    ids,
+  );
+  assert.deepEqual(agentReviewFindingIds({ ...report, durationMs: 999 }), ids);
+  for (const field of [
+    'workflow',
+    'revision',
+    'runId',
+    'attempt',
+    'evidenceSha256',
+    'inputSha256',
+    'patchSha256',
+    'responseSha256',
+  ]) {
+    assert.notEqual(agentReviewFindingIds({ ...report, [field]: 'different' })[0], ids[0]);
+  }
+  for (const field of ['file', 'severity', 'message']) {
+    const changed = structuredClone(report);
+    changed.response.findings[0][field] = 'different';
+    assert.notEqual(agentReviewFindingIds(changed)[0], ids[0]);
+  }
+  assert.deepEqual(agentReviewFindingIds({ ...report, response: { findings: [] } }), []);
+  assert.deepEqual(report, original);
+});
+
+function agentReviewDispositionReport() {
+  const response = {
+    schemaVersion: 1,
+    revision: META.revision,
+    inputSha256: 'd'.repeat(64),
+    patchSha256: 'e'.repeat(64),
+    decision: 'changes-requested',
+    findings: Array.from({ length: 4 }, (_value, index) => ({
+      file: 'docs/mcp.md',
+      severity: 'warning',
+      message: `Synthetic concern ${index}`,
+    })),
+  };
+  const report = {
+    ...META,
+    schemaVersion: 1,
+    kind: 'bounded-agent-review',
+    status: 'reviewed',
+    eventName: 'schedule',
+    workflow: 'Vmoosky/SlipStream/.github/workflows/maintenance.yml@refs/heads/main',
+    startedAt: '2026-09-16T00:00:00.000Z',
+    finishedAt: '2026-09-16T00:00:01.000Z',
+    durationMs: 1_000,
+    invocations: 1,
+    wrapperRetries: 0,
+    cleanup: true,
+    errors: [],
+    humanApprovalRequired: true,
+    automaticPublication: false,
+    evidenceSha256: {
+      'test-results/maintenance/run-synthetic/report.json': '1'.repeat(64),
+      'test-results/maintenance-audit.json': '2'.repeat(64),
+      'test-results/maintenance-proof.json': '3'.repeat(64),
+    },
+    inputSha256: response.inputSha256,
+    patchSha256: response.patchSha256,
+    responseSha256: createHash('sha256').update(JSON.stringify(response)).digest('hex'),
+    policy: { enabled: true, provider: 'github-copilot-cli', model: 'synthetic-model' },
+    usage: validateAgentReviewUsage(
+      Buffer.from(JSON.stringify(agentReviewUsage())),
+      'synthetic-model',
+    ),
+    response: { ...response, humanApprovalRequired: true, automaticPublication: false },
+  };
+  report.findingIds = agentReviewFindingIds(report);
+  return report;
+}
+
+test('bounded agent review dispositions bind triage without granting approval or resolution', () => {
+  const report = agentReviewDispositionReport();
+  const reportBytes = Buffer.from(JSON.stringify(report));
+  const record = prepareAgentReviewDispositions(reportBytes);
+  const validate = (value) =>
+    validateAgentReviewDispositions(Buffer.from(JSON.stringify(value)), reportBytes);
+  assert.deepEqual(record.entries, []);
+  assert.equal(record.review.reportSha256, createHash('sha256').update(reportBytes).digest('hex'));
+  assert.equal(validate(record).counts.untriaged, 4);
+  record.entries = ['accepted', 'rejected', 'deferred'].map((disposition, index) => ({
+    findingId: report.findingIds[index],
+    disposition,
+    reason: `Synthetic ${disposition} rationale`,
+    recordedBy: 'synthetic-reviewer',
+    recordedAt: '2026-09-16T00:00:02Z',
+  }));
+  const before = structuredClone(record);
+  const result = validate(record);
+  assert.deepEqual(result.counts, {
+    total: 4,
+    untriaged: 1,
+    accepted: 1,
+    rejected: 1,
+    deferred: 1,
+  });
+  assert.deepEqual(
+    result.findings.map((finding) => finding.disposition),
+    ['accepted', 'rejected', 'deferred', 'untriaged'],
+  );
+  assert.equal(result.evidence, 'local-consistency-only');
+  assert.equal(result.provenanceVerified, false);
+  assert.equal(result.identityVerified, false);
+  assert.equal(result.resolutionVerified, false);
+  assert.equal(result.humanApprovalRequired, true);
+  assert.equal(result.automaticPublication, false);
+  assert.equal(JSON.stringify(result).includes('Synthetic accepted rationale'), false);
+  assert.deepEqual(record, before);
+  assert.deepEqual(JSON.parse(reportBytes), report);
+});
+
+test('bounded agent review dispositions reject stale bindings and invalid decision records', () => {
+  const report = agentReviewDispositionReport();
+  const reportBytes = Buffer.from(JSON.stringify(report));
+  const record = prepareAgentReviewDispositions(reportBytes);
+  const entry = {
+    findingId: report.findingIds[0],
+    disposition: 'accepted',
+    reason: 'Synthetic rationale',
+    recordedBy: 'synthetic-reviewer',
+    recordedAt: '2026-09-16T00:00:02.000Z',
+  };
+  const validate = (value) =>
+    validateAgentReviewDispositions(Buffer.from(JSON.stringify(value)), reportBytes);
+  for (const key of Object.keys(record.review)) {
+    assert.throws(() => validate({ ...record, review: { ...record.review, [key]: 'different' } }));
+  }
+  for (const change of [
+    { schemaVersion: 2 },
+    { kind: 'different' },
+    { entries: {} },
+    { entries: Array(11).fill(entry) },
+    { entries: [entry, entry] },
+    { review: { ...record.review, approved: true } },
+    { resolved: true },
+    { humanApprovalRequired: false },
+  ])
+    assert.throws(() => validate({ ...record, ...change }));
+  for (const change of [
+    { findingId: '0'.repeat(64) },
+    { disposition: 'resolved' },
+    { disposition: 'untriaged' },
+    { reason: '' },
+    { reason: ' \n\t' },
+    { reason: 'x'.repeat(2_001) },
+    { reason: '\u001b[31m' },
+    { recordedBy: '' },
+    { recordedBy: 'x'.repeat(40) },
+    { recordedBy: 'synthetic--reviewer' },
+    { recordedAt: '2026-02-30T00:00:02.000Z' },
+    { recordedAt: '2026-09-16T00:00:00.000Z' },
+    { recordedAt: '2026-09-16' },
+    { command: 'git push' },
+    { approved: true },
+  ])
+    assert.throws(() => validate({ ...record, entries: [{ ...entry, ...change }] }));
+  for (const key of Object.keys(entry)) {
+    const incomplete = { ...entry };
+    delete incomplete[key];
+    assert.throws(() => validate({ ...record, entries: [incomplete] }));
+  }
+  assert.throws(() =>
+    validateAgentReviewDispositions(
+      Buffer.from(JSON.stringify(record)),
+      Buffer.concat([reportBytes, Buffer.from('\n')]),
+    ),
+  );
+  for (const bytes of [
+    Buffer.alloc(0),
+    Buffer.alloc(65_537),
+    Buffer.from([255]),
+    Buffer.from('{'),
+  ]) {
+    assert.throws(() => validateAgentReviewDispositions(bytes, reportBytes));
+  }
+});
+
+test('bounded agent review dispositions reject invalid reports and derive legacy IDs without writes', () => {
+  const report = agentReviewDispositionReport();
+  const mutations = [
+    (value) => {
+      value.status = 'failed';
+    },
+    (value) => {
+      value.status = 'no-op';
+    },
+    (value) => {
+      value.eventName = 'workflow_dispatch';
+    },
+    (value) => {
+      value.attempt = '2';
+    },
+    (value) => {
+      value.runId = 123;
+    },
+    (value) => {
+      value.cleanup = false;
+    },
+    (value) => {
+      value.errors.push('synthetic failure');
+    },
+    (value) => {
+      value.wrapperRetries = 1;
+    },
+    (value) => {
+      value.evidenceSha256 = 'unknown';
+    },
+    (value) => {
+      value.workflow = META.workflow;
+    },
+    (value) => {
+      value.humanApprovalRequired = false;
+    },
+    (value) => {
+      value.automaticPublication = true;
+    },
+    (value) => {
+      value.durationMs = 1;
+    },
+    (value) => {
+      value.usage = null;
+    },
+    (value) => {
+      value.usage.model = 'different';
+    },
+    (value) => {
+      value.usage.nanoAiUnits = 0;
+    },
+    (value) => {
+      value.findingIds[0] = '0'.repeat(64);
+    },
+    (value) => {
+      value.findingIds = [];
+    },
+    (value) => {
+      value.response.patchSha256 = '0'.repeat(64);
+    },
+    (value) => {
+      value.response.findings[0].file = '../outside';
+    },
+    (value) => {
+      value.response.findings[0].approved = true;
+    },
+  ];
+  for (const mutate of mutations) {
+    const invalid = structuredClone(report);
+    mutate(invalid);
+    assert.throws(() => prepareAgentReviewDispositions(Buffer.from(JSON.stringify(invalid))));
+  }
+  const legacy = structuredClone(report);
+  delete legacy.findingIds;
+  const bytes = Buffer.from(JSON.stringify(legacy));
+  const record = prepareAgentReviewDispositions(bytes);
+  const result = validateAgentReviewDispositions(Buffer.from(JSON.stringify(record)), bytes);
+  assert.deepEqual(
+    result.findings.map((finding) => finding.findingId),
+    report.findingIds,
+  );
+  assert.equal(Object.hasOwn(JSON.parse(bytes), 'findingIds'), false);
+  report.response.decision = 'no-objection';
+  report.response.findings = [];
+  report.findingIds = [];
+  const emptyBytes = Buffer.from(JSON.stringify(report));
+  assert.equal(
+    validateAgentReviewDispositions(
+      Buffer.from(JSON.stringify(prepareAgentReviewDispositions(emptyBytes))),
+      emptyBytes,
+    ).counts.total,
+    0,
+  );
+  for (const invalid of [
+    Buffer.alloc(0),
+    Buffer.alloc(98_305),
+    Buffer.from([255]),
+    Buffer.from('null'),
+  ]) {
+    assert.throws(() => prepareAgentReviewDispositions(invalid));
+  }
+});
+
+test('bounded agent review disposition CLI is read-only and bypasses live configuration', (context) => {
+  const { root, write } = fixture(context);
+  const report = agentReviewDispositionReport();
+  write('review.json', report);
+  const initialFiles = fs.readdirSync(root);
+  const token = `github_pat_${'synthetic'.repeat(4)}`;
+  const env = {
+    SLIPSTREAM_AGENT_REVIEW_ENABLED: 'true',
+    SLIPSTREAM_AGENT_REVIEW_MODEL: 'invalid model',
+    SLIPSTREAM_AGENT_REVIEW_TOKEN: token,
+    COPILOT_GITHUB_TOKEN: token,
+    GH_TOKEN: token,
+    GITHUB_ACTIONS: 'true',
+    GITHUB_EVENT_PATH: path.join(root, 'must-not-read.json'),
+    GITHUB_OUTPUT: path.join(root, 'must-not-write.txt'),
+    GITHUB_STEP_SUMMARY: path.join(root, 'must-not-summarize.md'),
+  };
+  const command = (...args) =>
+    execFileSync(process.execPath, [path.join(REPO, 'scripts/check-agent-review.mjs'), ...args], {
+      cwd: root,
+      env,
+      encoding: 'utf8',
+      timeout: 5_000,
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+  const original = fs.readFileSync(path.join(root, 'review.json'));
+  const template = JSON.parse(command('--prepare-dispositions', 'review.json'));
+  assert.deepEqual(template, prepareAgentReviewDispositions(original));
+  assert.deepEqual(template.entries, []);
+  template.entries.push({
+    findingId: report.findingIds[0],
+    disposition: 'accepted',
+    reason: token,
+    recordedBy: 'synthetic-reviewer',
+    recordedAt: '2026-09-16T00:00:02.000Z',
+  });
+  write('dispositions.json', template);
+  const decisions = fs.readFileSync(path.join(root, 'dispositions.json'));
+  const output = command('--validate-dispositions', 'review.json', 'dispositions.json');
+  const result = JSON.parse(output);
+  assert.equal(result.counts.accepted, 1);
+  assert.equal(result.counts.untriaged, 3);
+  assert.equal(result.resolutionVerified, false);
+  assert.equal(output.includes(token), false);
+  for (const args of [
+    ['--prepare-dispositions'],
+    ['--prepare-dispositions', 'review.json', 'extra'],
+    ['--validate-dispositions', 'review.json'],
+    ['--validate-dispositions', 'review.json', 'dispositions.json', '--review'],
+    ['--prepare-dispositions', '../review.json'],
+    ['--prepare-dispositions', path.join(root, 'review.json')],
+    ['--prepare-dispositions', 'folder\\review.json'],
+    ['--prepare-dispositions', 'missing.json'],
+    ['--validate-dispositions', 'review.json', '../dispositions.json'],
+  ]) {
+    assert.throws(
+      () => command(...args),
+      (error) => {
+        assert.equal(error.status, 1);
+        assert.equal(error.stdout, '');
+        assert.match(error.stderr, /^Disposition command failed;/);
+        assert.equal(error.stderr.includes(token), false);
+        return true;
+      },
+    );
+  }
+  assert.deepEqual(fs.readdirSync(root).sort(), [...initialFiles, 'dispositions.json'].sort());
+  assert.deepEqual(fs.readFileSync(path.join(root, 'review.json')), original);
+  assert.deepEqual(fs.readFileSync(path.join(root, 'dispositions.json')), decisions);
+});
+
+test('bounded agent review disposition CLI rejects oversized inputs and directory junctions', (context) => {
+  const { root, write } = fixture(context);
+  const { root: outside } = fixture(context);
+  const report = agentReviewDispositionReport();
+  write('review.json', report);
+  fs.writeFileSync(path.join(root, 'oversized-review.json'), Buffer.alloc(98_305));
+  fs.writeFileSync(path.join(root, 'oversized-dispositions.json'), Buffer.alloc(65_537));
+  fs.writeFileSync(path.join(outside, 'review.json'), JSON.stringify(report));
+  fs.symlinkSync(
+    outside,
+    path.join(root, 'linked'),
+    process.platform === 'win32' ? 'junction' : 'dir',
+  );
+  for (const args of [
+    ['--prepare-dispositions', 'oversized-review.json'],
+    ['--validate-dispositions', 'review.json', 'oversized-dispositions.json'],
+    ['--prepare-dispositions', 'linked/review.json'],
+    ['--prepare-dispositions', 'linked'],
+  ]) {
+    assert.throws(
+      () =>
+        execFileSync(
+          process.execPath,
+          [path.join(REPO, 'scripts/check-agent-review.mjs'), ...args],
+          {
+            cwd: root,
+            env: {},
+            encoding: 'utf8',
+            timeout: 5_000,
+            stdio: ['ignore', 'pipe', 'pipe'],
+          },
+        ),
+      (error) =>
+        error.status === 1 &&
+        error.stdout === '' &&
+        /^Disposition command failed;/.test(error.stderr),
+    );
+  }
+  assert.equal(fs.readFileSync(path.join(outside, 'review.json'), 'utf8'), JSON.stringify(report));
+});
+
 test('bounded agent review requires usage evidence and a pinned runtime archive', (context) => {
   const { root } = fixture(context);
   const usage = agentReviewUsage();
@@ -3527,8 +3944,14 @@ test('bounded agent review invokes once, binds its report and removes temporary 
           revision: options.revision,
           inputSha256: prepared.inputSha256,
           patchSha256: prepared.evidence.documentation.proposal.patchSha256,
-          decision: 'no-objection',
-          findings: [],
+          decision: 'changes-requested',
+          findings: [
+            {
+              file: report.proposal.files[0].path,
+              severity: 'warning',
+              message: 'Synthetic concern',
+            },
+          ],
         }),
       );
     },
@@ -3551,6 +3974,16 @@ test('bounded agent review invokes once, binds its report and removes temporary 
   assert.equal(reviewed.invocations, 1);
   assert.equal(reviewed.usage.model, 'synthetic-model');
   assert.equal(reviewed.patchSha256, report.proposal.patchSha256);
+  assert.deepEqual(reviewed.findingIds, agentReviewFindingIds(reviewed));
+  assert.equal(reviewed.findingIds.length, 1);
+  assert.deepEqual(Object.keys(reviewed.response.findings[0]), ['file', 'severity', 'message']);
+  const reviewBytes = Buffer.from(JSON.stringify(reviewed));
+  const record = prepareAgentReviewDispositions(reviewBytes);
+  assert.equal(
+    validateAgentReviewDispositions(Buffer.from(JSON.stringify(record)), reviewBytes).counts
+      .untriaged,
+    1,
+  );
   assert.equal(reviewed.cleanup, true);
   assert.equal(fs.existsSync(temporary), false);
   assert.equal(JSON.stringify(reviewed).includes(env.SLIPSTREAM_AGENT_REVIEW_TOKEN), false);
