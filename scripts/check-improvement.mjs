@@ -766,6 +766,7 @@ export function createImprovementClient(repository, token, fetcher = fetch) {
         resource.length <= 500 &&
         !hasControlCharacters(resource) &&
         ((resource.startsWith('/actions/') && !resource.includes('..')) ||
+          /^\/branches\/[\w-]+(?:\.[\w-]+)*(?:%2F[\w-]+(?:\.[\w-]+)*)*$/.test(resource) ||
           /^\/pulls\/[1-9]\d{0,15}(?:\/(?:reviews|commits|files)\?per_page=100)?$/.test(resource) ||
           /^\/git\/(?:commits|blobs)\/[a-f0-9]{40}$/.test(resource) ||
           /^\/git\/trees\/[a-f0-9]{40}\?recursive=1$/.test(resource) ||

@@ -14,7 +14,7 @@ const GENERATE = [
   'const { checkDocs } = await import(process.argv[1]);',
   'const report = checkDocs(process.argv[2], { write: process.argv[3] === "write" });',
   'process.stdout.write(JSON.stringify(report));',
-  'process.exitCode = report.passed ? 0 : 1;',
+  'process.exitCode = report.passed || process.argv[3] === "diagnose" ? 0 : 1;',
 ].join('\n');
 
 export const MAINTENANCE_LIMITS = Object.freeze({
@@ -108,6 +108,7 @@ export async function runMaintenanceCommand(command, args, cwd, timeoutMs = 60_0
     throw new Error('Maintenance command timeout must be between 1 and 60000 ms');
   }
   const env = { ...process.env, GIT_TERMINAL_PROMPT: '0' };
+  delete env.SLIPSTREAM_DOCS_REMEDIATION_TOKEN;
   for (const name of Object.keys(env)) {
     if (
       /^GIT_(DIR|WORK_TREE|INDEX_FILE|OBJECT_DIRECTORY|ALTERNATE_OBJECT_DIRECTORIES|CONFIG)/.test(
@@ -138,12 +139,67 @@ export async function runMaintenanceCommand(command, args, cwd, timeoutMs = 60_0
   }
 }
 
+function remediationTrigger(revision, env, event) {
+  const repository = event.repository?.full_name;
+  const branch = event.repository?.default_branch;
+  const run = event.workflow_run;
+  if (
+    typeof repository !== 'string' ||
+    !/^[\w.-]+\/[\w.-]+$/.test(repository) ||
+    typeof branch !== 'string' ||
+    !/^[\w./-]{1,200}$/.test(branch) ||
+    env.SLIPSTREAM_DOCS_REMEDIATION_ENABLED !== 'true' ||
+    env.GITHUB_REPOSITORY !== repository ||
+    env.GITHUB_SHA !== revision ||
+    env.GITHUB_REF !== `refs/heads/${branch}` ||
+    env.GITHUB_WORKFLOW_REF !==
+      `${repository}/.github/workflows/docs-remediation.yml@refs/heads/${branch}` ||
+    env.GITHUB_SERVER_URL !== 'https://github.com' ||
+    env.GITHUB_API_URL !== 'https://api.github.com' ||
+    !/^[1-9]\d{0,15}$/.test(env.GITHUB_RUN_ID ?? '') ||
+    !Number.isSafeInteger(Number(env.GITHUB_RUN_ID)) ||
+    env.GITHUB_RUN_ATTEMPT !== '1' ||
+    event.action !== 'completed' ||
+    ![event.repository?.id, run?.id, run?.workflow_id].every(
+      (value) => Number.isSafeInteger(value) && value > 0,
+    ) ||
+    String(run.id) === env.GITHUB_RUN_ID ||
+    run.name !== 'CI' ||
+    run.path !== '.github/workflows/ci.yml' ||
+    run.event !== 'push' ||
+    run.status !== 'completed' ||
+    run.conclusion !== 'failure' ||
+    run.run_attempt !== 1 ||
+    run.head_branch !== branch ||
+    run.head_sha !== revision ||
+    run.repository?.id !== event.repository.id ||
+    run.repository?.full_name !== repository ||
+    run.head_repository?.id !== event.repository.id ||
+    run.head_repository?.full_name !== repository
+  ) {
+    throw new Error(
+      'Documentation remediation requires an enabled, first-attempt failed CI run at trusted current source',
+    );
+  }
+  return { runId: String(run.id), attempt: '1', workflowId: run.workflow_id };
+}
+
 export function maintenanceIdentity(revision, env = process.env, event = {}) {
   if (!/^[a-f0-9]{40}$/.test(revision ?? '')) {
     throw new Error('An exact source revision is required');
   }
   if (env.GITHUB_ACTIONS !== 'true') {
     return { revision, eventName: 'local', workflow: null, runId: null, attempt: null };
+  }
+  if (env.GITHUB_EVENT_NAME === 'workflow_run') {
+    return {
+      revision,
+      eventName: env.GITHUB_EVENT_NAME,
+      workflow: env.GITHUB_WORKFLOW_REF,
+      runId: env.GITHUB_RUN_ID,
+      attempt: env.GITHUB_RUN_ATTEMPT,
+      trigger: remediationTrigger(revision, env, event),
+    };
   }
   const repository = event.repository?.full_name;
   const branch = event.repository?.default_branch;
@@ -169,6 +225,35 @@ export function maintenanceIdentity(revision, env = process.env, event = {}) {
     runId: env.GITHUB_RUN_ID,
     attempt: env.GITHUB_RUN_ATTEMPT,
   };
+}
+
+export async function verifyDocumentationRemediation(revision, env, event, client) {
+  const metadata = maintenanceIdentity(revision, env, event);
+  if (!metadata.trigger) throw new Error('A documentation remediation trigger is required');
+  const workflow = await client.json('/actions/workflows/ci.yml');
+  if (
+    workflow?.id !== metadata.trigger.workflowId ||
+    workflow.name !== 'CI' ||
+    workflow.path !== '.github/workflows/ci.yml' ||
+    workflow.state !== 'active'
+  ) {
+    throw new Error('The remediation source workflow could not be verified');
+  }
+  const run = await client.json(`/actions/runs/${metadata.trigger.runId}`);
+  const current = remediationTrigger(revision, env, { ...event, workflow_run: run });
+  if (
+    current.runId !== metadata.trigger.runId ||
+    current.workflowId !== metadata.trigger.workflowId
+  ) {
+    throw new Error('The remediation source run changed');
+  }
+  const branch = await client.json(
+    `/branches/${encodeURIComponent(event.repository.default_branch)}`,
+  );
+  if (branch?.name !== event.repository.default_branch || branch.commit?.sha !== revision) {
+    throw new Error('The remediation source is no longer the current default branch');
+  }
+  return metadata.trigger;
 }
 
 function outputDirectory(root) {
@@ -199,7 +284,7 @@ function readDocument(root, file) {
 
 export async function runDocumentationMaintenance(
   root,
-  { revision, env = process.env, event = {}, runCommand = runMaintenanceCommand, signal },
+  { revision, env = process.env, event = {}, runCommand = runMaintenanceCommand, signal, client },
 ) {
   root = fs.realpathSync.native(root);
   const metadata = maintenanceIdentity(revision, env, event);
@@ -215,10 +300,27 @@ export async function runDocumentationMaintenance(
     cancelled: false,
     checks: {},
     proposal: null,
+    ...(metadata.trigger
+      ? {
+          remediation: {
+            status: 'unverified',
+            before: null,
+            after: null,
+            ciResolutionVerified: false,
+            automaticPublication: false,
+            humanApprovalRequired: true,
+          },
+        }
+      : {}),
     errors: [],
     residual: [
       'A proposed patch requires a human-created PR, full required checks, and manual review.',
       'Local execution does not prove scheduler enrollment or merge enforcement.',
+      ...(metadata.trigger
+        ? [
+            'A documentation patch does not establish the cause or resolution of the triggering CI failure.',
+          ]
+        : []),
     ],
   };
   const git = (cwd, args) =>
@@ -226,6 +328,7 @@ export async function runDocumentationMaintenance(
   let scratch;
   let output;
   let patch;
+  const documentationEvidence = new Map();
   let stage = 'source';
   try {
     signal?.throwIfAborted();
@@ -249,6 +352,14 @@ export async function runDocumentationMaintenance(
       throw new Error('The generator must match the source revision');
     }
     output = outputDirectory(root);
+    if (metadata.trigger) {
+      stage = 'trigger';
+      signal?.throwIfAborted();
+      await verifyDocumentationRemediation(revision, env, event, client);
+      signal?.throwIfAborted();
+      report.checks.trigger = 'success';
+      stage = 'source';
+    }
     scratch = fs.mkdtempSync(path.join(os.tmpdir(), 'slipstream-maintenance-'));
     const checkout = path.join(scratch, 'checkout');
     await git(root, [
@@ -284,24 +395,29 @@ export async function runDocumentationMaintenance(
     for (const [file, bytes] of originals) frame(file, bytes);
     report.checks.source = 'success';
 
-    const generate = async (write) => {
-      const result = JSON.parse(
-        (
-          await runCommand(
-            process.execPath,
-            ['--input-type=module', '-e', GENERATE, GENERATOR, checkout, write ? 'write' : 'check'],
-            checkout,
-            MAINTENANCE_LIMITS.commandTimeoutMs,
-            signal,
-          )
-        ).toString(),
+    const generate = async (write, diagnose = false) => {
+      const bytes = await runCommand(
+        process.execPath,
+        [
+          '--input-type=module',
+          '-e',
+          GENERATE,
+          GENERATOR,
+          checkout,
+          write ? 'write' : diagnose ? 'diagnose' : 'check',
+        ],
+        checkout,
+        MAINTENANCE_LIMITS.commandTimeoutMs,
+        signal,
       );
+      const result = JSON.parse(bytes.toString());
       if (
         result.schemaVersion !== 1 ||
         result.kind !== 'documentation-contracts' ||
-        result.passed !== true ||
+        typeof result.passed !== 'boolean' ||
+        (!diagnose && result.passed !== true) ||
         !Array.isArray(result.errors) ||
-        result.errors.length !== 0 ||
+        result.passed !== (result.errors.length === 0) ||
         !Array.isArray(result.contracts) ||
         result.contracts.length !== DOC_CONTRACTS.length ||
         !DOC_CONTRACTS.every((file) => result.contracts.includes(file)) ||
@@ -310,7 +426,10 @@ export async function runDocumentationMaintenance(
       ) {
         throw new Error('Documentation evidence is invalid');
       }
-      return result;
+      if (metadata.trigger && !write) {
+        documentationEvidence.set(diagnose ? 'before.json' : 'after.json', bytes);
+      }
+      return { ...result, reportSha256: digest(bytes) };
     };
     const diff = () =>
       git(checkout, [
@@ -326,6 +445,15 @@ export async function runDocumentationMaintenance(
         'HEAD',
         '--',
       ]);
+    if (metadata.trigger) {
+      stage = 'diagnosis';
+      const before = await generate(false, true);
+      if (before.written.length !== 0 || (await diff()).length !== 0) {
+        throw new Error('Diagnosis modified source documents');
+      }
+      report.remediation.before = { passed: before.passed, reportSha256: before.reportSha256 };
+      report.checks.diagnosis = 'success';
+    }
     stage = 'generation';
     await generate(true);
     report.checks.generation = 'success';
@@ -337,6 +465,9 @@ export async function runDocumentationMaintenance(
     }
     report.checks.validation = 'success';
     report.coverage = validation.coverage;
+    if (metadata.trigger) {
+      report.remediation.after = { passed: true, reportSha256: validation.reportSha256 };
+    }
     stage = 'idempotence';
     if ((await generate(true)).written.length !== 0 || !(await diff()).equals(patch)) {
       throw new Error('Documentation generation is not idempotent');
@@ -407,6 +538,9 @@ export async function runDocumentationMaintenance(
       });
     }
     report.proposal = validateDocumentationProposal(changes, patch);
+    if (metadata.trigger && report.remediation.before.passed !== (changes.length === 0)) {
+      throw new Error('The proposal does not match the reproduced documentation outcome');
+    }
     await git(checkout, ['diff', '--check', 'HEAD', '--']);
     if (
       (await git(root, ['rev-parse', 'HEAD'])).toString().trim() !== revision ||
@@ -424,7 +558,7 @@ export async function runDocumentationMaintenance(
       stage = 'cancellation';
     }
     report.checks[stage] = 'failure';
-    report.outcome = ['source', 'proposal'].includes(stage) ? 'blocked' : 'failed';
+    report.outcome = ['source', 'proposal', 'trigger'].includes(stage) ? 'blocked' : 'failed';
     report.errors.push(`${stage}: maintenance stopped without publishing a patch`);
     report.proposal = null;
   } finally {
@@ -441,10 +575,34 @@ export async function runDocumentationMaintenance(
       }
     }
   }
+  if (metadata.trigger && report.passed) {
+    try {
+      signal?.throwIfAborted();
+      await verifyDocumentationRemediation(revision, env, event, client);
+      signal?.throwIfAborted();
+    } catch {
+      report.checks.trigger = 'failure';
+      report.outcome = 'blocked';
+      report.passed = false;
+      report.cancelled = signal?.aborted === true;
+      report.proposal = null;
+      report.errors.push('trigger: source freshness could not be verified; no patch retained');
+    }
+  }
+  if (metadata.trigger) {
+    report.remediation.status = !report.passed
+      ? 'blocked'
+      : report.outcome === 'proposed'
+        ? 'proposed'
+        : 'not-applicable';
+  }
   report.finishedAt = new Date().toISOString();
   report.durationMs = Date.parse(report.finishedAt) - Date.parse(report.startedAt);
   if (output) {
     try {
+      for (const [file, bytes] of documentationEvidence) {
+        fs.writeFileSync(path.join(output, file), bytes, { flag: 'wx' });
+      }
       if (report.passed && report.outcome === 'proposed') {
         fs.writeFileSync(path.join(output, 'proposal.pending'), patch, { flag: 'wx' });
       }
@@ -460,6 +618,7 @@ export async function runDocumentationMaintenance(
       report.outcome = 'failed';
       report.passed = false;
       report.proposal = null;
+      if (metadata.trigger) report.remediation.status = 'blocked';
       report.errors.push('publication: no complete report and patch could be retained');
     }
   }
@@ -473,6 +632,8 @@ export function collectMaintenanceEvidence(root, { revision, env, event, steps, 
   const metadata = maintenanceIdentity(revision, env, event);
   if (metadata.eventName === 'local')
     throw new Error('Workflow evidence requires GitHub provenance');
+  if (metadata.trigger)
+    throw new Error('Remediation is not scheduled or manual maintenance evidence');
   const required = ['context', 'install', 'build', 'tests', 'audit', 'docs', 'proof'];
   const errors = required
     .filter((name) => steps?.[name]?.outcome !== 'success')
@@ -662,6 +823,15 @@ async function main() {
   if (args.length !== 2 || args[0] !== '--revision') {
     throw new Error('Usage: maintenance.mjs --revision <40-character-commit> | --verify');
   }
+  let client;
+  if (process.env.GITHUB_EVENT_NAME === 'workflow_run') {
+    maintenanceIdentity(args[1], process.env, event);
+    const { createImprovementClient } = await import('./check-improvement.mjs');
+    client = createImprovementClient(
+      process.env.GITHUB_REPOSITORY,
+      process.env.SLIPSTREAM_DOCS_REMEDIATION_TOKEN,
+    );
+  }
   const controller = new AbortController();
   const interrupt = () => controller.abort('SIGINT');
   const terminate = () => controller.abort('SIGTERM');
@@ -673,6 +843,7 @@ async function main() {
       revision: args[1],
       event,
       signal: controller.signal,
+      client,
     });
   } finally {
     process.removeListener('SIGINT', interrupt);
@@ -682,6 +853,31 @@ async function main() {
     'report_path',
     result.outputDirectory ? `${result.outputDirectory}/report.json` : null,
   );
+  if (result.report.trigger) {
+    workflowOutput(
+      'proposal_path',
+      result.report.passed && result.report.outcome === 'proposed' && result.outputDirectory
+        ? `${result.outputDirectory}/proposal.patch`
+        : null,
+    );
+    if (process.env.GITHUB_STEP_SUMMARY) {
+      fs.appendFileSync(
+        process.env.GITHUB_STEP_SUMMARY,
+        [
+          '## Documentation Remediation',
+          '',
+          `Revision: ${result.report.revision}`,
+          `Source CI run: ${result.report.trigger.runId}, attempt ${result.report.trigger.attempt}`,
+          `Source verification: ${result.report.checks.trigger ?? 'unverified'}`,
+          `Documentation: ${result.report.remediation.status}`,
+          '',
+          'CI cause and resolution remain unverified. No commit, push, merge, retry, or agent review was performed.',
+          'Any patch requires a human-created PR, full required CI and Security checks, and manual approval.',
+          '',
+        ].join('\n'),
+      );
+    }
+  }
   console.log(JSON.stringify(result, null, 2));
   process.exitCode = result.report.passed ? 0 : 1;
 }

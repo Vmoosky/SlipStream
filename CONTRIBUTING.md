@@ -443,6 +443,46 @@ evidence about its synthetic workload, not proof that an arbitrary source fix
 worked. Workflow presence or local fixtures do not establish an observed
 continuous-improvement loop, agent throughput, or live-provider quality.
 
+## Documentation Remediation
+
+The [documentation remediation workflow](.github/workflows/docs-remediation.yml)
+is disabled by default. After reviewing the implementation and required checks,
+the owner may enable `SLIPSTREAM_DOCS_REMEDIATION_ENABLED=true`. Setting it to
+`false` pauses future proposals. This change does not activate the workflow.
+
+It responds only to a failed, first-attempt CI push run on the default branch
+whose revision is also the trusted workflow checkout. PRs, forks, other branches,
+successful or cancelled runs, and source or remediation reruns are excluded.
+Read-only GitHub API checks bind the workflow ID and path, run ID and attempt,
+repository IDs, event, conclusion, source SHA, and current default-branch head.
+Those checks run before generation and again before retaining a patch. Moved
+branches, changed attempts, and unavailable evidence withhold the proposal.
+
+The trusted checkout installs locked dependencies with lifecycle scripts disabled,
+builds core, and runs the remediation regression tests. Its existing documentation
+generator then performs check-only diagnosis in a disposable exact-revision
+checkout. Only the three existing generated reference blocks are repairable,
+with the same 200-changed-line and 64-KiB patch limits as bounded maintenance.
+Repository-wide documentation validation, check-only immutability, idempotence,
+scope checks, source preservation, and scratch cleanup must all succeed.
+Original before/after reports, their SHA-256 hashes, and the proposal digest are
+retained with the source identity for seven days, subject to repository policy.
+The API credential is not passed to generator or Git subprocesses.
+
+If documentation already passes, the result is `not-applicable` and no patch is
+produced. An unrepaired documentation error blocks the proposal. Even a validated
+patch proves only the local documentation postcondition: the cause and resolution
+of the triggering CI failure remain unverified. The workflow never retries CI,
+invokes a model, edits the source checkout, opens a PR, commits, pushes, or merges.
+It cannot grant scheduled-maintenance provenance or agent authorship.
+
+Review the original evidence and exact patch before applying it on a separate
+human-created branch. A resulting PR still requires full local validation,
+successful required CI and Security gates, and independent human review before
+manual merge. Discard an unused patch to cancel it; if a merged proposal needs
+reversal, use the existing [reviewed rollback procedure](#repair-review-and-rollback).
+No real CI failure, reviewed merge, or rollback is claimed by local fixture tests.
+
 ## Bounded Maintenance
 
 The [maintenance workflow](.github/workflows/maintenance.yml) is prepared but
