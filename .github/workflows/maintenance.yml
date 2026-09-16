@@ -52,7 +52,7 @@ jobs:
         run: npm run build
       - id: tests
         if: ${{ !cancelled() && steps.build.outcome == 'success' }}
-        timeout-minutes: 2
+        timeout-minutes: 3
         run: node --test tests/check-docs.test.mjs tests/readiness.test.mjs
       - id: audit
         if: ${{ !cancelled() && steps.build.outcome == 'success' }}

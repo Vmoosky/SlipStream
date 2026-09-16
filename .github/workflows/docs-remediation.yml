@@ -1,0 +1,92 @@
+name: Docs Remediation
+
+on:
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: docs-remediation-${{ github.event.workflow_run.id }}
+  cancel-in-progress: false
+
+jobs:
+  propose:
+    if: >-
+      ${{ vars.SLIPSTREAM_DOCS_REMEDIATION_ENABLED == 'true' &&
+          github.event.action == 'completed' &&
+          github.run_attempt == '1' &&
+          github.event.workflow_run.event == 'push' &&
+          github.event.workflow_run.conclusion == 'failure' &&
+          github.event.workflow_run.run_attempt == 1 &&
+          github.event.workflow_run.repository.full_name == github.repository &&
+          github.event.workflow_run.head_repository.full_name == github.repository &&
+          github.event.workflow_run.head_branch == github.event.repository.default_branch &&
+          github.event.workflow_run.head_sha == github.sha &&
+          github.ref == format('refs/heads/{0}', github.event.repository.default_branch) }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      actions: read
+    env:
+      SLIPSTREAM_DOCS_REMEDIATION_ENABLED: ${{ vars.SLIPSTREAM_DOCS_REMEDIATION_ENABLED }}
+    steps:
+      - id: context
+        name: Require trusted first-attempt completion context
+        shell: bash
+        env:
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          set -euo pipefail
+          test -n "$DEFAULT_BRANCH"
+          test "$SLIPSTREAM_DOCS_REMEDIATION_ENABLED" = 'true'
+          test "$GITHUB_EVENT_NAME" = 'workflow_run'
+          test "$GITHUB_RUN_ATTEMPT" = '1'
+          test "$GITHUB_REF" = "refs/heads/$DEFAULT_BRANCH"
+          test "$GITHUB_WORKFLOW_REF" = "$GITHUB_REPOSITORY/.github/workflows/docs-remediation.yml@refs/heads/$DEFAULT_BRANCH"
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version-file: .node-version
+          cache: npm
+          cache-dependency-path: package-lock.json
+      - id: install
+        timeout-minutes: 5
+        run: npm ci --ignore-scripts
+      - id: build
+        timeout-minutes: 3
+        run: npm run build --workspace @slipstream/core
+      - id: tests
+        timeout-minutes: 3
+        run: node --test --test-name-pattern="^maintenance remediation" tests/readiness.test.mjs
+      - id: remediation
+        name: Diagnose and validate a bounded docs-only repair proposal
+        timeout-minutes: 5
+        env:
+          SLIPSTREAM_DOCS_REMEDIATION_TOKEN: ${{ github.token }}
+        run: node scripts/maintenance.mjs --revision "$GITHUB_SHA"
+      - name: Retain original diagnosis and validation evidence
+        if: ${{ always() && steps.remediation.outputs.report_path != '' }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: docs-remediation-evidence-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            test-results/maintenance/run-*/report.json
+            test-results/maintenance/run-*/before.json
+            test-results/maintenance/run-*/after.json
+          if-no-files-found: error
+          retention-days: 7
+      - name: Retain a validated repair proposal for human review
+        if: ${{ !cancelled() && steps.remediation.outcome == 'success' && steps.remediation.outputs.proposal_path != '' }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: docs-remediation-proposal-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ steps.remediation.outputs.proposal_path }}
+          if-no-files-found: error
+          retention-days: 7

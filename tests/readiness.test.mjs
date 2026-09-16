@@ -58,6 +58,7 @@ import {
   runMaintenanceCommand,
   runDocumentationMaintenance,
   maintenanceIdentity,
+  verifyDocumentationRemediation,
   collectMaintenanceEvidence,
 } from '../scripts/maintenance.mjs';
 
@@ -3997,6 +3998,380 @@ function maintenanceRepository(context) {
   return { root, git, sentinel, commit };
 }
 
+function remediationHistory(revision = META.revision) {
+  const repository = { id: 9, full_name: 'owner/repo', default_branch: 'main' };
+  const event = {
+    action: 'completed',
+    repository,
+    workflow_run: {
+      id: 101,
+      workflow_id: 11,
+      name: 'CI',
+      path: '.github/workflows/ci.yml',
+      event: 'push',
+      status: 'completed',
+      conclusion: 'failure',
+      run_attempt: 1,
+      head_branch: 'main',
+      head_sha: revision,
+      repository,
+      head_repository: repository,
+    },
+  };
+  const env = {
+    GITHUB_ACTIONS: 'true',
+    SLIPSTREAM_DOCS_REMEDIATION_ENABLED: 'true',
+    GITHUB_EVENT_NAME: 'workflow_run',
+    GITHUB_REPOSITORY: repository.full_name,
+    GITHUB_SHA: revision,
+    GITHUB_REF: 'refs/heads/main',
+    GITHUB_WORKFLOW_REF: 'owner/repo/.github/workflows/docs-remediation.yml@refs/heads/main',
+    GITHUB_RUN_ID: '202',
+    GITHUB_RUN_ATTEMPT: '1',
+    GITHUB_SERVER_URL: 'https://github.com',
+    GITHUB_API_URL: 'https://api.github.com',
+  };
+  const api = {
+    workflow: { id: 11, name: 'CI', path: '.github/workflows/ci.yml', state: 'active' },
+    run: JSON.parse(JSON.stringify(event.workflow_run)),
+    branch: { name: 'main', commit: { sha: revision } },
+  };
+  const requests = [];
+  const client = {
+    async json(resource) {
+      requests.push(resource);
+      const key = {
+        '/actions/workflows/ci.yml': 'workflow',
+        '/actions/runs/101': 'run',
+        '/branches/main': 'branch',
+      }[resource];
+      assert.ok(key, resource);
+      return JSON.parse(JSON.stringify(api[key]));
+    },
+  };
+  return { env, event, api, requests, client };
+}
+
+test('maintenance remediation identity binds one failed CI attempt to trusted current source', () => {
+  const { env, event } = remediationHistory();
+  assert.deepEqual(maintenanceIdentity(META.revision, env, event), {
+    revision: META.revision,
+    eventName: 'workflow_run',
+    workflow: env.GITHUB_WORKFLOW_REF,
+    runId: '202',
+    attempt: '1',
+    trigger: { runId: '101', attempt: '1', workflowId: 11 },
+  });
+  for (const mutate of [
+    (copy) => {
+      copy.env.SLIPSTREAM_DOCS_REMEDIATION_ENABLED = 'false';
+    },
+    (copy) => {
+      copy.env.GITHUB_RUN_ATTEMPT = '2';
+    },
+    (copy) => {
+      copy.env.GITHUB_RUN_ID = '101';
+    },
+    (copy) => {
+      copy.env.GITHUB_REF = 'refs/heads/other';
+    },
+    (copy) => {
+      copy.env.GITHUB_WORKFLOW_REF = 'owner/repo/.github/workflows/maintenance.yml@refs/heads/main';
+    },
+    (copy) => {
+      copy.env.GITHUB_API_URL = 'https://example.invalid';
+    },
+    (copy) => {
+      copy.event.action = 'requested';
+    },
+    (copy) => {
+      copy.event.repository.id = 10;
+    },
+    (copy) => {
+      copy.event.workflow_run.id = '101';
+    },
+    (copy) => {
+      copy.event.workflow_run.workflow_id = 0;
+    },
+    (copy) => {
+      copy.event.workflow_run.name = 'Other';
+    },
+    (copy) => {
+      copy.event.workflow_run.path = '.github/workflows/other.yml';
+    },
+    (copy) => {
+      copy.event.workflow_run.event = 'pull_request';
+    },
+    (copy) => {
+      copy.event.workflow_run.status = 'in_progress';
+    },
+    (copy) => {
+      copy.event.workflow_run.conclusion = 'success';
+    },
+    (copy) => {
+      copy.event.workflow_run.conclusion = 'cancelled';
+    },
+    (copy) => {
+      copy.event.workflow_run.run_attempt = 2;
+    },
+    (copy) => {
+      copy.event.workflow_run.head_branch = 'other';
+    },
+    (copy) => {
+      copy.event.workflow_run.head_sha = 'b'.repeat(40);
+    },
+    (copy) => {
+      copy.event.workflow_run.head_repository = { id: 19, full_name: 'fork/repo' };
+    },
+  ]) {
+    const copy = JSON.parse(JSON.stringify({ env, event }));
+    mutate(copy);
+    assert.throws(() => maintenanceIdentity(META.revision, copy.env, copy.event));
+  }
+});
+
+test('maintenance remediation verifies the workflow, original run and current default-branch SHA', async () => {
+  const history = remediationHistory();
+  assert.deepEqual(
+    await verifyDocumentationRemediation(META.revision, history.env, history.event, history.client),
+    { runId: '101', attempt: '1', workflowId: 11 },
+  );
+  assert.deepEqual(history.requests, [
+    '/actions/workflows/ci.yml',
+    '/actions/runs/101',
+    '/branches/main',
+  ]);
+  for (const mutate of [
+    (api) => {
+      api.workflow.id = 12;
+    },
+    (api) => {
+      api.workflow.state = 'disabled_manually';
+    },
+    (api) => {
+      api.workflow.path = '.github/workflows/other.yml';
+    },
+    (api) => {
+      api.run.id = 102;
+    },
+    (api) => {
+      api.run.workflow_id = 12;
+    },
+    (api) => {
+      api.run.run_attempt = 2;
+    },
+    (api) => {
+      api.run.status = 'in_progress';
+    },
+    (api) => {
+      api.run.conclusion = 'success';
+    },
+    (api) => {
+      api.run.head_sha = 'c'.repeat(40);
+    },
+    (api) => {
+      api.run.repository.id = 10;
+    },
+    (api) => {
+      api.branch.commit.sha = 'c'.repeat(40);
+    },
+    (api) => {
+      api.branch.name = 'other';
+    },
+    (api) => {
+      api.branch.commit = null;
+    },
+  ]) {
+    const changed = remediationHistory();
+    mutate(changed.api);
+    await assert.rejects(
+      verifyDocumentationRemediation(META.revision, changed.env, changed.event, changed.client),
+    );
+  }
+});
+
+test('maintenance remediation branch lookups stay bounded and read-only', async () => {
+  const requests = [];
+  const client = createImprovementClient('owner/repo', 'synthetic-token', async (url, options) => {
+    requests.push(url);
+    assert.equal(options.method, 'GET');
+    assert.equal(options.redirect, 'manual');
+    assert.ok(options.signal);
+    return new Response('{}');
+  });
+  for (const branch of ['main', 'release%2Fv1.0']) await client.json(`/branches/${branch}`);
+  for (const resource of [
+    '/branches/..',
+    '/branches/.',
+    '/branches/main/../secrets',
+    '/branches/main?query=other',
+    '/branches/main%2F..',
+    '/branches/main%252Fother',
+    'https://example.invalid/branches/main',
+    `/branches/${'a'.repeat(501)}`,
+  ])
+    await assert.rejects(client.json(resource));
+  assert.deepEqual(requests, [
+    'https://api.github.com/repos/owner/repo/branches/main',
+    'https://api.github.com/repos/owner/repo/branches/release%2Fv1.0',
+  ]);
+});
+
+test('maintenance remediation reports unrelated CI failures as not applicable', async (context) => {
+  const { root, git, sentinel } = maintenanceRepository(context);
+  const revision = git(['rev-parse', 'HEAD']);
+  const history = remediationHistory(revision);
+  const result = await runDocumentationMaintenance(root, { revision, ...history });
+  assert.equal(result.report.passed, true);
+  assert.equal(result.report.outcome, 'no-op');
+  assert.equal(result.report.remediation.status, 'not-applicable');
+  assert.equal(result.report.remediation.before.passed, true);
+  assert.equal(result.report.remediation.after.passed, true);
+  assert.equal(result.report.remediation.ciResolutionVerified, false);
+  assert.equal(result.report.remediation.automaticPublication, false);
+  assert.equal(result.report.remediation.humanApprovalRequired, true);
+  assert.equal(history.requests.length, 6);
+  assert.equal(fs.existsSync(path.join(root, result.outputDirectory, 'proposal.patch')), false);
+  assert.equal(git(['status', '--porcelain']), '');
+  assert.equal(fs.readFileSync(sentinel, 'utf8'), 'Do not touch user data');
+  assert.throws(() => collectMaintenanceEvidence(root, { revision, ...history }));
+});
+
+test('maintenance remediation proves bounded documentation repair and withholds patches after source changes', async (context) => {
+  const { root, git, commit, sentinel } = maintenanceRepository(context);
+  const manifestPath = path.join(root, 'package.json');
+  const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
+  manifest.scripts['synthetic:remediation'] = 'node --version';
+  fs.writeFileSync(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`);
+  const revision = commit();
+  for (const fault of ['none', 'branch-moved', 'rerun', 'unavailable']) {
+    const history = remediationHistory(revision);
+    const json = history.client.json;
+    let reads = 0;
+    history.client.json = async (resource) => {
+      if (++reads > 3) {
+        if (fault === 'branch-moved') history.api.branch.commit.sha = 'c'.repeat(40);
+        if (fault === 'rerun') history.api.run.run_attempt = 2;
+        if (fault === 'unavailable') throw new Error('synthetic-private-upstream-detail');
+      }
+      return json(resource);
+    };
+    const result = await runDocumentationMaintenance(root, { revision, ...history });
+    assert.equal(result.report.remediation.before.passed, false, fault);
+    assert.equal(result.report.remediation.after.passed, true, fault);
+    for (const phase of ['before', 'after']) {
+      assert.match(result.report.remediation[phase].reportSha256, /^[a-f0-9]{64}$/, fault);
+      const bytes = fs.readFileSync(path.join(root, result.outputDirectory, `${phase}.json`));
+      assert.equal(
+        result.report.remediation[phase].reportSha256,
+        createHash('sha256').update(bytes).digest('hex'),
+        fault,
+      );
+      assert.equal(JSON.parse(bytes.toString()).passed, phase === 'after', fault);
+    }
+    assert.equal(result.report.passed, fault === 'none', fault);
+    assert.equal(result.report.remediation.ciResolutionVerified, false, fault);
+    assert.equal(result.report.remediation.automaticPublication, false, fault);
+    assert.equal(result.report.remediation.humanApprovalRequired, true, fault);
+    const patch = path.join(root, result.outputDirectory, 'proposal.patch');
+    assert.equal(fs.existsSync(patch), fault === 'none', fault);
+    assert.doesNotMatch(JSON.stringify(result), /synthetic-private-upstream-detail/, fault);
+    if (fault === 'none') {
+      assert.equal(result.report.remediation.status, 'proposed');
+      assert.equal(result.report.checks.diagnosis, 'success');
+      assert.equal(result.report.checks.trigger, 'success');
+      assert.equal(
+        result.report.proposal.patchSha256,
+        createHash('sha256').update(fs.readFileSync(patch)).digest('hex'),
+      );
+      assert.ok(result.report.proposal.files.every((file) => DOC_CONTRACTS.includes(file.path)));
+    } else {
+      assert.equal(result.report.remediation.status, 'blocked', fault);
+      assert.equal(result.report.checks.trigger, 'failure', fault);
+      assert.equal(result.report.proposal, null, fault);
+    }
+    assert.equal(git(['status', '--porcelain']), '', fault);
+    assert.equal(git(['rev-parse', 'HEAD']), revision, fault);
+  }
+  assert.equal(fs.readFileSync(sentinel, 'utf8'), 'Do not touch user data');
+});
+
+test('maintenance remediation rejects unverifiable sources before any generator execution', async (context) => {
+  const { root, git } = maintenanceRepository(context);
+  const revision = git(['rev-parse', 'HEAD']);
+  const history = remediationHistory(revision);
+  history.client.json = async () => {
+    throw new Error('synthetic-private-upstream-detail');
+  };
+  const commands = [];
+  const runCommand = async (...args) => {
+    commands.push(args[0]);
+    return runMaintenanceCommand(...args);
+  };
+  const result = await runDocumentationMaintenance(root, { revision, ...history, runCommand });
+  assert.equal(result.report.passed, false);
+  assert.equal(result.report.remediation.status, 'blocked');
+  assert.equal(result.report.proposal, null);
+  assert.equal(result.report.remediation.before, null);
+  assert.equal(commands.includes(process.execPath), false);
+  assert.equal(fs.existsSync(path.join(root, result.outputDirectory, 'proposal.patch')), false);
+  assert.doesNotMatch(JSON.stringify(result), /synthetic-private-upstream-detail/);
+});
+
+test('maintenance remediation cannot repair authored errors or accept modifying diagnosis', async (context) => {
+  const { root, git, commit } = maintenanceRepository(context);
+  const cleanRevision = git(['rev-parse', 'HEAD']);
+  const changed = remediationHistory(cleanRevision);
+  const runCommand = async (command, args, cwd, timeout, signal) => {
+    const bytes = await runMaintenanceCommand(command, args, cwd, timeout, signal);
+    if (command === process.execPath && args.at(-1) === 'diagnose') {
+      fs.appendFileSync(path.join(cwd, 'README.md'), '\nSynthetic check-only mutation\n');
+    }
+    return bytes;
+  };
+  const diagnosis = await runDocumentationMaintenance(root, {
+    revision: cleanRevision,
+    ...changed,
+    runCommand,
+  });
+  assert.equal(diagnosis.report.passed, false);
+  assert.equal(diagnosis.report.checks.diagnosis, 'failure');
+  assert.equal(diagnosis.report.proposal, null);
+  assert.equal(fs.existsSync(path.join(root, diagnosis.outputDirectory, 'proposal.patch')), false);
+
+  fs.appendFileSync(
+    path.join(root, 'README.md'),
+    '\n[Synthetic broken link](missing-remediation-fixture.md)\n',
+  );
+  git(['add', '--', 'README.md']);
+  const revision = commit();
+  const history = remediationHistory(revision);
+  const result = await runDocumentationMaintenance(root, { revision, ...history });
+  assert.equal(result.report.passed, false);
+  assert.equal(result.report.remediation.before.passed, false);
+  assert.equal(result.report.remediation.after, null);
+  assert.equal(result.report.checks.generation, 'failure');
+  assert.equal(result.report.proposal, null);
+  assert.equal(fs.existsSync(path.join(root, result.outputDirectory, 'proposal.patch')), false);
+  assert.equal(git(['status', '--porcelain']), '');
+});
+
+test('maintenance remediation never forwards its API token to generator subprocesses', async (context) => {
+  const key = 'SLIPSTREAM_DOCS_REMEDIATION_TOKEN';
+  const previous = process.env[key];
+  context.after(() => {
+    if (previous === undefined) delete process.env[key];
+    else process.env[key] = previous;
+  });
+  process.env[key] = 'synthetic-remediation-token';
+  const bytes = await runMaintenanceCommand(
+    process.execPath,
+    ['-e', `process.stdout.write(String(Object.hasOwn(process.env, '${key}')))`],
+    REPO,
+  );
+  assert.equal(bytes.toString(), 'false');
+});
+
 test('maintenance runs in an isolated exact-revision checkout and retains no-op evidence', async (context) => {
   const { root, git, sentinel } = maintenanceRepository(context);
   const revision = git(['rev-parse', 'HEAD']);
@@ -5179,6 +5554,69 @@ test('maintenance aggregation rejects stale reports and absent or altered propos
     collectMaintenanceEvidence(root, { ...options, reportPath: '../report.json' }).passed,
     false,
   );
+});
+
+test('maintenance remediation workflow limits failure-triggered proposals to trusted source and human review', () => {
+  const workflow = parse(
+    fs.readFileSync(path.join(REPO, '.github/workflows/docs-remediation.yml'), 'utf8'),
+  );
+  assert.deepEqual(workflow.on, { workflow_run: { workflows: ['CI'], types: ['completed'] } });
+  assert.deepEqual(workflow.permissions, { contents: 'read' });
+  assert.equal(workflow.concurrency['cancel-in-progress'], false);
+  assert.match(workflow.concurrency.group, /github\.event\.workflow_run\.id/);
+  assert.deepEqual(Object.keys(workflow.jobs), ['propose']);
+  const job = workflow.jobs.propose;
+  assert.deepEqual(job.permissions, { contents: 'read', actions: 'read' });
+  assert.equal(job['runs-on'], 'ubuntu-latest');
+  assert.equal(job['timeout-minutes'], 15);
+  for (const guard of [
+    "vars.SLIPSTREAM_DOCS_REMEDIATION_ENABLED == 'true'",
+    "github.event.action == 'completed'",
+    "github.run_attempt == '1'",
+    "github.event.workflow_run.event == 'push'",
+    "github.event.workflow_run.conclusion == 'failure'",
+    'github.event.workflow_run.run_attempt == 1',
+    'github.event.workflow_run.repository.full_name == github.repository',
+    'github.event.workflow_run.head_repository.full_name == github.repository',
+    'github.event.workflow_run.head_branch == github.event.repository.default_branch',
+    'github.event.workflow_run.head_sha == github.sha',
+    "github.ref == format('refs/heads/{0}', github.event.repository.default_branch)",
+  ])
+    assert.ok(job.if.includes(guard), guard);
+  const checkout = job.steps.find((step) => step.uses?.startsWith('actions/checkout@'));
+  assert.deepEqual(checkout.with, { ref: '${{ github.sha }}', 'persist-credentials': false });
+  assert.equal(job.steps.find((step) => step.id === 'install').run, 'npm ci --ignore-scripts');
+  assert.equal(
+    job.steps.find((step) => step.id === 'build').run,
+    'npm run build --workspace @slipstream/core',
+  );
+  assert.equal(
+    job.steps.find((step) => step.id === 'tests').run,
+    'node --test --test-name-pattern="^maintenance remediation" tests/readiness.test.mjs',
+  );
+  const repair = job.steps.find((step) => step.id === 'remediation');
+  assert.equal(repair.run, 'node scripts/maintenance.mjs --revision "$GITHUB_SHA"');
+  assert.deepEqual(repair.env, { SLIPSTREAM_DOCS_REMEDIATION_TOKEN: '${{ github.token }}' });
+  const uploads = job.steps.filter((step) => step.uses?.startsWith('actions/upload-artifact@'));
+  assert.equal(uploads.length, 2);
+  assert.match(uploads[0].with.path, /before\.json/);
+  assert.match(uploads[0].with.path, /after\.json/);
+  assert.equal(uploads[1].with.path, '${{ steps.remediation.outputs.proposal_path }}');
+  assert.equal(
+    uploads[1].if,
+    "${{ !cancelled() && steps.remediation.outcome == 'success' && steps.remediation.outputs.proposal_path != '' }}",
+  );
+  for (const upload of uploads) {
+    assert.equal(upload.with['if-no-files-found'], 'error');
+    assert.equal(upload.with['retention-days'], 7);
+  }
+  for (const step of job.steps) {
+    assert.equal(step['continue-on-error'], undefined);
+    if (step.uses) assert.match(step.uses, /@[a-f0-9]{40}$/);
+    if (step.run) assert.ok(step['timeout-minutes'] || step.id === 'context');
+    if (step !== repair) assert.doesNotMatch(JSON.stringify(step), /github\.token|secrets\./);
+    assert.doesNotMatch(step.run ?? '', /git (push|commit)|gh |check-agent-review|\$\{\{/);
+  }
 });
 
 test('maintenance workflow stays opt-in, read-only, bounded and default-branch-only', () => {
