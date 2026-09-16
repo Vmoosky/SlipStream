@@ -396,7 +396,7 @@ Manual execution must target the default branch. The schedule is Monday at
 run. Disable the variable to pause it again.
 
 The workflow uses a read-only token, pinned actions and Node version, one
-concurrent job, a 20-minute deadline, and no retries. It runs focused tests,
+concurrent job, a 30-minute deadline, and no wrapper retries. It runs focused tests,
 dependency audit, the existing five-sample offline proof, and
 [deterministic documentation maintenance](scripts/maintenance.mjs). Independent
 failures remain failures; a docs patch is uploaded only if every check and its
@@ -430,6 +430,71 @@ and record the run, PR, actual review, and merge links in the readiness assessme
 when observed. Full required CI and a manual merge still apply. A local fixture
 run does not establish scheduler operation, independent review, agent-authored
 throughput, or live-provider outcomes.
+
+### Advisory Agent Review
+
+The [bounded review runner](scripts/check-agent-review.mjs) is a separate,
+default-off extension of the same workflow. It reviews only a nonempty,
+independently verified generated-document proposal on the first attempt of the
+Monday schedule. Manual dispatch, reruns, no-ops, failed checks, and disabled
+review do not start a model session. It never generates or executes a patch.
+
+Activation requires the owner's separate authorization and configuration:
+
+- Set `SLIPSTREAM_AGENT_REVIEW_MODEL` to a named model available to the dedicated
+    account. There is no default, `auto` selection, or fallback model.
+- Configure the `SLIPSTREAM_AGENT_REVIEW_TOKEN` repository secret with a dedicated
+    fine-grained PAT carrying **Copilot Requests** permission and no repository
+    write permissions. Do not reuse the workflow token or an administrative login.
+    This follows GitHub's [supported CLI authentication](https://docs.github.com/en/copilot/reference/cli-command-reference).
+- Verify provider-side overage blocking for that account, then set
+    `SLIPSTREAM_AGENT_REVIEW_NO_OVERAGE_CONFIRMED=true`. This is an owner attestation,
+    not automatic verification of billing settings. Included allowance must be
+    available; otherwise leave review disabled.
+- Set `SLIPSTREAM_AGENT_REVIEW_ENABLED=true` only after those prerequisites and
+    the existing maintenance protections are satisfied. Set it to `false` to pause.
+
+The runtime is the SHA-512-pinned Linux x64 Copilot CLI package `1.0.84-5`.
+Download and integrity checks precede the credential-bearing step; extraction
+uses a verified private copy and a credential-free child environment. No package
+installation hooks or automatic updates run. The review process receives only
+the dedicated token and fresh temporary configuration, home, and working
+directories. Tools, built-in MCP servers, repository instructions, automatic
+login, and continuation modes are not enabled. A nonempty sentinel tool allowlist
+is intentional: this CLI treats an empty list as no filter.
+
+The budget is one review invocation per eligible weekly run, zero wrapper
+retries, a five-minute review deadline, and a **soft 30-AI-credit CLI limit**.
+Thirty is the CLI minimum, not a hard charge cap: a response can exceed it, and
+internal requests, retries, or compaction may consume additional credits.
+Provider-side overage blocking is the spending boundary. Download and extraction
+each have a one-minute deadline; the review workflow step allows seven minutes
+for extraction, review, validation, and cleanup. The submitted prompt is capped
+at 96 KiB, combined stdout/stderr at 64 KiB, and the usage file at 64 KiB. These
+are local byte limits, not limits on the CLI's internal context or billed tokens.
+
+Missing or malformed usage, a different observed model, invalid responses,
+cancellation, and process failures fail closed without retry. Reports bind the
+source, run, attempt, evidence, patch, input, response, and usage digests, retain
+unknown provider request/retry counts and dollar charges as `null`, and mark
+human approval as required. Findings remain untrusted advisory data. A
+`changes-requested` decision fails the review step; a `no-objection` decision is
+not approval. Independently verified patch artifacts remain available for human
+inspection, including when the advisory review fails.
+
+Only normalized review JSON joins the existing seven-day evidence artifact;
+archives, credentials, raw sessions, and temporary configuration are not uploaded.
+Normal failures and cancellation clean temporary state; hard host termination
+cannot guarantee cleanup and is not successful evidence. Before publication, a
+human must inspect the exact patch and report, open the PR, pass full required CI,
+obtain independent human approval of its final head, and manually publish. This
+automation has no commit, push, PR-creation, merge, or release path.
+
+Offline tests use synthetic replies and child processes. They do not establish
+Linux runtime behavior, model access, live usage-schema compatibility, billing
+enforcement, review quality, or an observed improvement loop. Keep activation
+and any first live run separately authorized; record actual evidence only after
+it exists.
 
 The [Dependabot configuration](.github/dependabot.yml) also starts paused with
 zero ordinary version-update PRs. After enforcement is verified, enable it in a
