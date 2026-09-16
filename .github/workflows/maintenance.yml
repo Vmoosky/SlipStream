@@ -126,3 +126,11 @@ jobs:
           path: ${{ steps.verify.outputs.proposal_path }}
           if-no-files-found: error
           retention-days: 7
+      - name: Retain the discovery-ready review report
+        if: ${{ always() && steps.context.outcome == 'success' && steps.agent_review.outputs.readiness_report_path != '' }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: readiness-agent-review-${{ github.run_id }}-${{ github.run_attempt }}
+          path: reports/agent-review.json
+          if-no-files-found: error
+          retention-days: 7

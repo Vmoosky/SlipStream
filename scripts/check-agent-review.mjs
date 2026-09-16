@@ -6,6 +6,7 @@ import * as path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { DOC_CONTRACTS } from './check-ci.mjs';
 import { collectMaintenanceEvidence } from './maintenance.mjs';
+import { writeReadinessReport } from './check-readiness-reports.mjs';
 
 export const AGENT_REVIEW_RUNTIME = Object.freeze({
   package: '@github/copilot-linux-x64',
@@ -870,6 +871,7 @@ async function main() {
     if (bytes.length > AGENT_REVIEW_LIMITS.inputBytes)
       throw new Error('Review report exceeds its byte limit');
     fs.writeFileSync(path.join(directory, 'agent-review.json'), bytes, { flag: 'wx', mode: 0o600 });
+    workflowOutput('readiness_report_path', writeReadinessReport(root, bytes));
     workflowOutput('decision', report.response?.decision);
     if (env.GITHUB_STEP_SUMMARY) {
       fs.appendFileSync(

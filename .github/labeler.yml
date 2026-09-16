@@ -1,0 +1,33 @@
+area:core:
+  - changed-files:
+      - any-glob-to-any-file: 'packages/core{,/**}'
+area:extension:
+  - changed-files:
+      - any-glob-to-any-file: 'packages/extension{,/**}'
+area:mcp:
+  - changed-files:
+      - any-glob-to-any-file: 'packages/mcp-server{,/**}'
+area:hooks:
+  - changed-files:
+      - any-glob-to-any-file: 'packages/hook-runtime{,/**}'
+area:plugin:
+  - changed-files:
+      - any-glob-to-any-file: 'packages/copilot-plugin{,/**}'
+area:tooling:
+  - changed-files:
+      - any-glob-to-any-file:
+          - '.github/**'
+          - 'scripts/**'
+          - 'tests/**'
+          - 'e2e/**'
+      - all-globs-to-any-file:
+          - '*'
+          - '!*.[mM][dD]'
+          - '!*.[mM][aA][rR][kK][dD][oO][wW][nN]'
+          - '!llms.txt'
+area:docs:
+  - changed-files:
+      - any-glob-to-any-file:
+          - '**/*.[mM][dD]'
+          - '**/*.[mM][aA][rR][kK][dD][oO][wW][nN]'
+          - 'llms.txt'

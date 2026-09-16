@@ -65,7 +65,8 @@ jobs:
       - name: Test provenance and metadata guards
         timeout-minutes: 2
         run: node --test --test-name-pattern='^PR observability' tests/readiness.test.mjs
-      - name: Observe and reconcile PR metadata
+      - id: observation
+        name: Observe and reconcile PR metadata
         timeout-minutes: 4
         env:
           SLIPSTREAM_OBSERVABILITY_ENABLED: ${{ vars.SLIPSTREAM_OBSERVABILITY_ENABLED }}
@@ -80,5 +81,13 @@ jobs:
           path: |
             test-results/pr-observability/report.json
             test-results/pr-observability/summary.md
+          if-no-files-found: error
+          retention-days: 30
+      - name: Retain the discovery-ready observation report
+        if: ${{ always() && steps.context.outcome == 'success' && steps.observation.outputs.readiness_report_path != '' }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: readiness-pr-observability-${{ github.event.pull_request.number || inputs.pull_request }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: reports/pr-observability.json
           if-no-files-found: error
           retention-days: 30
