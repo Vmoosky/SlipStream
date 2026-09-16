@@ -504,3 +504,71 @@ are held for separate manual PRs; preserve declared Node compatibility and actio
 SHA pins. These caps do not control separately enabled security-update PRs,
 which can exceed ordinary version-update limits. Dependabot is maintenance
 automation, not evidence of AI engineering throughput.
+
+### Offline Finding Dispositions
+
+Successful review reports include a locally generated `findingIds` array aligned
+with `response.findings`. IDs hash the versioned review identity, sorted evidence
+hashes, input/patch/response digests, finding position, and finding contents. They
+identify a finding in one exact review, not a recurring issue across different
+runs. The model response format is unchanged. Older version-1 reports without
+this array can have IDs derived offline without rewriting the original report;
+present but inconsistent IDs are rejected.
+
+These commands only read bounded local UTF-8 JSON and print JSON to stdout:
+
+```sh
+node scripts/check-agent-review.mjs --prepare-dispositions test-results/maintenance/run-EXAMPLE/agent-review.json
+node scripts/check-agent-review.mjs --validate-dispositions test-results/maintenance/run-EXAMPLE/agent-review.json test-results/agent-review-dispositions.json
+```
+
+The example paths stand for an actual retained report and a separate,
+human-maintained disposition record. Run from the repository root, using
+forward-slash paths relative to the current directory. Absolute paths, traversal,
+symlinks/junctions, nonfiles, and oversized inputs are rejected. No credentials,
+workflow metadata, network access, model invocation, or writes are needed, even
+when live-review environment variables are set.
+
+Preparation prints a version-1 `agent-review-dispositions` template with exactly
+`schemaVersion`, `kind`, `review`, and an empty `entries` array. Keep the generated
+`review` binding unchanged. It contains the original report's byte-exact SHA-256,
+source revision, run/attempt/workflow, input/patch/response digests, and
+`evidenceManifestSha256`, the digest of its sorted evidence path/hash pairs.
+Reformatting or replacing the source report invalidates this binding. Maintain
+the template as a separate UTF-8 record; preparation makes no decisions. Checking
+an empty record lists every finding ID as `untriaged`, including for older reports.
+
+Each actual human decision adds an entry with exactly these five fields. This
+illustrative entry contains placeholders, not recorded review evidence:
+
+```json
+{
+    "findingId": "<locally generated finding ID>",
+    "disposition": "accepted",
+    "reason": "The generated reference needs correction.",
+    "recordedBy": "<reviewer login>",
+    "recordedAt": "<UTC timestamp at or after the report finish>"
+}
+```
+
+Decisions are `accepted`, `rejected`, or `deferred`; omissions remain `untriaged`.
+The reason must be nonblank and at most 2,000 UTF-8 bytes, without terminal control
+characters. `recordedBy` is a GitHub-login-shaped claim of at most 39 characters,
+not authenticated identity. Use a real UTC timestamp in
+`YYYY-MM-DDTHH:mm:ss.sssZ` or whole-second `YYYY-MM-DDTHH:mm:ssZ` form. Duplicate or
+unknown IDs, missing/extra fields, invalid timestamps, unsupported decisions,
+and entries predating the report are rejected. Reports are capped at 96 KiB and
+disposition records at 64 KiB, with at most ten entries. Failed, incomplete,
+cancelled, rerun, manual, and no-op source reports are ineligible; a valid reviewed
+`no-objection` report may have an empty record.
+
+Validation exits nonzero on invalid input. Success means **local consistency
+only**, not that every finding was triaged or resolved. The summary includes IDs,
+decision counts, and input digests, but not finding text, reasons, or reviewer
+claims. It leaves provenance, identity, and resolution verification explicitly
+false and human approval required. Accepted, rejected, and deferred decisions
+are never fixes, approvals, or publication permission. Local checks cannot
+authenticate GitHub artifacts, establish the truth of claimed timestamps, or
+recompute omitted raw response/usage evidence. Keep the original report and the
+separate decision record for later authenticated verification; no live ledger,
+resolution claim, scheduler, or automatic publication is created by this feature.
