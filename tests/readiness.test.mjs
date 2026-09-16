@@ -1406,13 +1406,15 @@ function developmentFixture(context) {
   return { root, npmCli, nodeVersion: '24.14.1', log: () => {} };
 }
 
-test('development runner retains LF in Windows-style Git checkouts', (context) => {
+test('development runner and label configuration retain LF in Windows-style Git checkouts', (context) => {
   const { root } = fixture(context);
-  const file = 'scripts/develop.mjs';
+  const files = ['scripts/develop.mjs', '.github/labeler.yml'];
   const checkout = path.join(root, 'windows checkout');
-  fs.mkdirSync(path.join(root, 'scripts'));
   fs.copyFileSync(path.join(REPO, '.gitattributes'), path.join(root, '.gitattributes'));
-  fs.copyFileSync(path.join(REPO, file), path.join(root, file));
+  for (const file of files) {
+    fs.mkdirSync(path.dirname(path.join(root, file)), { recursive: true });
+    fs.copyFileSync(path.join(REPO, file), path.join(root, file));
+  }
   const git = (args) =>
     execFileSync(
       'git',
@@ -1420,11 +1422,13 @@ test('development runner retains LF in Windows-style Git checkouts', (context) =
       { stdio: 'pipe' },
     );
   git(['init', '--quiet']);
-  git(['add', '--', '.gitattributes', file]);
-  git(['checkout-index', `--prefix=${checkout.replaceAll(path.sep, '/')}/`, '--', file]);
-  const checkedOut = fs.readFileSync(path.join(checkout, file), 'utf8');
-  assert.equal(checkedOut.includes('\r\n'), false, 'Git checkout must keep LF for Prettier');
-  assert.equal(checkedOut, fs.readFileSync(path.join(REPO, file), 'utf8'));
+  git(['add', '--', '.gitattributes', ...files]);
+  git(['checkout-index', `--prefix=${checkout.replaceAll(path.sep, '/')}/`, '--', ...files]);
+  for (const file of files) {
+    const checkedOut = fs.readFileSync(path.join(checkout, file), 'utf8');
+    assert.equal(checkedOut.includes('\r\n'), false, `${file} must keep LF for Prettier`);
+    assert.equal(checkedOut, fs.readFileSync(path.join(REPO, file), 'utf8'));
+  }
 });
 
 test('development setup rejects invalid modes and Node pins before running commands', async (context) => {
