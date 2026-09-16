@@ -149,7 +149,9 @@ export class NativeToolController implements vscode.Disposable {
               toolCallId: context.toolCallId, policyRevision: context.policyRevision, outcome: success ? 'pass' : 'fail' }),
           };
           const { nativeContext: _nativeContext, ...input } = options.input;
-          const output = await factory(cached.engine, callbacks).invoke({ ...options, input: input as Input }, token);
+          const scoped = cached.engine;
+          const output = await scoped.ledger.withToolCallContext({ source: 'vscode', sessionId: context.sessionId,
+            toolCallId: context.toolCallId, toolName }, () => factory(scoped, callbacks).invoke({ ...options, input: input as Input }, token));
           if (!output || toolName !== 'slipstream_getSavings') return output;
           const current = nativeChatStatus(this.parent.ledger.all(), root, context.sessionId, policy, this.parent.getConfig().profile);
           return new vscode.LanguageModelToolResult([...output.content, new vscode.LanguageModelTextPart(nativeChatMessage(current, policy))]);

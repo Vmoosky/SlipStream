@@ -83,6 +83,28 @@ describe('native registered tools', () => {
     expect(engine.getConfig().profile).toBe('conservative');
   });
 
+  it('keeps exact tool-call identities on overlapping savings events', async () => {
+    let releaseFirst!: () => void;
+    const firstBlocked = new Promise<void>((resolve) => { releaseFirst = resolve; });
+    const probe = controller.wrap<{ label: string }>('slipstream_readFile', (scoped) => ({ invoke: async (invocation) => {
+      if (invocation.input.label === 'first') await firstBlocked;
+      scoped.compressToolResult({ toolName: 'read_file', cwd: root, text: `${invocation.input.label}\n`.repeat(200) });
+      return new mocks.api.LanguageModelToolResult([]) as vscode.LanguageModelToolResult;
+    } }));
+    const first = probe.invoke(options('slipstream_readFile', { label: 'first' }, 'native-session', 'call-first') as never, token);
+    await probe.invoke(options('slipstream_readFile', { label: 'second' }, 'native-session', 'call-second') as never, token);
+    releaseFirst();
+    await first;
+    const outputs = engine.ledger.all().filter((entry) => entry.tool !== 'session');
+    expect(outputs).toHaveLength(2);
+    expect(outputs).toMatchObject([
+      { toolCall: { source: 'vscode', sessionId: 'native-session', toolCallId: 'call-second', toolName: 'slipstream_readFile' } },
+      { toolCall: { source: 'vscode', sessionId: 'native-session', toolCallId: 'call-first', toolName: 'slipstream_readFile' } },
+    ]);
+    engine.compressToolResult({ toolName: 'read_file', cwd: root, text: 'outside\n'.repeat(200) });
+    expect(engine.ledger.recent(1)[0]).not.toHaveProperty('toolCall');
+  });
+
   it.each(['timeout', 'cancelled', 'failed', 'error'])('does not promote a %s command into a passing check', async (failure) => {
     const invocation = options('slipstream_runCommand');
     if (failure === 'error') mocks.runCommand.mockRejectedValue(new Error('Command failed before completion'));

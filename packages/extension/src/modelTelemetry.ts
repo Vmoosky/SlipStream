@@ -5,9 +5,12 @@
  */
 export {
   parseModelTelemetry,
+  parseToolTelemetry,
   recordModelObservation,
+  recordToolObservation,
   startModelTelemetryReceiver,
   managedTelemetryEnv,
   type ModelObservation,
+  type ToolObservation,
   type ModelTelemetryReceiver,
 } from '@slipstream/core';

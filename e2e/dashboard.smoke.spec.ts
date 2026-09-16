@@ -15,7 +15,7 @@ import { parseMarkers } from '../packages/core/src/markers.js';
 import { startDashboardServer, type DashboardServerHandle } from '../packages/core/src/dashboardServer.js';
 import { jestFailureLog, sourceFile } from '../packages/core/test/fixtures.js';
 import { createChatHookConfig } from '../packages/extension/src/chatHooks.js';
-import { recordModelObservation, startModelTelemetryReceiver } from '../packages/extension/src/modelTelemetry.js';
+import { recordModelObservation, recordToolObservation, startModelTelemetryReceiver } from '../packages/extension/src/modelTelemetry.js';
 import { buildSummaryPayload, type DashboardModelTrackingStatus } from '../packages/core/src/dashboard.js';
 
 test('standalone model tracking reaches the connected runtime in the same tab', async ({ page }) => {
@@ -1437,6 +1437,7 @@ for (const width of [1280, 390]) {
         command: 'npm test', cwd: root, exitCode: 1, stdout: jestFailureLog(40), stderr: '', durationMs: 10,
       });
       await expect(metric).toHaveText('100.0%');
+      await expect(page.locator('#costLabel')).toHaveText('est. saved');
       const compression = engine.ledger.recent(1)[0]!;
       for (let index = 1; index < 410; index++) engine.ledger.record(compression);
       const marker = parseMarkers(compressed.text)[0]!;
@@ -1543,12 +1544,36 @@ for (const width of [1280, 390]) {
       await expect(page.locator('#connectModelTracking')).toBeVisible();
       await expect(page.locator('#pricingSettings, #pricingControls')).toHaveCount(0);
       await expect(page.locator('#config-usdPerMillionTokens')).toHaveValue('3');
+      const fallbackOnly = observe('unknown-fallback-model', 'Unknown fallback model');
+      fallbackOnly.compressToolResult({ toolName: 'read_file', cwd: root, text: jestFailureLog(40) });
+      await expect(page.locator('#costLabel')).toHaveText('est. saved @ $3/1M');
+      engine.ledger.clear();
+      const toolStartedAt = Date.now();
+      engine.ledger.withToolCallContext({ source: 'vscode', sessionId: 'native-test-session',
+        toolCallId: 'native-call__vscode-1', toolName: 'slipstream_readFile' }, () => {
+        engine.compressToolResult({ toolName: 'read_file', cwd: root, text: jestFailureLog(41) });
+      });
+      const toolEndedAt = Date.now();
+      await expect(page.locator('#costLabel')).toHaveText('est. saved @ $3/1M');
+      recordToolObservation(engine, { traceId: 'a'.repeat(32), spanId: 'b'.repeat(16), parentSpanId: 'c'.repeat(16),
+        conversationId: 'native-test-host', chatSessionId: 'native-test-host', startedAt: toolStartedAt, endedAt: toolEndedAt,
+        success: true, toolCallId: 'native-call', toolName: 'slipstream_readFile' });
+      recordModelObservation(engine, { traceId: 'a'.repeat(32), spanId: 'd'.repeat(16), parentSpanId: 'c'.repeat(16),
+        conversationId: 'native-test-session', chatSessionId: 'native-test-host', startedAt: toolStartedAt - 10, endedAt: toolStartedAt,
+        provider: 'vendor', requestModel: 'model', responseToolCalls: [{ id: 'native-call', name: 'slipstream_readFile' }] });
+      const attributedCost = engine.summary().tokensSaved * 5 / 1_000_000;
+      expect(engine.summary().cost).toMatchObject({ knownUsd: attributedCost, fallbackUsd: 0, pricedEvents: 1, unpricedEvents: 0 });
+      await expect(page.locator('#costLabel')).toHaveText('est. saved');
+      await expect(page.locator('#cost')).toHaveText('$' + attributedCost.toFixed(2));
+      await page.screenshot({ path: testInfo.outputPath(`attributed-pricing-${width}.png`), fullPage: true });
+      engine.ledger.clear();
       const first = observe('model', 'First model');
       await expect(page.locator('#lastDetectedModel')).toHaveText('First model (vendor/model)');
       await expect(page.locator('#detectedInputRate')).toHaveText('$5 / 1M input');
       await expect(page.locator('#modelPricingWarning')).toBeHidden();
       first.compressToolResult({ toolName: 'read_file', cwd: root, text: jestFailureLog(40) });
       const recordedCost = engine.summary().estimatedCostSavedUsd;
+      await expect(page.locator('#costLabel')).toHaveText('est. saved');
       observe('second', 'Second model');
       await expect(page.locator('#lastDetectedModel')).toHaveText('Second model (vendor/second)');
       await expect(page.locator('#detectedInputRate')).toHaveText('$9 / 1M input');
@@ -1571,6 +1596,7 @@ for (const width of [1280, 390]) {
       const estimated = (rate: number) => knownSubtotal + missingRateTokens * rate / 1_000_000;
       expect(engine.summary().estimatedCostSavedUsd).toBeCloseTo(estimated(3));
       await expect(page.locator('#cost')).toHaveText('$' + estimated(3).toFixed(2));
+      await expect(page.locator('#costLabel')).toHaveText('est. saved (mixed rates)');
       await expect(page.locator('#modelPricingWarning')).toContainText('default $3 / 1M tokens');
       await page.screenshot({ path: testInfo.outputPath(`fallback-estimate-${width}.png`), fullPage: true });
       const recorded = fs.readFileSync(engine.ledger.path(), 'utf8');

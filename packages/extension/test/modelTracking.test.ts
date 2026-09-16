@@ -64,6 +64,40 @@ afterEach(async () => {
 });
 
 describe('local model tracking consent and ownership', () => {
+  it('requires existing consent, trust, and exporter ownership for tool correlation metadata', async () => {
+    await controller.connect();
+    const connection = state.get('modelTracking.connection.v1') as { phase: string };
+    const send = (endedAt = Date.now()) => fetch(`${mocks.values.otlpEndpoint}/v1/traces`, {
+      method: 'POST',
+      headers: { ...(mocks.values.headers as Record<string, string>), 'content-type': 'application/json' },
+      body: JSON.stringify({ resourceSpans: [{ scopeSpans: [{ spans: [{
+        traceId: 'a'.repeat(32), spanId: 'b'.repeat(16), parentSpanId: 'c'.repeat(16),
+        startTimeUnixNano: String(BigInt(endedAt - 1000) * 1_000_000n),
+        endTimeUnixNano: String(BigInt(endedAt) * 1_000_000n), status: { code: 1 },
+        attributes: Object.entries({ 'gen_ai.operation.name': 'execute_tool', 'gen_ai.tool.call.id': 'call-one',
+          'gen_ai.tool.name': 'slipstream_readFile', 'gen_ai.tool.call.result': 'PRIVATE' })
+          .map(([key, stringValue]) => ({ key, value: { stringValue } })),
+      }] }] }] }),
+    });
+    mocks.api.workspace.isTrusted = false;
+    expect((await send()).status).toBe(200);
+    mocks.api.workspace.isTrusted = true;
+    mocks.values.captureContent = true;
+    expect((await send()).status).toBe(200);
+    mocks.values.captureContent = false;
+    connection.phase = 'installing';
+    expect((await send()).status).toBe(200);
+    connection.phase = 'connected';
+    expect((await send(Date.now() + 120_000)).status).toBe(200);
+    expect(engine.ledger.all()).toEqual([]);
+    expect((await send()).status).toBe(200);
+    expect(engine.ledger.all()).toHaveLength(1);
+    expect(engine.ledger.all()[0]).toMatchObject({ tool: 'session', strategy: 'session:tool', telemetrySource: 'vscode',
+      toolObservation: { toolCallId: 'call-one', toolName: 'slipstream_readFile' } });
+    expect(controller.status().receiverHealth).toMatchObject({ receivedExports: 5, acceptedObservations: 0 });
+    expect(JSON.stringify(engine.ledger.all())).not.toContain('PRIVATE');
+  });
+
   it('publishes local health without recording rejected content or changing savings', async () => {
     const onChange = vi.fn();
     const monitored = new ModelTrackingController(context, engine, onChange, {});

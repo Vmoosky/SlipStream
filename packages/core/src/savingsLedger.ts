@@ -1,8 +1,9 @@
+import { AsyncLocalStorage } from 'node:async_hooks';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 
 import { aggregateCost, resolvePricing, type PricingSnapshot } from './pricing.js';
-import type { LedgerEntry, SavingsSummary, ToolSavings } from './types.js';
+import type { LedgerEntry, SavingsSummary, ToolCallContext, ToolSavings } from './types.js';
 
 export interface SavingsLedgerOptions {
   rootDir: string;
@@ -30,6 +31,7 @@ export class SavingsLedger {
   private readonly pricingSnapshot: () => PricingSnapshot;
   private entries: LedgerEntry[] = [];
   private listeners = new Set<(entry: LedgerEntry) => void>();
+  private readonly toolCallContext = new AsyncLocalStorage<ToolCallContext>();
   /** Size and mtime of the parse currently held in `entries`. */
   private cacheKey = '';
 
@@ -47,7 +49,10 @@ export class SavingsLedger {
   }
 
   record(entry: LedgerEntry, options: { durable?: boolean } = {}): void {
-    entry = structuredClone(entry.tool === 'session' ? entry : { ...entry, pricing: entry.pricing ?? this.pricingSnapshot() });
+    const toolCall = this.toolCallContext.getStore();
+    entry = structuredClone(entry.tool === 'session' ? entry : {
+      ...entry, ...(toolCall ? { toolCall } : {}), pricing: entry.pricing ?? this.pricingSnapshot(),
+    });
     try {
       this.rotateIfNeeded();
       fs.appendFileSync(this.filePath, `${JSON.stringify(entry)}\n`, {
@@ -72,6 +77,11 @@ export class SavingsLedger {
   onRecord(listener: (entry: LedgerEntry) => void): () => void {
     this.listeners.add(listener);
     return () => this.listeners.delete(listener);
+  }
+
+  withToolCallContext<Result>(context: ToolCallContext, action: () => Result): Result {
+    const { source, sessionId, toolCallId, toolName } = context;
+    return this.toolCallContext.run({ source, sessionId, toolCallId, toolName }, action);
   }
 
   updateTokenPrice(usdPerMillionTokens: number): void {
