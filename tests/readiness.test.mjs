@@ -10,6 +10,18 @@ import { ESLint } from 'eslint';
 import { resolveConfig, resolveConfigFile } from 'prettier';
 import { developmentPlan, runDevelopmentCommand, runDevelopment } from '../scripts/develop.mjs';
 import {
+  agentReviewArguments,
+  agentReviewEnvironment,
+  agentReviewPolicy,
+  downloadAgentReviewArchive,
+  runBoundedAgentReview,
+  runAgentReviewProcess,
+  prepareAgentReview,
+  validateAgentReviewResponse,
+  validateAgentReviewUsage,
+  verifyAgentReviewArchive,
+} from '../scripts/check-agent-review.mjs';
+import {
   IMPROVEMENT_LIMITS,
   readImprovementArchive,
   readRetainedImprovementEvidence,
@@ -3265,6 +3277,459 @@ function maintenanceEvidence(context) {
   };
 }
 
+test('bounded agent review requires explicit opt-in, billing confirmation and a named model', () => {
+  assert.deepEqual(agentReviewPolicy(), { enabled: false });
+  assert.deepEqual(agentReviewPolicy({ SLIPSTREAM_AGENT_REVIEW_ENABLED: 'false' }), {
+    enabled: false,
+  });
+  const env = { SLIPSTREAM_AGENT_REVIEW_ENABLED: 'true' };
+  assert.throws(() => agentReviewPolicy(env), /billing controls/);
+  env.SLIPSTREAM_AGENT_REVIEW_NO_OVERAGE_CONFIRMED = 'true';
+  for (const model of [undefined, '', 'auto', '--model', 'model\nother', 'model'.repeat(30)]) {
+    assert.throws(
+      () => agentReviewPolicy({ ...env, SLIPSTREAM_AGENT_REVIEW_MODEL: model }),
+      /explicit supported review model/,
+    );
+  }
+  const policy = agentReviewPolicy({ ...env, SLIPSTREAM_AGENT_REVIEW_MODEL: 'gpt-4.1' });
+  assert.equal(policy.budgetMode, 'included-allowance-only');
+  assert.equal(policy.limits.invocations, 1);
+  assert.equal(policy.limits.retries, 0);
+  assert.equal(policy.limits.timeoutMs, 300_000);
+});
+
+test('bounded agent review isolates credentials, configuration and telemetry', (context) => {
+  const { root } = fixture(context);
+  const token = `github_pat_${'synthetic'.repeat(4)}`;
+  const env = agentReviewEnvironment(root, token);
+  assert.equal(env.COPILOT_GITHUB_TOKEN, token);
+  assert.equal(env.HOME, root);
+  assert.equal(env.COPILOT_HOME, path.join(root, 'copilot'));
+  assert.equal(env.GH_CONFIG_DIR, path.join(root, 'gh'));
+  assert.equal(env.PATH, '/usr/bin:/bin');
+  assert.equal(env.OTEL_SDK_DISABLED, 'true');
+  assert.equal(env.COPILOT_ALLOW_ALL, 'false');
+  for (const name of [
+    'GH_TOKEN',
+    'GITHUB_TOKEN',
+    'NODE_OPTIONS',
+    'BASH_ENV',
+    'LD_PRELOAD',
+    'HTTPS_PROXY',
+    'COPILOT_PROVIDER_API_KEY_COMMAND',
+    'COPILOT_CUSTOM_INSTRUCTIONS_DIRS',
+    'OTEL_EXPORTER_OTLP_ENDPOINT',
+    'COPILOT_OTEL_FILE_EXPORTER_PATH',
+  ])
+    assert.equal(Object.hasOwn(env, name), false, name);
+  for (const invalid of [undefined, '', 'ghp_classic', `${token}\n`]) {
+    assert.throws(() => agentReviewEnvironment(root, invalid), /dedicated fine-grained token/);
+  }
+  assert.throws(() => agentReviewEnvironment('relative', token), /isolated directory/);
+});
+
+test('bounded agent review bounds real child processes and redacts failures', async (context) => {
+  const { root } = fixture(context);
+  const options = { cwd: root, env: {}, timeoutMs: 5_000 };
+  const run = (code, overrides = {}) =>
+    runAgentReviewProcess(process.execPath, ['-e', code], { ...options, ...overrides });
+  assert.equal(
+    (await run('process.stdout.write("review"); process.stderr.write("diagnostic")')).toString(),
+    'review',
+  );
+  await assert.rejects(run('process.stderr.write("private diagnostic"); process.exit(1)'), {
+    message: 'Review process failed',
+  });
+  await assert.rejects(
+    run('process.stdout.write(Buffer.alloc(65537))'),
+    /output exceeds its limit/,
+  );
+  await assert.rejects(
+    run('process.stderr.write(Buffer.alloc(65537))'),
+    /output exceeds its limit/,
+  );
+  await assert.rejects(run('setInterval(() => {}, 1000)', { timeoutMs: 100 }), /timed out/);
+  const controller = new AbortController();
+  const pending = run('setInterval(() => {}, 1000)', { signal: controller.signal });
+  controller.abort();
+  await assert.rejects(pending, /cancelled/);
+  await assert.rejects(run('process.exit(0)', { signal: controller.signal }), /cancelled/);
+  await assert.rejects(run('process.exit(0)', { timeoutMs: 300_001 }), /timeout exceeds/);
+  await assert.rejects(runAgentReviewProcess(path.join(root, 'absent'), [], options), {
+    message: 'Review process failed',
+  });
+});
+
+test('bounded agent review fixes tool denial and bounds the complete prompt', (context) => {
+  const { root } = fixture(context);
+  const prepared = {
+    evidence: {
+      revision: META.revision,
+      documentation: { proposal: { patchSha256: 'a'.repeat(64) } },
+    },
+    input: Buffer.from('Synthetic untrusted proposal'),
+    inputSha256: 'b'.repeat(64),
+  };
+  const args = agentReviewArguments(prepared, { model: 'synthetic-model' }, root);
+  assert.ok(args.includes('--available-tools=__slipstream_no_tools__'));
+  assert.deepEqual(
+    args.filter((arg) => arg.startsWith('--deny-tool=')),
+    ['read', 'write', 'shell', 'url', 'memory'].map((kind) => `--deny-tool=${kind}`),
+  );
+  assert.ok(args.includes('--disable-builtin-mcps'));
+  assert.ok(args.includes('--no-custom-instructions'));
+  assert.ok(args.includes('--no-auto-login'));
+  assert.ok(args.includes('--max-ai-credits=30'));
+  assert.ok(args.includes('--max-autopilot-continues=0'));
+  assert.equal(args[args.indexOf('--model') + 1], 'synthetic-model');
+  assert.equal(args[args.indexOf('--usage-output-file') + 1], path.join(root, 'usage.json'));
+  assert.equal(
+    args.some((arg) => /^--(allow|yolo|agent|fleet|autopilot|resume|continue|share)/.test(arg)),
+    false,
+  );
+  assert.throws(
+    () =>
+      agentReviewArguments(
+        { ...prepared, input: Buffer.alloc(96 * 1024) },
+        { model: 'synthetic-model' },
+        root,
+      ),
+    /prompt exceeds/,
+  );
+});
+
+function agentReviewUsage(model = 'synthetic-model') {
+  return {
+    sessionStartTime: '2026-09-16T00:00:00Z',
+    totalUserRequests: 1,
+    totalNanoAiu: 1_000_000,
+    totalPremiumRequestCost: 0,
+    totalApiDurationMs: 100,
+    codeChanges: { linesAdded: 0, linesRemoved: 0, filesModified: [] },
+    modelMetrics: { [model]: {} },
+  };
+}
+
+test('bounded agent review requires usage evidence and a pinned runtime archive', (context) => {
+  const { root } = fixture(context);
+  const usage = agentReviewUsage();
+  const validate = (value) =>
+    validateAgentReviewUsage(Buffer.from(JSON.stringify(value)), 'synthetic-model');
+  assert.equal(validate(usage).nanoAiUnits, 1_000_000);
+  assert.equal(validate(usage).billedUsd, null);
+  assert.equal(validate(usage).providerRetries, null);
+  for (const invalid of [
+    { totalNanoAiu: undefined },
+    { totalNanoAiu: 0 },
+    { totalNanoAiu: -1 },
+    { totalUserRequests: 2 },
+    { totalPremiumRequestCost: null },
+    { totalApiDurationMs: -1 },
+    { sessionStartTime: 'unknown' },
+    { modelMetrics: {} },
+    { modelMetrics: { other: {} } },
+    { modelMetrics: { ...usage.modelMetrics, other: {} } },
+    { codeChanges: { linesAdded: 1, linesRemoved: 0, filesModified: [] } },
+    { codeChanges: { linesAdded: 0, linesRemoved: 0, filesModified: ['file'] } },
+  ])
+    assert.throws(() => validate({ ...usage, ...invalid }));
+  assert.throws(() => validateAgentReviewUsage(Buffer.alloc(65_537), 'synthetic-model'));
+  const archive = path.join(root, 'untrusted.tgz');
+  fs.writeFileSync(archive, 'untrusted executable');
+  assert.throws(() => verifyAgentReviewArchive(archive), /pinned integrity/);
+});
+
+test('bounded agent review CLI is offline by default and rejects unsafe runtime downloads', async (context) => {
+  const { root } = fixture(context);
+  const output = execFileSync(
+    process.execPath,
+    [path.join(REPO, 'scripts/check-agent-review.mjs'), '--review'],
+    {
+      cwd: root,
+      env: {},
+      encoding: 'utf8',
+      timeout: 5_000,
+    },
+  );
+  const report = JSON.parse(output);
+  assert.equal(report.status, 'disabled');
+  assert.equal(report.invocations, 0);
+  const archive = path.join(root, 'runtime.tgz');
+  for (const response of [
+    new Response('not the pinned archive'),
+    new Response(null, { status: 503 }),
+    new Response('oversized', { headers: { 'content-length': String(170 * 1024 * 1024) } }),
+  ]) {
+    await assert.rejects(
+      downloadAgentReviewArchive(archive, {
+        fetchArchive: async (url, options) => {
+          assert.equal(
+            url,
+            'https://registry.npmjs.org/@github/copilot-linux-x64/-/copilot-linux-x64-1.0.84-5.tgz',
+          );
+          assert.equal(options.redirect, 'error');
+          assert.equal(options.headers, undefined);
+          return response;
+        },
+      }),
+    );
+    assert.equal(fs.existsSync(archive), false);
+  }
+  const controller = new AbortController();
+  controller.abort();
+  await assert.rejects(
+    downloadAgentReviewArchive(archive, {
+      signal: controller.signal,
+      fetchArchive: () => assert.fail('Cancelled downloads must not start'),
+    }),
+  );
+  fs.writeFileSync(archive, 'existing archive');
+  await assert.rejects(
+    downloadAgentReviewArchive(archive, { fetchArchive: async () => new Response('untrusted') }),
+  );
+  assert.equal(fs.readFileSync(archive, 'utf8'), 'existing archive');
+});
+
+test('bounded agent review invokes once, binds its report and removes temporary state', async (context) => {
+  const { root, write, report, options } = maintenanceEvidence(context);
+  const env = {
+    ...options.env,
+    SLIPSTREAM_AGENT_REVIEW_ENABLED: 'true',
+    SLIPSTREAM_AGENT_REVIEW_NO_OVERAGE_CONFIRMED: 'true',
+    SLIPSTREAM_AGENT_REVIEW_MODEL: 'synthetic-model',
+    SLIPSTREAM_AGENT_REVIEW_TOKEN: `github_pat_${'synthetic'.repeat(4)}`,
+    GH_TOKEN: 'must-not-reach-the-child',
+  };
+  let calls = 0;
+  let temporary;
+  const runnerOptions = {
+    ...options,
+    env,
+    event: { ...options.event, schedule: '0 7 * * 1' },
+    prepareRuntime: async (_archive, directory) => {
+      temporary = directory;
+      return path.join(directory, 'synthetic-cli');
+    },
+    runCommand: async (_command, args, childOptions) => {
+      calls++;
+      assert.equal(childOptions.env.GH_TOKEN, undefined);
+      assert.equal(childOptions.env.COPILOT_GITHUB_TOKEN, env.SLIPSTREAM_AGENT_REVIEW_TOKEN);
+      assert.equal(childOptions.cwd, path.join(temporary, 'work'));
+      assert.equal(childOptions.env.HOME, path.join(temporary, 'home'));
+      const prepared = prepareAgentReview(root, options);
+      fs.writeFileSync(
+        args[args.indexOf('--usage-output-file') + 1],
+        JSON.stringify(agentReviewUsage()),
+      );
+      return Buffer.from(
+        JSON.stringify({
+          schemaVersion: 1,
+          revision: options.revision,
+          inputSha256: prepared.inputSha256,
+          patchSha256: prepared.evidence.documentation.proposal.patchSha256,
+          decision: 'no-objection',
+          findings: [],
+        }),
+      );
+    },
+  };
+  assert.equal(
+    (await runBoundedAgentReview(root, { ...runnerOptions, env: {} })).status,
+    'disabled',
+  );
+  assert.equal((await runBoundedAgentReview(root, runnerOptions)).status, 'no-op');
+  assert.equal(calls, 0);
+  const patch = Buffer.from('Synthetic patch data; never executed');
+  fs.writeFileSync(path.join(root, path.dirname(options.reportPath), 'proposal.patch'), patch);
+  report.outcome = 'proposed';
+  report.proposal = validateDocumentationProposal([documentationChange()], patch);
+  write(options.reportPath, report);
+  const reviewed = await runBoundedAgentReview(root, runnerOptions);
+  assert.equal(reviewed.status, 'reviewed', JSON.stringify(reviewed.errors));
+  assert.equal(reviewed.response.humanApprovalRequired, true);
+  assert.equal(reviewed.automaticPublication, false);
+  assert.equal(reviewed.invocations, 1);
+  assert.equal(reviewed.usage.model, 'synthetic-model');
+  assert.equal(reviewed.patchSha256, report.proposal.patchSha256);
+  assert.equal(reviewed.cleanup, true);
+  assert.equal(fs.existsSync(temporary), false);
+  assert.equal(JSON.stringify(reviewed).includes(env.SLIPSTREAM_AGENT_REVIEW_TOKEN), false);
+  assert.equal((await runBoundedAgentReview(root, runnerOptions)).status, 'failed');
+  assert.equal(calls, 1);
+});
+
+test('bounded agent review fails closed and cleans up without retrying or leaking diagnostics', async (context) => {
+  for (const failure of ['runtime', 'process', 'response', 'usage', 'cancelled', 'credential']) {
+    const { root, write, report, options } = maintenanceEvidence(context);
+    const patch = Buffer.from('Synthetic patch data; never executed');
+    fs.writeFileSync(path.join(root, path.dirname(options.reportPath), 'proposal.patch'), patch);
+    report.outcome = 'proposed';
+    report.proposal = validateDocumentationProposal([documentationChange()], patch);
+    write(options.reportPath, report);
+    const token = `github_pat_${'synthetic'.repeat(4)}`;
+    const controller = new AbortController();
+    let temporary;
+    let calls = 0;
+    const reviewed = await runBoundedAgentReview(root, {
+      ...options,
+      event: { ...options.event, schedule: '0 7 * * 1' },
+      env: {
+        ...options.env,
+        SLIPSTREAM_AGENT_REVIEW_ENABLED: 'true',
+        SLIPSTREAM_AGENT_REVIEW_NO_OVERAGE_CONFIRMED: 'true',
+        SLIPSTREAM_AGENT_REVIEW_MODEL: 'synthetic-model',
+        SLIPSTREAM_AGENT_REVIEW_TOKEN: token,
+      },
+      signal: controller.signal,
+      prepareRuntime: async (_archive, directory) => {
+        temporary = directory;
+        if (failure === 'runtime') throw new Error(token);
+        if (failure === 'cancelled') controller.abort();
+        return path.join(directory, 'synthetic-cli');
+      },
+      runCommand: async (_command, args) => {
+        calls++;
+        if (failure === 'process') throw new Error(token);
+        if (failure === 'response') return Buffer.from('invalid private diagnostic');
+        if (failure !== 'usage') {
+          fs.writeFileSync(
+            args[args.indexOf('--usage-output-file') + 1],
+            JSON.stringify(agentReviewUsage()),
+          );
+        }
+        const prepared = prepareAgentReview(root, options);
+        return Buffer.from(
+          JSON.stringify({
+            schemaVersion: 1,
+            revision: options.revision,
+            inputSha256: prepared.inputSha256,
+            patchSha256: report.proposal.patchSha256,
+            decision: failure === 'credential' ? 'changes-requested' : 'no-objection',
+            findings:
+              failure === 'credential'
+                ? [{ file: report.proposal.files[0].path, severity: 'warning', message: token }]
+                : [],
+          }).replaceAll('_', '\\u005f'),
+        );
+      },
+    });
+    assert.equal(reviewed.status, 'failed', failure);
+    assert.equal(reviewed.response, null, failure);
+    assert.equal(reviewed.usage, null, failure);
+    assert.equal(reviewed.cleanup, true, failure);
+    assert.equal(fs.existsSync(temporary), false, failure);
+    assert.equal(JSON.stringify(reviewed).includes(token), false, failure);
+    assert.equal(JSON.stringify(reviewed).includes('private diagnostic'), false, failure);
+    assert.equal(calls, ['runtime', 'cancelled'].includes(failure) ? 0 : 1, failure);
+  }
+});
+
+test('bounded agent review accepts only verified first-attempt proposals and skips no-ops', (context) => {
+  const { root, write, report, options } = maintenanceEvidence(context);
+  const noOp = prepareAgentReview(root, options);
+  assert.equal(noOp.status, 'no-op');
+  assert.equal(noOp.input, null);
+  const patch = Buffer.from('Synthetic patch data; never executed');
+  const patchPath = options.reportPath.replace('report.json', 'proposal.patch');
+  fs.writeFileSync(path.join(root, patchPath), patch);
+  report.outcome = 'proposed';
+  report.proposal = validateDocumentationProposal([documentationChange()], patch);
+  write(options.reportPath, report);
+  const prepared = prepareAgentReview(root, options);
+  assert.equal(prepared.status, 'ready');
+  assert.equal(prepared.inputSha256, createHash('sha256').update(prepared.input).digest('hex'));
+  const payload = JSON.parse(prepared.input);
+  assert.equal(payload.revision, options.revision);
+  assert.deepEqual(payload.proposal, report.proposal);
+  assert.equal(payload.patch, patch.toString());
+  assert.throws(
+    () =>
+      prepareAgentReview(root, {
+        ...options,
+        steps: { ...options.steps, audit: { outcome: 'failure' } },
+      }),
+    /verified first-attempt/,
+  );
+  report.attempt = '2';
+  write(options.reportPath, report);
+  assert.throws(
+    () =>
+      prepareAgentReview(root, {
+        ...options,
+        env: { ...options.env, GITHUB_RUN_ATTEMPT: '2' },
+      }),
+    /verified first-attempt/,
+  );
+  report.attempt = '1';
+  write(options.reportPath, report);
+  fs.appendFileSync(path.join(root, patchPath), ' changed');
+  assert.throws(() => prepareAgentReview(root, options), /verified first-attempt/);
+});
+
+test('bounded agent review rejects malformed, unbound, oversized and executable responses', () => {
+  const proposal = validateDocumentationProposal([documentationChange()], Buffer.from('patch'));
+  const prepared = {
+    evidence: { revision: META.revision, documentation: { proposal } },
+    inputSha256: 'b'.repeat(64),
+  };
+  const response = {
+    schemaVersion: 1,
+    revision: META.revision,
+    inputSha256: prepared.inputSha256,
+    patchSha256: proposal.patchSha256,
+    decision: 'no-objection',
+    findings: [],
+  };
+  const validate = (value) =>
+    validateAgentReviewResponse(Buffer.from(JSON.stringify(value)), prepared);
+  assert.equal(validate(response).humanApprovalRequired, true);
+  assert.equal(validate(response).automaticPublication, false);
+  const finding = { file: proposal.files[0].path, severity: 'error', message: 'Synthetic concern' };
+  assert.equal(
+    validate({ ...response, decision: 'changes-requested', findings: [finding] }).decision,
+    'changes-requested',
+  );
+  for (const invalid of [
+    { schemaVersion: 2 },
+    { revision: 'c'.repeat(40) },
+    { inputSha256: 'c'.repeat(64) },
+    { patchSha256: 'c'.repeat(64) },
+    { decision: 'approved' },
+    { decision: 'changes-requested' },
+    { findings: [finding] },
+    { patch: 'git push' },
+    { humanApprovalRequired: false },
+  ])
+    assert.throws(() => validate({ ...response, ...invalid }));
+  for (const invalid of [
+    { file: '../../secrets' },
+    { file: 'README.md' },
+    { severity: 'critical' },
+    { message: '' },
+    { message: 'x'.repeat(2_001) },
+    { message: '\u001b[31m' },
+    { command: 'git push' },
+  ])
+    assert.throws(() =>
+      validate({
+        ...response,
+        decision: 'changes-requested',
+        findings: [{ ...finding, ...invalid }],
+      }),
+    );
+  assert.throws(() =>
+    validate({ ...response, decision: 'changes-requested', findings: Array(11).fill(finding) }),
+  );
+  for (const invalid of [
+    Buffer.alloc(0),
+    Buffer.alloc(65_537),
+    Buffer.from([255]),
+    Buffer.from('```json\n{}\n```'),
+  ]) {
+    assert.throws(() => validateAgentReviewResponse(invalid, prepared));
+  }
+});
+
 test('maintenance aggregation needs actual success from every independent check', (context) => {
   const { root, write, options } = maintenanceEvidence(context);
   const successful = collectMaintenanceEvidence(root, options);
@@ -3341,7 +3806,7 @@ test('maintenance workflow stays opt-in, read-only, bounded and default-branch-o
     'cancel-in-progress': false,
   });
   assert.equal(job.if, "${{ vars.SLIPSTREAM_MAINTENANCE_ENABLED == 'true' }}");
-  assert.equal(job['timeout-minutes'], 20);
+  assert.equal(job['timeout-minutes'], 30);
   assert.equal(job.permissions, undefined);
   const context = job.steps[0];
   assert.equal(context.id, 'context');
@@ -3364,6 +3829,8 @@ test('maintenance workflow stays opt-in, read-only, bounded and default-branch-o
     'docs',
     'proof',
     'verify',
+    'review_runtime',
+    'agent_review',
   ]);
   for (const name of ['tests', 'audit', 'docs', 'proof']) {
     assert.equal(steps[name].if, "${{ !cancelled() && steps.build.outcome == 'success' }}");
@@ -3394,12 +3861,67 @@ test('maintenance workflow stays opt-in, read-only, bounded and default-branch-o
   assert.deepEqual(uploads[0].with.path.trim().split('\n'), [
     'test-results/maintenance/run-*/report.json',
     'test-results/maintenance/run-*/summary.json',
+    'test-results/maintenance/run-*/agent-review.json',
   ]);
   assert.equal(
     uploads[1].if,
     "${{ !cancelled() && steps.verify.outcome == 'success' && steps.verify.outputs.proposal_path != '' }}",
   );
   assert.equal(uploads[1].with.path, '${{ steps.verify.outputs.proposal_path }}');
+});
+
+test('bounded agent review workflow exposes its dedicated credential only after verified opt-in preparation', () => {
+  const workflow = parse(
+    fs.readFileSync(path.join(REPO, '.github/workflows/maintenance.yml'), 'utf8'),
+  );
+  const job = workflow.jobs.maintenance;
+  const steps = Object.fromEntries(
+    job.steps.filter((step) => step.id).map((step) => [step.id, step]),
+  );
+  const runtime = steps.review_runtime;
+  const review = steps.agent_review;
+  assert.match(runtime.if, /!cancelled\(\)/);
+  assert.match(runtime.if, /steps\.verify\.outcome == 'success'/);
+  assert.match(runtime.if, /steps\.verify\.outputs\.proposal_path != ''/);
+  assert.match(runtime.if, /github\.event_name == 'schedule'/);
+  assert.match(runtime.if, /github\.run_attempt == '1'/);
+  assert.match(runtime.if, /vars\.SLIPSTREAM_AGENT_REVIEW_ENABLED == 'true'/);
+  assert.equal(runtime.run, 'node scripts/check-agent-review.mjs --prepare-runtime');
+  assert.equal(runtime['timeout-minutes'], 2);
+  assert.equal(
+    review.if,
+    "${{ !cancelled() && steps.review_runtime.outcome == 'success' && steps.review_runtime.outputs.archive_path != '' }}",
+  );
+  assert.equal(review['timeout-minutes'], 7);
+  assert.equal(review.run, 'node scripts/check-agent-review.mjs --review');
+  for (const step of [runtime, review]) {
+    assert.equal(step.env.CI_STEPS, '${{ toJSON(steps) }}');
+    assert.equal(step.env.MAINTENANCE_REPORT, '${{ steps.docs.outputs.report_path }}');
+    assert.equal(
+      step.env.SLIPSTREAM_AGENT_REVIEW_MODEL,
+      '${{ vars.SLIPSTREAM_AGENT_REVIEW_MODEL }}',
+    );
+    assert.equal(
+      step.env.SLIPSTREAM_AGENT_REVIEW_NO_OVERAGE_CONFIRMED,
+      '${{ vars.SLIPSTREAM_AGENT_REVIEW_NO_OVERAGE_CONFIRMED }}',
+    );
+  }
+  assert.equal(
+    review.env.SLIPSTREAM_AGENT_REVIEW_ARCHIVE,
+    '${{ steps.review_runtime.outputs.archive_path }}',
+  );
+  assert.equal(
+    review.env.SLIPSTREAM_AGENT_REVIEW_TOKEN,
+    '${{ secrets.SLIPSTREAM_AGENT_REVIEW_TOKEN }}',
+  );
+  for (const holder of [workflow, job, ...job.steps.filter((step) => step !== review)]) {
+    assert.equal(JSON.stringify(holder.env ?? {}).includes('secrets.'), false);
+    assert.equal(holder.env?.SLIPSTREAM_AGENT_REVIEW_TOKEN, undefined);
+  }
+  const cleanup = job.steps.find((step) => step.run?.endsWith('--cleanup-runtime'));
+  assert.equal(cleanup.if, "${{ always() && steps.docs.outputs.report_path != '' }}");
+  assert.equal(cleanup['timeout-minutes'], 1);
+  assert.deepEqual(workflow.permissions, { contents: 'read' });
 });
 
 test('Dependabot version updates stay paused pending owner-verified enforcement', () => {
