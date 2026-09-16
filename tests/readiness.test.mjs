@@ -32,6 +32,8 @@ import {
   collectImprovementReports,
   validateImprovementRegistry,
   verifyImprovementRepair,
+  validateAgentReviewRepairLinks,
+  verifyAgentReviewRepair,
   improvementIdentity,
   runImprovementReview,
 } from '../scripts/check-improvement.mjs';
@@ -1550,6 +1552,60 @@ test('improvement repair history requires a merged fix and final-head human appr
   assert.deepEqual(verifyImprovementRepair(proof, undefined).missing, ['repair-reference']);
 });
 
+test('improvement agent-review repairs reject invalid links before reading evidence', async () => {
+  const link = {
+    findingId: 'a'.repeat(64),
+    reviewRunId: '122',
+    reviewReportPath: 'run-synthetic/agent-review.json',
+    reviewReportSha256: 'b'.repeat(64),
+    dispositionsPath: '.github/agent-review-dispositions/synthetic.json',
+    dispositionsSha256: 'c'.repeat(64),
+    fixCommit: 'd'.repeat(40),
+    pullRequest: 7,
+    afterRunId: '124',
+  };
+  assert.deepEqual(validateAgentReviewRepairLinks([link]), [link]);
+  assert.deepEqual(validateAgentReviewRepairLinks([]), []);
+  assert.throws(() => validateAgentReviewRepairLinks([link, link]));
+  assert.throws(() => validateAgentReviewRepairLinks(Array(5).fill(link)));
+  for (const invalid of [
+    null,
+    [],
+    {},
+    ...[
+      { findingId: 'HEAD' },
+      { reviewRunId: 122 },
+      { afterRunId: '122' },
+      { afterRunId: '9007199254740992' },
+      { reviewReportPath: '../agent-review.json' },
+      { reviewReportSha256: 'x'.repeat(64) },
+      { dispositionsPath: 'docs/decision.json' },
+      { dispositionsSha256: 'x'.repeat(64) },
+      { fixCommit: 'main' },
+      { pullRequest: 0 },
+      { automaticRepair: true },
+    ].map((change) => ({ ...link, ...change })),
+  ]) {
+    let calls = 0;
+    const result = await verifyAgentReviewRepair({
+      repository: 'Vmoosky/SlipStream',
+      branch: 'main',
+      link: invalid,
+      client: {
+        json: async () => {
+          calls++;
+          throw new Error('Must not request');
+        },
+      },
+    });
+    assert.equal(result.verified, false);
+    assert.equal(result.status, 'unresolved');
+    assert.equal(result.resolutionVerified, false);
+    assert.deepEqual(result.missing, ['repair-link']);
+    assert.equal(calls, 0);
+  }
+});
+
 test('improvement archives read bounded JSON without extracting or accepting unsafe names', async (context) => {
   const { root, sentinel } = maintenanceRepository(context);
   const archive = (extra = []) =>
@@ -1632,6 +1688,8 @@ test('improvement downloads authenticate only to GitHub and verify the archive d
       resources.push(url);
       assert.equal(options.method, 'GET');
       assert.equal(options.redirect, 'manual');
+      assert.equal(options.headers.Authorization, 'Bearer synthetic-token');
+      assert.ok(url.startsWith('https://api.github.com/repos/Vmoosky/SlipStream/'));
       return new Response('{}');
     },
   );
@@ -1639,18 +1697,27 @@ test('improvement downloads authenticate only to GitHub and verify the archive d
     '/pulls/7',
     '/pulls/7/reviews?per_page=100',
     '/pulls/7/commits?per_page=100',
+    '/pulls/7/files?per_page=100',
+    `/git/commits/${'c'.repeat(40)}`,
+    `/git/trees/${'d'.repeat(40)}?recursive=1`,
+    `/git/blobs/${'e'.repeat(40)}`,
     `/compare/${'a'.repeat(40)}...${'d'.repeat(40)}?per_page=100`,
   ])
     await metadata.json(resource);
-  assert.equal(resources.length, 4);
+  assert.equal(resources.length, 8);
   for (const resource of [
     '/issues/7',
     '/pulls/7/comments',
     '/pulls/7?other=true',
+    '/pulls/7/files?per_page=101',
+    '/git/commits/main',
+    `/git/blobs/${'e'.repeat(40)}?ref=main`,
+    `/git/trees/${'d'.repeat(40)}?recursive=1&other=true`,
+    `/git/trees/../${'d'.repeat(40)}?recursive=1`,
     '/compare/HEAD...main',
   ])
     await assert.rejects(metadata.json(resource));
-  assert.equal(resources.length, 4);
+  assert.equal(resources.length, 8);
 });
 
 function improvementHistory(context) {
@@ -1740,6 +1807,390 @@ function improvementHistory(context) {
   };
   return { root, emptyTree, runs, artifactLists, archives, calls, client };
 }
+
+function agentReviewRepairHistory(context) {
+  const history = improvementHistory(context);
+  const review = agentReviewDispositionReport();
+  review.runId = '122';
+  review.findingIds = agentReviewFindingIds(review);
+  const reportBytes = Buffer.from(`${JSON.stringify(review, null, 2)}\n`);
+  const record = prepareAgentReviewDispositions(reportBytes);
+  record.entries.push({
+    findingId: review.findingIds[0],
+    disposition: 'accepted',
+    reason: 'Synthetic acceptance, not live repair evidence',
+    recordedBy: 'synthetic-reviewer',
+    recordedAt: '2026-09-16T00:00:02.000Z',
+  });
+  const recordBytes = Buffer.from(JSON.stringify(record));
+  const sha256 = (bytes) => createHash('sha256').update(bytes).digest('hex');
+  const blob = {
+    sha: createHash('sha1')
+      .update(`blob ${recordBytes.length}\0`)
+      .update(recordBytes)
+      .digest('hex'),
+    encoding: 'base64',
+    content: recordBytes.toString('base64'),
+    size: recordBytes.length,
+  };
+  const link = {
+    findingId: review.findingIds[0],
+    reviewRunId: '122',
+    reviewReportPath: 'run-synthetic/agent-review.json',
+    reviewReportSha256: sha256(reportBytes),
+    dispositionsPath: '.github/agent-review-dispositions/synthetic.json',
+    dispositionsSha256: sha256(recordBytes),
+    fixCommit: 'c'.repeat(40),
+    pullRequest: 7,
+    afterRunId: '124',
+  };
+  const run = { ...history.runs[1], run_started_at: '2026-09-16T00:00:05Z' };
+  const reviewRun = {
+    ...run,
+    id: 122,
+    path: '.github/workflows/maintenance.yml',
+    event: 'schedule',
+    head_sha: review.revision,
+    run_started_at: review.startedAt,
+    updated_at: '2026-09-16T00:00:01.500Z',
+  };
+  const details = improvementRepairEvidence(
+    { before: { revision: review.revision }, after: { revision: run.head_sha } },
+    link,
+  );
+  details.pull.merged_at = '2026-09-16T00:00:04Z';
+  details.pull.changed_files = 2;
+  details.reviews[0].submitted_at = '2026-09-16T00:00:03Z';
+  fs.mkdirSync(path.join(history.root, 'run-synthetic'));
+  fs.writeFileSync(path.join(history.root, link.reviewReportPath), reportBytes);
+  const reviewArchive = execFileSync(
+    'git',
+    [
+      'archive',
+      '--format=zip',
+      '--prefix=run-synthetic/',
+      `--add-file=${link.reviewReportPath}`,
+      '--prefix=',
+      history.emptyTree,
+    ],
+    { cwd: history.root },
+  );
+  const state = {
+    link,
+    reviewRun,
+    run,
+    details,
+    blob,
+    commit: { sha: link.fixCommit, tree: { sha: 'f'.repeat(40) } },
+    tree: {
+      sha: 'f'.repeat(40),
+      truncated: false,
+      tree: [
+        { path: '.github', type: 'tree', mode: '040000' },
+        { path: '.github/agent-review-dispositions', type: 'tree', mode: '040000' },
+        { path: link.dispositionsPath, type: 'blob', mode: '100644', sha: blob.sha },
+        { path: 'docs', type: 'tree', mode: '040000' },
+        {
+          path: review.response.findings[0].file,
+          type: 'blob',
+          mode: '100644',
+          sha: 'e'.repeat(40),
+        },
+      ],
+    },
+    files: [
+      {
+        filename: review.response.findings[0].file,
+        status: 'modified',
+        changes: 1,
+        sha: 'e'.repeat(40),
+      },
+      { filename: link.dispositionsPath, status: 'added', changes: 1, sha: blob.sha },
+    ],
+    reviewArtifact: {
+      id: 1122,
+      name: 'maintenance-evidence-122-1',
+      expired: false,
+      size_in_bytes: reviewArchive.length,
+      digest: `sha256:${sha256(reviewArchive)}`,
+      workflow_run: { id: 122, head_sha: review.revision },
+    },
+    ciArtifact: structuredClone(history.artifactLists.get(124)[0]),
+  };
+  state.mergeCommit = { sha: run.head_sha, tree: { sha: '9'.repeat(40) } };
+  state.mergeTree = { ...structuredClone(state.tree), sha: state.mergeCommit.tree.sha };
+  let pullReads = 0;
+  const client = {
+    async json(resource) {
+      history.calls.push(resource);
+      if (resource === '/actions/runs/122') return structuredClone(state.reviewRun);
+      if (resource === '/actions/runs/124') return structuredClone(state.run);
+      if (resource === '/actions/runs/122/artifacts?per_page=20')
+        return { total_count: 1, artifacts: [structuredClone(state.reviewArtifact)] };
+      if (resource === '/actions/runs/124/artifacts?per_page=20')
+        return { total_count: 1, artifacts: [structuredClone(state.ciArtifact)] };
+      if (resource === '/pulls/7') {
+        pullReads++;
+        return structuredClone(
+          pullReads % 2 === 0 && state.latestPull ? state.latestPull : state.details.pull,
+        );
+      }
+      if (resource === '/pulls/7/commits?per_page=100')
+        return structuredClone(state.details.commits);
+      if (resource === '/pulls/7/reviews?per_page=100')
+        return structuredClone(state.details.reviews);
+      if (resource === '/pulls/7/files?per_page=100') return structuredClone(state.files);
+      if (resource.startsWith('/compare/')) return structuredClone(state.details.comparison);
+      if (resource === `/git/commits/${link.fixCommit}`) return structuredClone(state.commit);
+      if (resource === `/git/commits/${run.head_sha}`) return structuredClone(state.mergeCommit);
+      if (resource === `/git/trees/${state.commit.tree.sha}?recursive=1`)
+        return structuredClone(state.tree);
+      if (resource === `/git/trees/${state.mergeCommit.tree.sha}?recursive=1`)
+        return structuredClone(state.mergeTree);
+      if (resource.startsWith('/git/blobs/')) return structuredClone(state.blob);
+      return history.client.json(resource);
+    },
+    async archive(artifact) {
+      if (artifact.id === 1122)
+        return state.tamperReviewArchive ? Buffer.from('invalid') : reviewArchive;
+      if (state.tamperCiArchive) return Buffer.from('invalid');
+      return history.client.archive(artifact);
+    },
+  };
+  return {
+    history,
+    state,
+    client,
+    review,
+    record,
+    reportBytes,
+    ciReport: JSON.parse(fs.readFileSync(path.join(history.root, 'ci-required.json'), 'utf8')),
+    verify: () => {
+      pullReads = 0;
+      return verifyAgentReviewRepair({
+        repository: 'Vmoosky/SlipStream',
+        branch: 'main',
+        client,
+        link: state.link,
+      });
+    },
+    setRecord(value) {
+      const bytes = Buffer.from(JSON.stringify(value));
+      state.blob = {
+        sha: createHash('sha1').update(`blob ${bytes.length}\0`).update(bytes).digest('hex'),
+        encoding: 'base64',
+        content: bytes.toString('base64'),
+        size: bytes.length,
+      };
+      state.tree.tree.find((entry) => entry.path === link.dispositionsPath).sha = state.blob.sha;
+      state.mergeTree.tree.find((entry) => entry.path === link.dispositionsPath).sha =
+        state.blob.sha;
+      state.files[1].sha = state.blob.sha;
+      state.link.dispositionsSha256 = sha256(bytes);
+    },
+    setCiReport(value) {
+      fs.writeFileSync(path.join(history.root, 'ci-required.json'), JSON.stringify(value));
+      const bytes = execFileSync(
+        'git',
+        ['archive', '--format=zip', '--add-file=ci-required.json', history.emptyTree],
+        { cwd: history.root },
+      );
+      history.archives.set(state.ciArtifact.id, bytes);
+      state.ciArtifact.size_in_bytes = bytes.length;
+      state.ciArtifact.digest = `sha256:${sha256(bytes)}`;
+    },
+  };
+}
+
+test('improvement agent-review repairs bind real archive bytes, reviewed decisions and merge CI', async (context) => {
+  const fixture = agentReviewRepairHistory(context);
+  const before = structuredClone(fixture.state);
+  const result = await fixture.verify();
+  assert.equal(result.verified, true, JSON.stringify(result));
+  assert.equal(result.status, 'verified-link');
+  assert.deepEqual(result.missing, []);
+  assert.equal(result.review.reportSha256, fixture.state.link.reviewReportSha256);
+  assert.equal(result.dispositionsSha256, fixture.state.link.dispositionsSha256);
+  assert.equal(result.dispositionBlob, fixture.state.blob.sha);
+  assert.equal(result.findingBlob, fixture.state.files[0].sha);
+  assert.equal(result.fixCommit, fixture.state.link.fixCommit);
+  assert.equal(result.mergeCommit, fixture.state.run.head_sha);
+  assert.equal(result.ci.runId, '124');
+  assert.equal(result.reviewProvenanceVerified, true);
+  assert.equal(result.dispositionReviewVerified, true);
+  assert.equal(result.ciVerified, true);
+  assert.equal(result.recordedIdentityVerified, false);
+  assert.equal(result.resolutionVerified, false);
+  assert.equal(result.automaticRepair, false);
+  assert.equal(result.automaticPublication, false);
+  assert.equal(result.humanApprovalRequired, true);
+  assert.equal(result.artifacts.length, 2);
+  assert.equal(JSON.stringify(result).includes('Synthetic acceptance'), false);
+  assert.equal(JSON.stringify(result).includes('synthetic-reviewer'), false);
+  assert.deepEqual(fixture.state, before);
+  assert.deepEqual(
+    fs.readFileSync(path.join(fixture.history.root, fixture.state.link.reviewReportPath)),
+    fixture.reportBytes,
+  );
+  assert.equal(fixture.history.calls.filter((resource) => resource === '/pulls/7').length, 2);
+});
+
+test('improvement agent-review repairs are optional registry checks without implicit success', async (context) => {
+  const fixture = agentReviewRepairHistory(context);
+  const options = { repository: 'Vmoosky/SlipStream', branch: 'main', client: fixture.client };
+  const empty = await collectImprovementReports(options);
+  assert.equal(empty.agentReviewRepairStatus, 'not-requested');
+  assert.deepEqual(empty.agentReviewRepairs, []);
+  assert.equal(
+    fixture.history.calls.some((resource) => /^\/(pulls|git)\//.test(resource)),
+    false,
+  );
+  const registry = { schemaVersion: 1, regressions: [], agentReviewRepairs: [fixture.state.link] };
+  assert.deepEqual(validateImprovementRegistry(registry), []);
+  const verified = await collectImprovementReports({ ...options, registry });
+  assert.equal(verified.status, 'reported');
+  assert.equal(verified.agentReviewRepairStatus, 'verified');
+  assert.equal(verified.agentReviewRepairs[0].status, 'verified-link');
+  fixture.state.details.reviews = [];
+  const unresolved = await collectImprovementReports({ ...options, registry });
+  assert.equal(unresolved.status, 'insufficient-evidence');
+  assert.equal(unresolved.agentReviewRepairStatus, 'insufficient-evidence');
+  assert.equal(unresolved.agentReviewRepairs[0].status, 'unresolved');
+  const before = fixture.history.calls.length;
+  for (const invalid of [
+    null,
+    {},
+    [fixture.state.link, fixture.state.link],
+    [{ verified: true }],
+  ]) {
+    await assert.rejects(
+      collectImprovementReports({
+        ...options,
+        registry: { ...registry, agentReviewRepairs: invalid },
+      }),
+    );
+  }
+  assert.equal(fixture.history.calls.length, before);
+});
+
+test('improvement agent-review repairs reject authenticated but invalid aggregate CI reports', async (context) => {
+  const fixture = agentReviewRepairHistory(context);
+  for (const change of [
+    { schemaVersion: 2 },
+    { kind: 'security-validation' },
+    { runId: '125' },
+    { revision: 'e'.repeat(40) },
+    { headRevision: 'e'.repeat(40) },
+    { baseRevision: 'main' },
+    { attempt: '2' },
+    { eventName: 'pull_request' },
+    { workflow: 'Vmoosky/SlipStream/.github/workflows/ci.yml@refs/heads/other' },
+    { passed: false },
+    { passed: 'true' },
+    { errors: ['unit: required job did not succeed'] },
+  ]) {
+    fixture.setCiReport({ ...fixture.ciReport, ...change });
+    const result = await fixture.verify();
+    assert.equal(result.verified, false, JSON.stringify(change));
+    assert.equal(result.status, 'unresolved');
+    assert.deepEqual(result.missing, ['passing-merge-ci']);
+  }
+  fixture.setCiReport(fixture.ciReport);
+  assert.equal((await fixture.verify()).verified, true);
+  const result = await verifyAgentReviewRepair({
+    repository: 'Vmoosky/SlipStream',
+    branch: 'main',
+    link: fixture.state.link,
+    client: {
+      json: async () => {
+        throw new Error('synthetic-private-upstream-response');
+      },
+    },
+  });
+  assert.equal(result.status, 'unresolved');
+  assert.deepEqual(result.missing, ['original-review-artifact']);
+  assert.equal(JSON.stringify(result).includes('synthetic-private-upstream-response'), false);
+});
+
+test('improvement agent-review repairs leave invalid or incomplete evidence unresolved', async (context) => {
+  const fixture = agentReviewRepairHistory(context);
+  const before = structuredClone(fixture.state);
+  for (const mutate of [
+    (value) => (value.reviewRun.event = 'workflow_dispatch'),
+    (value) => (value.reviewRun.run_attempt = 2),
+    (value) => (value.reviewRun.head_repository.full_name = 'other/fork'),
+    (value) => (value.reviewRun.head_sha = 'e'.repeat(40)),
+    (value) => (value.reviewRun.updated_at = '2026-09-16T00:00:00Z'),
+    (value) => (value.reviewArtifact.expired = true),
+    (value) => (value.reviewArtifact.workflow_run.id = 999),
+    (value) => (value.tamperReviewArchive = true),
+    (value) => (value.link.reviewReportSha256 = '0'.repeat(64)),
+    (value) => (value.link.dispositionsSha256 = '0'.repeat(64)),
+    (value) => (value.link.findingId = '0'.repeat(64)),
+    (value) => (value.details.pull.merged = false),
+    (value) => (value.details.pull.head.sha = 'e'.repeat(40)),
+    (value) => (value.details.pull.base.ref = 'other'),
+    (value) => (value.commit.sha = 'e'.repeat(40)),
+    (value) => (value.tree.truncated = true),
+    (value) => (value.tree.tree[1].mode = '120000'),
+    (value) => (value.tree.tree[2].mode = '120000'),
+    (value) => (value.tree.tree[4].sha = '0'.repeat(40)),
+    (value) => value.tree.tree.push(value.tree.tree[2]),
+    (value) => (value.blob.size = 65_537),
+    (value) => (value.blob.content = Buffer.from('{}').toString('base64')),
+    (value) => (value.files[0].filename = 'docs/unrelated.md'),
+    (value) => (value.files[0].changes = 0),
+    (value) => (value.files[1].sha = 'e'.repeat(40)),
+    (value) => (value.details.pull.changed_files = 100),
+    (value) => (value.run.run_attempt = 2),
+    (value) => (value.run.event = 'pull_request'),
+    (value) => (value.run.conclusion = 'failure'),
+    (value) => (value.run.head_sha = 'e'.repeat(40)),
+    (value) => (value.run.run_started_at = '2026-09-16T00:00:03Z'),
+    (value) => (value.ciArtifact.expired = true),
+    (value) => (value.tamperCiArchive = true),
+    (value) => (value.details.commits = []),
+    (value) => (value.details.comparison.merge_base_commit.sha = 'e'.repeat(40)),
+    (value) => (value.details.reviews = []),
+    (value) => (value.details.reviews[0].commit_id = 'e'.repeat(40)),
+    (value) => (value.details.reviews[0].user.id = value.details.pull.user.id),
+    (value) => (value.details.reviews[0].user.type = 'Bot'),
+    (value) => (value.details.reviews[0].state = 'DISMISSED'),
+    (value) => (value.details.reviews[0].submitted_at = '2026-09-16T00:00:05Z'),
+    (value) => (value.details.reviews[0].submitted_at = '2026-09-16T00:00:01Z'),
+    (value) =>
+      value.details.reviews.push({
+        ...value.details.reviews[0],
+        id: 11,
+        state: 'CHANGES_REQUESTED',
+      }),
+    (value) => (value.mergeCommit.sha = '0'.repeat(40)),
+    (value) => (value.mergeTree.tree[2].sha = '0'.repeat(40)),
+    (value) => (value.mergeTree.tree[4].sha = '0'.repeat(40)),
+    (value) => (value.mergeTree.tree[4].mode = '120000'),
+    (value) => (value.latestPull = { ...value.details.pull, merge_commit_sha: 'e'.repeat(40) }),
+  ]) {
+    for (const key of Object.keys(fixture.state)) delete fixture.state[key];
+    Object.assign(fixture.state, structuredClone(before));
+    mutate(fixture.state);
+    const result = await fixture.verify();
+    assert.equal(result.verified, false, String(mutate));
+    assert.equal(result.status, 'unresolved');
+    assert.equal(result.resolutionVerified, false);
+    assert.equal(result.missing.length, 1);
+  }
+  for (const disposition of ['rejected', 'deferred', 'untriaged']) {
+    for (const key of Object.keys(fixture.state)) delete fixture.state[key];
+    Object.assign(fixture.state, structuredClone(before));
+    const record = structuredClone(fixture.record);
+    if (disposition === 'untriaged') record.entries = [];
+    else record.entries[0].disposition = disposition;
+    fixture.setRecord(record);
+    const result = await fixture.verify();
+    assert.equal(result.verified, false);
+    assert.deepEqual(result.missing, ['reviewed-disposition']);
+  }
+});
 
 test('improvement retained evidence requires an authenticated producer and intact original archives', async (context) => {
   const history = improvementHistory(context);
