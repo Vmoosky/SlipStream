@@ -10,6 +10,10 @@ import {
   UNIT_JOBS,
   UNIT_REPORTS,
 } from './check-ci.mjs';
+import {
+  prepareAgentReviewDispositions,
+  validateAgentReviewDispositions,
+} from './check-agent-review.mjs';
 
 const ROOT = fileURLToPath(new URL('../', import.meta.url));
 
@@ -28,12 +32,13 @@ export const IMPROVEMENT_LIMITS = Object.freeze({
   collectionTimeoutMs: 180_000,
   runsPerWorkflow: 10,
   regressions: 4,
+  agentReviewRepairs: 4,
   retentionDays: 90,
   retainedArchives: 16,
   retainedBytes: 4 * 1024 * 1024,
 });
 
-export function readImprovementArchive(bytes, files, allowedFiles) {
+export function readImprovementArchive(bytes, files, allowedFiles, rawFiles = []) {
   return new Promise((resolve, reject) => {
     let archive;
     const fail = () => {
@@ -93,7 +98,11 @@ export function readImprovementArchive(bytes, files, allowedFiles) {
             stream.on('end', () => {
               try {
                 if (size !== entry.uncompressedSize) return fail();
-                reports.set(name, JSON.parse(Buffer.concat(chunks).toString('utf8')));
+                const contents = Buffer.concat(chunks);
+                reports.set(
+                  name,
+                  rawFiles.includes(name) ? contents : JSON.parse(contents.toString('utf8')),
+                );
                 archive.readEntry();
               } catch {
                 fail();
@@ -303,7 +312,6 @@ export function verifyImprovementRepair(proof, repair, evidence) {
     automaticRepair: false,
   };
   if (repair === undefined) return { ...result, missing: ['repair-reference'] };
-  let missing = 'verified-regression';
   try {
     requireEvidence(proof?.kind === 'regression-proof' && proof.verified === true);
     requireEvidence(
@@ -311,7 +319,18 @@ export function verifyImprovementRepair(proof, repair, evidence) {
         /^[a-f0-9]{40}$/.test(proof.after?.revision) &&
         proof.before.revision !== proof.after.revision,
     );
-    missing = 'repair-reference';
+    return {
+      ...result,
+      ...verifyReviewedFix(proof.before.revision, proof.after.revision, repair, evidence),
+    };
+  } catch {
+    return { ...result, missing: ['verified-regression'] };
+  }
+}
+
+function verifyReviewedFix(sourceRevision, mergeRevision, repair, evidence) {
+  let missing = 'repair-reference';
+  try {
     requireEvidence(/^[a-f0-9]{40}$/.test(repair?.fixCommit));
     requireEvidence(Number.isSafeInteger(repair.pullRequest) && repair.pullRequest > 0);
     missing = 'repair-history';
@@ -320,7 +339,7 @@ export function verifyImprovementRepair(proof, repair, evidence) {
     requireEvidence(typeof branch === 'string' && /^[\w./-]+$/.test(branch));
     missing = 'merged-pull-request';
     requireEvidence(pull?.number === repair.pullRequest && pull.merged === true);
-    requireEvidence(pull.state === 'closed' && pull.merge_commit_sha === proof.after.revision);
+    requireEvidence(pull.state === 'closed' && pull.merge_commit_sha === mergeRevision);
     requireEvidence(
       pull.base?.repo?.full_name === repository &&
         pull.head?.repo?.full_name === repository &&
@@ -345,8 +364,8 @@ export function verifyImprovementRepair(proof, repair, evidence) {
     missing = 'failure-merge-ancestry';
     requireEvidence(
       comparison?.status === 'ahead' &&
-        comparison.base_commit?.sha === proof.before.revision &&
-        comparison.merge_base_commit?.sha === proof.before.revision,
+        comparison.base_commit?.sha === sourceRevision &&
+        comparison.merge_base_commit?.sha === sourceRevision,
     );
     requireEvidence(
       Number.isInteger(comparison.total_commits) &&
@@ -358,7 +377,7 @@ export function verifyImprovementRepair(proof, repair, evidence) {
     requireEvidence(comparison.commits.every((commit) => /^[a-f0-9]{40}$/.test(commit?.sha)));
     requireEvidence(
       new Set(comparison.commits.map((commit) => commit.sha)).size === comparison.commits.length &&
-        comparison.commits.at(-1).sha === proof.after.revision,
+        comparison.commits.at(-1).sha === mergeRevision,
     );
     missing = 'final-head-human-approval';
     requireEvidence(Array.isArray(reviews) && reviews.length < 100);
@@ -399,7 +418,6 @@ export function verifyImprovementRepair(proof, repair, evidence) {
     );
     requireEvidence(approvals.length > 0);
     return {
-      ...result,
       verified: true,
       missing: [],
       fixCommit: repair.fixCommit,
@@ -413,6 +431,304 @@ export function verifyImprovementRepair(proof, repair, evidence) {
         commit: review.commit_id,
         submittedAt: review.submitted_at,
         url: `https://github.com/${repository}/pull/${repair.pullRequest}#pullrequestreview-${review.id}`,
+      })),
+    };
+  } catch {
+    return { verified: false, missing: [missing] };
+  }
+}
+
+export function validateAgentReviewRepairLinks(links) {
+  requireEvidence(Array.isArray(links) && links.length <= IMPROVEMENT_LIMITS.agentReviewRepairs);
+  const keys = [
+    'findingId',
+    'reviewRunId',
+    'reviewReportPath',
+    'reviewReportSha256',
+    'dispositionsPath',
+    'dispositionsSha256',
+    'fixCommit',
+    'pullRequest',
+    'afterRunId',
+  ].sort();
+  const seen = new Set();
+  for (const link of links) {
+    requireEvidence(link && typeof link === 'object' && !Array.isArray(link));
+    requireEvidence(JSON.stringify(Object.keys(link).sort()) === JSON.stringify(keys));
+    for (const key of ['findingId', 'reviewReportSha256', 'dispositionsSha256'])
+      requireEvidence(typeof link[key] === 'string' && /^[a-f0-9]{64}$/.test(link[key]));
+    for (const key of ['reviewRunId', 'afterRunId']) {
+      requireEvidence(typeof link[key] === 'string' && /^[1-9]\d{0,15}$/.test(link[key]));
+      requireEvidence(Number.isSafeInteger(Number(link[key])));
+    }
+    requireEvidence(BigInt(link.reviewRunId) < BigInt(link.afterRunId));
+    requireEvidence(
+      typeof link.reviewReportPath === 'string' &&
+        /^run-[A-Za-z0-9]{1,80}\/agent-review\.json$/.test(link.reviewReportPath),
+    );
+    requireEvidence(
+      typeof link.dispositionsPath === 'string' &&
+        /^\.github\/agent-review-dispositions\/[a-z0-9][a-z0-9-]{0,79}\.json$/.test(
+          link.dispositionsPath,
+        ),
+    );
+    requireEvidence(typeof link.fixCommit === 'string' && /^[a-f0-9]{40}$/.test(link.fixCommit));
+    requireEvidence(Number.isSafeInteger(link.pullRequest) && link.pullRequest > 0);
+    requireEvidence(!seen.has(link.findingId));
+    seen.add(link.findingId);
+  }
+  return links;
+}
+
+async function readAgentRepairArtifact(client, run, name, file, raw = false) {
+  const listing = await client.json(`/actions/runs/${run.id}/artifacts?per_page=20`);
+  requireEvidence(Array.isArray(listing.artifacts) && listing.artifacts.length <= 20);
+  requireEvidence(listing.total_count === listing.artifacts.length);
+  const matches = listing.artifacts.filter((artifact) => artifact.name === name);
+  requireEvidence(matches.length === 1);
+  const artifact = matches[0];
+  validateArtifactMetadata(artifact, run, name);
+  const bytes = await client.archive(artifact);
+  verifyArtifactBytes(bytes, artifact);
+  const reports = await readImprovementArchive(bytes, [file], undefined, raw ? [file] : []);
+  return { artifact, contents: reports.get(file) };
+}
+
+async function readReviewedDisposition(client, revision, file) {
+  const commit = await client.json(`/git/commits/${revision}`);
+  requireEvidence(commit?.sha === revision && /^[a-f0-9]{40}$/.test(commit.tree?.sha));
+  const tree = await client.json(`/git/trees/${commit.tree.sha}?recursive=1`);
+  requireEvidence(tree?.sha === commit.tree.sha && tree.truncated === false);
+  requireEvidence(Array.isArray(tree.tree) && tree.tree.length <= 2000);
+  requireEvidence(new Set(tree.tree.map((entry) => entry.path)).size === tree.tree.length);
+  const parts = file.split('/');
+  for (let count = 1; count < parts.length; count++) {
+    const directory = tree.tree.find((entry) => entry.path === parts.slice(0, count).join('/'));
+    requireEvidence(directory?.type === 'tree' && directory.mode === '040000');
+  }
+  const entry = tree.tree.find((value) => value.path === file);
+  requireEvidence(entry?.type === 'blob' && entry.mode === '100644');
+  requireEvidence(typeof entry.sha === 'string' && /^[a-f0-9]{40}$/.test(entry.sha));
+  const blob = await client.json(`/git/blobs/${entry.sha}`);
+  requireEvidence(blob?.sha === entry.sha && blob.encoding === 'base64');
+  requireEvidence(Number.isSafeInteger(blob.size) && blob.size > 0 && blob.size <= 64 * 1024);
+  requireEvidence(typeof blob.content === 'string' && blob.content.length <= 90_000);
+  const encoded = blob.content.replace(/\n/g, '');
+  const bytes = Buffer.from(encoded, 'base64');
+  requireEvidence(bytes.length === blob.size && bytes.toString('base64') === encoded);
+  requireEvidence(
+    createHash('sha1').update(`blob ${bytes.length}\0`).update(bytes).digest('hex') === entry.sha,
+  );
+  return { bytes, sha: entry.sha, files: tree.tree };
+}
+
+export async function verifyAgentReviewRepair({ repository, branch, client, link }) {
+  const result = {
+    schemaVersion: 1,
+    kind: 'agent-review-repair-check',
+    findingId:
+      typeof link?.findingId === 'string' && /^[a-f0-9]{64}$/.test(link.findingId)
+        ? link.findingId
+        : null,
+    status: 'unresolved',
+    verified: false,
+    reviewProvenanceVerified: false,
+    dispositionReviewVerified: false,
+    ciVerified: false,
+    recordedIdentityVerified: false,
+    resolutionVerified: false,
+    humanApprovalRequired: true,
+    automaticRepair: false,
+    automaticPublication: false,
+  };
+  let missing = 'repair-link';
+  try {
+    validateAgentReviewRepairLinks([link]);
+    requireEvidence(
+      typeof repository === 'string' &&
+        /^[\w.-]+\/[\w.-]+$/.test(repository) &&
+        repository.length <= 200,
+    );
+    requireEvidence(
+      typeof branch === 'string' && /^[\w./-]+$/.test(branch) && branch.length <= 200,
+    );
+    missing = 'original-review-artifact';
+    const reviewRun = await client.json(`/actions/runs/${link.reviewRunId}`);
+    validateRetainedRun(reviewRun, repository, branch, 'maintenance.yml', ['schedule']);
+    requireEvidence(
+      String(reviewRun.id) === link.reviewRunId && reviewRun.conclusion === 'success',
+    );
+    const original = await readAgentRepairArtifact(
+      client,
+      reviewRun,
+      `maintenance-evidence-${reviewRun.id}-1`,
+      link.reviewReportPath,
+      true,
+    );
+    const template = prepareAgentReviewDispositions(original.contents);
+    requireEvidence(template.review.reportSha256 === link.reviewReportSha256);
+    requireEvidence(
+      template.review.runId === link.reviewRunId &&
+        template.review.revision === reviewRun.head_sha &&
+        template.review.workflow ===
+          `${repository}/.github/workflows/maintenance.yml@refs/heads/${branch}`,
+    );
+    const review = JSON.parse(original.contents.toString('utf8'));
+    requireEvidence(
+      Object.hasOwn(
+        review.evidenceSha256,
+        `test-results/maintenance/${link.reviewReportPath.replace('agent-review.json', 'report.json')}`,
+      ),
+    );
+    const finishedAt = Date.parse(review.finishedAt);
+    requireEvidence(Date.parse(reviewRun.run_started_at) <= Date.parse(review.startedAt));
+    requireEvidence(finishedAt <= Date.parse(reviewRun.updated_at));
+    missing = 'reviewed-disposition';
+    const pull = await client.json(`/pulls/${link.pullRequest}`);
+    requireEvidence(pull?.head?.sha === link.fixCommit);
+    requireEvidence(pull.merged === true && pull.state === 'closed');
+    requireEvidence(
+      pull.head.repo?.full_name === repository &&
+        pull.base?.repo?.full_name === repository &&
+        pull.base.ref === branch,
+    );
+    requireEvidence(finishedAt <= Date.parse(pull.merged_at));
+    const disposition = await readReviewedDisposition(
+      client,
+      link.fixCommit,
+      link.dispositionsPath,
+    );
+    const decisions = validateAgentReviewDispositions(disposition.bytes, original.contents);
+    requireEvidence(decisions.dispositionsSha256 === link.dispositionsSha256);
+    const findingIndex = decisions.findings.findIndex(
+      (finding) => finding.findingId === link.findingId,
+    );
+    requireEvidence(
+      findingIndex >= 0 && decisions.findings[findingIndex].disposition === 'accepted',
+    );
+    const record = JSON.parse(disposition.bytes.toString('utf8'));
+    const recordedAt = Date.parse(
+      record.entries.find((entry) => entry.findingId === link.findingId).recordedAt,
+    );
+    missing = 'finding-file-change';
+    const files = await client.json(`/pulls/${link.pullRequest}/files?per_page=100`);
+    requireEvidence(
+      Number.isSafeInteger(pull.changed_files) &&
+        pull.changed_files > 0 &&
+        pull.changed_files < 100,
+    );
+    requireEvidence(Array.isArray(files) && files.length === pull.changed_files);
+    requireEvidence(new Set(files.map((file) => file.filename)).size === files.length);
+    const changed = (file) =>
+      files.find(
+        (entry) =>
+          entry.filename === file &&
+          ['added', 'modified'].includes(entry.status) &&
+          Number.isSafeInteger(entry.changes) &&
+          entry.changes > 0,
+      );
+    const findingFile = review.response.findings[findingIndex].file;
+    const changedFinding = changed(findingFile);
+    requireEvidence(
+      typeof changedFinding?.sha === 'string' && /^[a-f0-9]{40}$/.test(changedFinding.sha),
+    );
+    const headFinding = disposition.files.find((file) => file.path === findingFile);
+    requireEvidence(
+      headFinding?.type === 'blob' &&
+        headFinding.mode === '100644' &&
+        headFinding.sha === changedFinding.sha,
+    );
+    requireEvidence(changed(link.dispositionsPath)?.sha === disposition.sha);
+    missing = 'passing-merge-ci';
+    const run = await client.json(`/actions/runs/${link.afterRunId}`);
+    validateRetainedRun(run, repository, branch, 'ci.yml', ['push']);
+    requireEvidence(String(run.id) === link.afterRunId && run.conclusion === 'success');
+    requireEvidence(run.head_sha === pull.merge_commit_sha && run.head_sha !== reviewRun.head_sha);
+    requireEvidence(Date.parse(run.run_started_at) >= Date.parse(pull.merged_at));
+    const aggregate = await readAgentRepairArtifact(client, run, 'ci-required', 'ci-required.json');
+    const validation = compareImprovementReports(null, {
+      expected: {
+        revision: run.head_sha,
+        runId: String(run.id),
+        attempt: '1',
+        eventName: 'push',
+        workflow: `${repository}/.github/workflows/ci.yml@refs/heads/${branch}`,
+        headRevision: run.head_sha,
+        baseRevision: aggregate.contents?.baseRevision,
+        kind: 'required-validation',
+        conclusion: 'success',
+      },
+      report: aggregate.contents,
+    }).after;
+    requireEvidence(validation?.valid === true && validation.passed === true);
+    missing = 'repair-history';
+    const details = {
+      repository,
+      branch,
+      pull,
+      commits: await client.json(`/pulls/${link.pullRequest}/commits?per_page=100`),
+      reviews: await client.json(`/pulls/${link.pullRequest}/reviews?per_page=100`),
+      comparison: await client.json(
+        `/compare/${reviewRun.head_sha}...${run.head_sha}?per_page=100`,
+      ),
+    };
+    const history = verifyReviewedFix(reviewRun.head_sha, run.head_sha, link, details);
+    if (!history.verified)
+      return {
+        ...result,
+        missing: history.missing.map((value) =>
+          value === 'failure-merge-ancestry' ? 'review-merge-ancestry' : value,
+        ),
+      };
+    requireEvidence(
+      history.reviews.some((approval) => Date.parse(approval.submittedAt) >= recordedAt),
+    );
+    missing = 'merged-repair-content';
+    const mergedDisposition = await readReviewedDisposition(
+      client,
+      run.head_sha,
+      link.dispositionsPath,
+    );
+    requireEvidence(mergedDisposition.sha === disposition.sha);
+    const mergedFinding = mergedDisposition.files.find((file) => file.path === findingFile);
+    requireEvidence(
+      mergedFinding?.type === 'blob' &&
+        mergedFinding.mode === '100644' &&
+        mergedFinding.sha === headFinding.sha,
+    );
+    missing = 'changed-pull-request';
+    const latest = await client.json(`/pulls/${link.pullRequest}`);
+    requireEvidence(
+      latest?.number === pull.number &&
+        latest.merged === true &&
+        latest.state === 'closed' &&
+        latest.head?.sha === pull.head.sha &&
+        latest.head.repo?.full_name === repository &&
+        latest.base?.ref === branch &&
+        latest.base.repo?.full_name === repository &&
+        latest.merge_commit_sha === pull.merge_commit_sha &&
+        latest.merged_at === pull.merged_at &&
+        latest.commits === pull.commits &&
+        latest.changed_files === pull.changed_files &&
+        latest.user?.id === pull.user.id,
+    );
+    return {
+      ...result,
+      ...history,
+      status: 'verified-link',
+      reviewProvenanceVerified: true,
+      dispositionReviewVerified: true,
+      ciVerified: true,
+      review: decisions.review,
+      dispositionsSha256: decisions.dispositionsSha256,
+      dispositionBlob: disposition.sha,
+      findingFile,
+      findingBlob: headFinding.sha,
+      ci: { runId: String(run.id), attempt: '1', revision: run.head_sha },
+      artifacts: [original, aggregate].map(({ artifact }) => ({
+        id: String(artifact.id),
+        runId: String(artifact.workflow_run.id),
+        digest: artifact.digest,
       })),
     };
   } catch {
@@ -450,7 +766,9 @@ export function createImprovementClient(repository, token, fetcher = fetch) {
         resource.length <= 500 &&
         !hasControlCharacters(resource) &&
         ((resource.startsWith('/actions/') && !resource.includes('..')) ||
-          /^\/pulls\/[1-9]\d{0,15}(?:\/(?:reviews|commits)\?per_page=100)?$/.test(resource) ||
+          /^\/pulls\/[1-9]\d{0,15}(?:\/(?:reviews|commits|files)\?per_page=100)?$/.test(resource) ||
+          /^\/git\/(?:commits|blobs)\/[a-f0-9]{40}$/.test(resource) ||
+          /^\/git\/trees\/[a-f0-9]{40}\?recursive=1$/.test(resource) ||
           /^\/compare\/[a-f0-9]{40}\.\.\.[a-f0-9]{40}\?per_page=100$/.test(resource)),
     );
     return fetcher(`https://api.github.com/repos/${repository}${resource}`, {
@@ -522,6 +840,8 @@ const SOURCES = [
 export function validateImprovementRegistry(registry) {
   requireEvidence(registry?.schemaVersion === 1 && Array.isArray(registry.regressions));
   requireEvidence(registry.regressions.length <= IMPROVEMENT_LIMITS.regressions);
+  if (Object.hasOwn(registry, 'agentReviewRepairs'))
+    validateAgentReviewRepairLinks(registry.agentReviewRepairs);
   const keys = ['findingId', 'job', 'suite', 'testName', 'beforeRunId', 'afterRunId'].sort();
   const seen = new Set();
   for (const regression of registry.regressions) {
@@ -879,6 +1199,9 @@ export async function collectImprovementReports({
     }
     repairs.push(verifyImprovementRepair(proof, regression.repair, details));
   }
+  const agentReviewRepairs = [];
+  for (const link of registry.agentReviewRepairs ?? [])
+    agentReviewRepairs.push(await verifyAgentReviewRepair({ repository, branch, client, link }));
   const entries = [...verifiedKeys]
     .filter((key) => captures.has(key))
     .map((key) => captures.get(key));
@@ -921,6 +1244,7 @@ export async function collectImprovementReports({
       comparisons.every((report) => report.status === 'reported') &&
       proofs.every((proof) => proof.verified) &&
       repairs.every((repair, index) => !regressions[index].repair || repair.verified) &&
+      agentReviewRepairs.every((repair) => repair.verified) &&
       retention.status !== 'insufficient-evidence'
         ? 'reported'
         : 'insufficient-evidence',
@@ -935,6 +1259,13 @@ export async function collectImprovementReports({
           ? 'verified'
           : 'insufficient-evidence',
     repairs,
+    agentReviewRepairStatus:
+      agentReviewRepairs.length === 0
+        ? 'not-requested'
+        : agentReviewRepairs.every((repair) => repair.verified)
+          ? 'verified'
+          : 'insufficient-evidence',
+    agentReviewRepairs,
     retention,
     retainedEvidence: {
       schemaVersion: 1,
@@ -961,6 +1292,7 @@ export async function collectImprovementReports({
       'Retained capture timestamps are not renewed by copying; repository retention policy may shorten availability.',
       'Reruns, missing history and unavailable originals cannot establish improvement.',
       'Named regressions and live review/merge history are separate; neither establishes causality or automatic repair.',
+      'Agent-review repair links require available original artifacts and reviewed acceptance; they do not prove semantic resolution or the recorded identity.',
     ],
   };
 }
@@ -1083,15 +1415,22 @@ export async function runImprovementReview(
     `| ${counts.new} | ${counts.recurring} | ${counts.cleared} | ${counts.unverified} | ${report.regressions.filter((proof) => proof.verified).length} |`,
     '',
     `Review and merge history: ${report.repairHistoryStatus ?? 'local-unverified'}.`,
+    `Agent-review repair links: ${report.agentReviewRepairStatus ?? 'local-unverified'}.`,
     `Original evidence retention: ${report.retention?.status ?? 'local-unverified'}.`,
     ...(report.repairs ?? []).map((repair) =>
       repair.verified
         ? `- Verified history: ${repair.pullRequestUrl}; fix ${repair.fixCommit}; merge ${repair.mergeCommit}.`
         : `- Missing history for ${repair.findingId}: ${repair.missing.join(', ')}.`,
     ),
+    ...(report.agentReviewRepairs ?? []).map((repair) =>
+      repair.verified
+        ? `- Verified agent-review link ${repair.findingId}: ${repair.pullRequestUrl}; fix ${repair.fixCommit}; merge ${repair.mergeCommit}; CI run ${repair.ci.runId}.`
+        : `- Unresolved agent-review link ${repair.findingId}: ${repair.missing.join(', ')}.`,
+    ),
     ...report.errors.map((error) => `- Missing or invalid evidence: ${error}.`),
     '',
     'CI recovery is not causal or automatic repair proof. Evidence still requires human review.',
+    'Verified agent-review links do not establish semantic resolution or authenticate claimed decision authors.',
     'Only authenticated retained originals can outlive source expiry; copying does not renew capture time.',
     'Missing history and reruns do not establish success.',
     '',

@@ -271,7 +271,7 @@ identities. It does not establish causality, agent authorship, automatic repair,
 or remove the need to review the evidence. No historical approval is inferred
 for direct pushes.
 
-The registry accepts at most four entries and no commands. The collector verifies
+The registry accepts at most four regression entries and no commands. The collector verifies
 the same named test failed before and passed afterward, on different revisions,
 with matching unit-summary provenance and test counts. An unrelated test, skipped
 test, same-revision rerun, or successful aggregate alone cannot verify a repair.
@@ -572,3 +572,86 @@ authenticate GitHub artifacts, establish the truth of claimed timestamps, or
 recompute omitted raw response/usage evidence. Keep the original report and the
 separate decision record for later authenticated verification; no live ledger,
 resolution claim, scheduler, or automatic publication is created by this feature.
+
+### Verified Finding-To-Fix Links
+
+The existing read-only improvement collector can verify a repair link for an
+accepted agent-review finding. This is separate from a named failing-test
+regression: acceptance does not manufacture a regression or prove a fix. No new
+workflow or model invocation is introduced, and no real evidence entries are
+seeded. An omitted or empty `agentReviewRepairs` list makes no repair-link requests.
+
+Propose an optional `agentReviewRepairs` list in the
+[regression registry](.github/improvement-regressions.json), alongside the existing
+`regressions` list. At most four unique finding IDs are accepted. Each link has
+exactly these nine fields; this example is schematic, not valid historical evidence:
+
+```json
+{
+     "findingId": "<full finding ID from the exact review>",
+     "reviewRunId": "<original maintenance run ID>",
+     "reviewReportPath": "run-EXAMPLE/agent-review.json",
+     "reviewReportSha256": "<SHA-256 of the original report bytes>",
+     "dispositionsPath": ".github/agent-review-dispositions/example.json",
+     "dispositionsSha256": "<SHA-256 of the reviewed disposition bytes>",
+     "fixCommit": "<full final repair PR head SHA>",
+     "pullRequest": 123,
+     "afterRunId": "<successful merge-commit CI run ID>"
+}
+```
+
+Run IDs are positive safe-integer decimal strings, with `afterRunId` newer than
+`reviewRunId`. Digests are full lowercase SHA-256 values; `fixCommit` is a full
+lowercase commit SHA, and `pullRequest` is the actual positive integer PR number.
+The report path is archive-relative: maintenance uploads preserve the
+`run-<name>/` directory, not the leading `test-results/maintenance/` path. The
+disposition filename must be lowercase alphanumeric/hyphen, at most 80 characters
+before `.json`, under `.github/agent-review-dispositions/`.
+
+To record a genuine link:
+
+1. Preserve the exact original review bytes from the successful, first-attempt,
+    scheduled maintenance run on the default branch. Prepare the separate
+    disposition record using the offline commands above. Its review binding must
+    remain unchanged, and the linked finding must have an actual `accepted` entry.
+2. Include that record and a change to the finding's file in the repair PR. A
+    non-author human owner, member, or collaborator must approve the final head
+    before merge, at or after the recorded decision time, with no outstanding
+    request for changes. `fixCommit` identifies that final head, not an earlier
+    intermediate commit. The reviewed disposition and finding-file blobs must
+    survive unchanged in the merge. Added or modified files qualify; deletions,
+    renames, symlinks, and submodules do not.
+3. Wait for successful first-attempt default-branch push CI at the exact PR merge
+    commit. Its authenticated `ci-required` artifact must contain a valid passing
+    `required-validation` report with matching identity. Another green revision,
+    a rerun, or a success claim without matching aggregate evidence does not qualify.
+4. Propose the link using the actual identities and byte digests. The offline
+    disposition check supplies `review.reportSha256` and `dispositionsSha256`.
+    A later registry-only PR cannot replace the original reviewed repair or add a
+    missing decision record retroactively.
+
+The existing authenticated `npm run improvement:report` workflow command consumes
+these links. Its local `--input` comparison mode cannot verify them. The exported
+`verifyAgentReviewRepair` verifier also accepts the existing repository-scoped
+`createImprovementClient`; it performs bounded GET requests and returns a result
+without writing files or executing downloaded content. Tests inject synthetic
+clients and are not observed operational repair evidence.
+
+Checks bind the original API-authenticated maintenance artifact and exact report
+bytes, immutable Git tree/blob contents, complete PR inventories, independent
+final-head review, merge ancestry, and successful merge CI. Truncated or oversized
+inventories are insufficient evidence, including 100 or more PR files, commits,
+reviews, or ancestry commits, and trees with more than 2,000 entries. Expired or
+unavailable artifacts also leave the link unresolved. This increment does not
+extend seven-day maintenance retention or recover review artifacts from the
+separate regression-retention bundles.
+
+Reports expose `agentReviewRepairStatus` as `not-requested`, `verified`, or
+`insufficient-evidence`, with per-link `verified-link` or `unresolved` results and
+bounded missing-evidence reasons. A requested unresolved link makes the overall
+report insufficient evidence. Successful results include exact IDs, digests, and
+canonical PR/review links, not decision reasons or claimed logins. They verify
+the recorded repair linkage, not semantic correctness, causal resolution, the
+truth of claimed timestamps, or the identity behind `recordedBy`.
+`resolutionVerified` and `recordedIdentityVerified` remain false. Human approval
+remains required; no automatic repair, publication, or authorization is inferred.
