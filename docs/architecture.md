@@ -77,7 +77,9 @@ numbers are directly comparable (`engine.ts:186-190`).
 | `contentRouter.ts` | Cheap content sniffing — picks which compressor family applies. |
 | `compressors/` | The strategies themselves, plus the registry that orders them. |
 | `markers.ts` | Marker rendering, parsing, and sanitisation of untrusted input. |
-| `dashboard.ts` / `dashboardServer.ts` | Payload construction and the local HTTP server. |
+| [dashboard.ts](../packages/core/src/dashboard.ts) | Payload construction, shared webview/browser page, and engine-facing report entry points. |
+| [dashboardReports.ts](../packages/core/src/dashboardReports.ts) | Pure Markdown, JSON, and CSV formatting of a captured summary and explicit timestamp; no engine or clock reads. |
+| [dashboardServer.ts](../packages/core/src/dashboardServer.ts) | Local HTTP transport and access control. |
 | `modelTelemetry.ts` | OTLP receiver, observation parsing, source labelling. |
 | `pricing*.ts`, `costPolicy.ts`, `taskUsage.ts` | Cost estimation and policy. |
 | `ownedPolicy.ts`, `adaptiveCompression.ts` | Owned-task model/profile guards and the bounded outcome-driven compression feedback loop. |
