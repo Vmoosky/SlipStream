@@ -182,10 +182,29 @@ exists until an eligible real run produces one.
 The [observability workflow](.github/workflows/pr-observability.yml) is opt-in via
 `SLIPSTREAM_OBSERVABILITY_ENABLED=true`, after review and merge to the default
 branch. It runs on default-branch PR lifecycle events, including head/body edits
-and closure. A manual dispatch with a PR number refreshes review and validation
-links without rerunning CI. Approval and dismissal events alone do not refresh
-the snapshot; use the manual refresh when an immediate review update is needed.
+and closure, and on completed `CI` or `Security` PR runs. A manual dispatch with a
+PR number refreshes review and validation links without rerunning CI. Approval
+and dismissal events alone do not refresh the snapshot; use the manual refresh
+when an immediate review update is needed.
 This change does not enable the variable or change required checks.
+
+Completion observations require exactly one API-associated PR targeting the
+default branch. The collector binds the workflow path and ID, run ID and current
+attempt, terminal conclusion, source repository IDs, and exact head/base commits
+to fresh GitHub API data. Fork PRs can supply a verified read-only run association;
+their code is never checked out or executed by the observer. Missing associations,
+stale heads or attempts, changed workflow identities, and unavailable evidence
+cannot publish a completion observation. Push runs and unrelated workflows do
+not qualify. The run and PR are checked again before metadata publication.
+
+The JSON report and marked comment record the triggering workflow's actual
+terminal outcome, including failure, cancellation, timeout, or skipped execution.
+`verified-completion` verifies that individual run's identity and outcome, not
+aggregate required-check success, agent authorship, or a verified repair. Reruns
+are observations of their actual attempts, never regression or first-attempt
+proof. A later PR/manual observation can replace the completion snapshot; the
+30-day artifacts retain earlier observations. No workflow is retried or repaired
+by this refresh.
 
 The [collector](scripts/check-pr-observability.mjs) manages `area:core`,
 `area:extension`, `area:mcp`, `area:hooks`, `area:plugin`, `area:tooling`, and

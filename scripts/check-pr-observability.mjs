@@ -22,6 +22,8 @@ export const PR_OBSERVABILITY_LIMITS = Object.freeze({
   collectionTimeoutMs: 180_000,
 });
 
+const VALIDATION_WORKFLOWS = Object.freeze({ CI: 'ci.yml', Security: 'security.yml' });
+
 export const PR_OBSERVABILITY_LABELS = Object.freeze({
   'area:core': { color: '0366d6', description: 'Core compression, pricing, or dashboard changes' },
   'area:extension': { color: '1d76db', description: 'VS Code extension changes' },
@@ -268,7 +270,7 @@ export function createPrObservabilityClient(repository, token, fetcher = fetch) 
         /^\/git\/(?:commits|blobs)\/[a-f0-9]{40}$/.test(resource) ||
         /^\/git\/trees\/[a-f0-9]{40}\?recursive=1$/.test(resource) ||
         /^\/compare\/[a-f0-9]{40}\.\.\.[a-f0-9]{40}\?per_page=1$/.test(resource) ||
-        /^\/actions\/(?:runs\/[1-9]\d{0,15}(?:\/artifacts\?per_page=10)?|workflows\/maintenance\.yml)$/.test(
+        /^\/actions\/(?:runs\/[1-9]\d{0,15}(?:\/artifacts\?per_page=10)?|workflows\/(?:maintenance|ci|security)\.yml)$/.test(
           resource,
         ) ||
         labelNames.includes(label);
@@ -490,9 +492,11 @@ export function pullRequestSnapshot(pull) {
     number: pull.number,
     head: pull.head?.sha,
     headRepository: pull.head?.repo?.full_name,
+    headRepositoryId: pull.head?.repo?.id,
     base: pull.base?.sha,
     baseBranch: pull.base?.ref,
     repository: pull.base?.repo?.full_name,
+    repositoryId: pull.base?.repo?.id,
     body: digest(Buffer.from(pull.body ?? '')),
     changedFiles: pull.changed_files,
     state: pull.state,
@@ -502,7 +506,38 @@ export function pullRequestSnapshot(pull) {
   });
 }
 
-export async function collectPrObservability({ repository, branch, number, client }) {
+async function validationSourceCurrent(report, client) {
+  try {
+    const source = report.validation.source;
+    requireEvidence(
+      Object.hasOwn(VALIDATION_WORKFLOWS, source.workflow) &&
+        positiveId(source.runId) &&
+        source.number === report.number &&
+        source.head === report.head &&
+        source.base === report.base,
+    );
+    const workflow = await client.json(
+      `/actions/workflows/${VALIDATION_WORKFLOWS[source.workflow]}`,
+    );
+    requireEvidence(
+      workflow.id === source.workflowId &&
+        workflow.name === source.workflow &&
+        workflow.path === source.path,
+    );
+    const run = await client.json(`/actions/runs/${source.runId}`);
+    return isDeepStrictEqual(validationRunSource(run, report.repository, report.branch), source);
+  } catch {
+    return false;
+  }
+}
+
+export async function collectPrObservability({
+  repository,
+  branch,
+  number,
+  client,
+  validationSource,
+}) {
   requireEvidence(positiveId(String(number)));
   const pull = await client.json(`/pulls/${number}`);
   requireEvidence(
@@ -519,6 +554,7 @@ export async function collectPrObservability({ repository, branch, number, clien
     schemaVersion: 1,
     kind: 'pr-observability',
     repository,
+    branch,
     number,
     checkedAt: new Date().toISOString(),
     snapshot: pullRequestSnapshot(pull),
@@ -534,6 +570,22 @@ export async function collectPrObservability({ repository, branch, number, clien
     pullUrl: `https://github.com/${repository}/pull/${number}`,
     publication: 'not-applied',
   };
+  if (validationSource) {
+    report.validation = { status: 'unverified', source: validationSource };
+    if (
+      pull.base.ref !== branch ||
+      pull.base.repo.id !== validationSource.repositoryId ||
+      pull.head.repo?.id !== validationSource.headRepositoryId ||
+      pull.head.repo?.full_name !== validationSource.headRepository ||
+      !(await validationSourceCurrent(report, client))
+    ) {
+      report.errors.push(
+        'The triggering validation run is unavailable, stale, or does not match this PR snapshot.',
+      );
+      return report;
+    }
+    report.validation.status = 'verified-completion';
+  }
   try {
     const files = await client.json(`/pulls/${number}/files?per_page=100`);
     report.labels = pullRequestAreaLabels(files, pull.changed_files);
@@ -585,6 +637,17 @@ export function renderPrObservability(report) {
         `[${review.state} review ${review.id}](${base}/pull/${report.number}#pullrequestreview-${review.id}).`,
     ),
     `[Current PR checks](${report.checksUrl}) remain independent of this report.`,
+    ...(report.validation
+      ? [
+          `Triggering validation: **${report.validation.status}**.`,
+          ...(report.validation.status === 'verified-completion'
+            ? [
+                `[${report.validation.source.workflow} run ${report.validation.source.runId}, attempt ${report.validation.source.attempt}](${base}/actions/runs/${report.validation.source.runId}/attempts/${report.validation.source.attempt}) reported **${report.validation.source.conclusion}** for this exact PR head and recorded base.`,
+                'This is one workflow outcome, not aggregate required-check success, agent authorship, or a verified repair.',
+              ]
+            : ['No validation outcome is verified for this observation.']),
+        ]
+      : []),
     ...(report.collector
       ? [
           `[Observation run](${base}/actions/runs/${report.collector.runId}/attempts/${report.collector.attempt}).`,
@@ -592,7 +655,7 @@ export function renderPrObservability(report) {
       : []),
     '',
     'Labels describe the recorded snapshot, not agent authorship, approval, current CI success, or permission to merge.',
-    'Review changes are refreshed on the next observed PR event or manual refresh; this is not a required gate.',
+    'Review changes are refreshed on the next observed PR event, verified validation completion, or manual refresh; this is not a required gate.',
     ...report.errors,
   ].join('\n');
 }
@@ -607,13 +670,27 @@ export async function publishPrObservability(report, client) {
     Array.isArray(report.labels) &&
       report.labels.every((name) => Object.hasOwn(PR_OBSERVABILITY_LABELS, name)),
   );
-  const number = report.number;
-  const fresh = async () =>
-    report.snapshot === pullRequestSnapshot(await client.json(`/pulls/${number}`));
-  if (!(await fresh())) {
-    report.publication = 'stale-pr';
+  if (report.validation && report.validation.status !== 'verified-completion') {
+    report.publication = 'unverified-validation';
     return;
   }
+  const number = report.number;
+  const fresh = async () => {
+    if (report.snapshot !== pullRequestSnapshot(await client.json(`/pulls/${number}`))) {
+      report.publication = 'stale-pr';
+      return false;
+    }
+    if (report.validation && !(await validationSourceCurrent(report, client))) {
+      report.validation.status = 'unverified';
+      report.publication = 'stale-validation';
+      report.errors.push(
+        'The triggering validation run changed or could not be reverified; publication was withheld.',
+      );
+      return false;
+    }
+    return true;
+  };
+  if (!(await fresh())) return;
   const labels = await client.json(`/issues/${number}/labels?per_page=100`);
   const comments = await client.json(`/issues/${number}/comments?per_page=100`);
   requireEvidence(
@@ -632,17 +709,16 @@ export async function publishPrObservability(report, client) {
   requireEvidence(owned.length <= 1 && owned.every((comment) => positiveId(String(comment.id))));
   const existing = new Set(labels.map((label) => label.name));
   const additions = [...new Set(report.labels)].filter((label) => !existing.has(label));
+  const definitions = [];
   for (const name of additions) {
-    if (!(await client.json(`/labels/${encodeURIComponent(name)}`))) {
-      await client.json('/labels', {
-        method: 'POST',
-        body: { name, ...PR_OBSERVABILITY_LABELS[name] },
-      });
-    }
+    if (!(await client.json(`/labels/${encodeURIComponent(name)}`))) definitions.push(name);
   }
-  if (!(await fresh())) {
-    report.publication = 'stale-pr';
-    return;
+  if (!(await fresh())) return;
+  for (const name of definitions) {
+    await client.json('/labels', {
+      method: 'POST',
+      body: { name, ...PR_OBSERVABILITY_LABELS[name] },
+    });
   }
   for (const name of existing) {
     if (Object.hasOwn(PR_OBSERVABILITY_LABELS, name) && !report.labels.includes(name)) {
@@ -659,6 +735,65 @@ export async function publishPrObservability(report, client) {
   else if (owned[0].body !== body)
     await client.json(`/issues/comments/${owned[0].id}`, { method: 'PATCH', body: { body } });
   report.publication = 'applied';
+}
+
+function validationRunSource(run, repository, branch) {
+  requireEvidence(Object.hasOwn(VALIDATION_WORKFLOWS, run?.name ?? ''));
+  requireEvidence(
+    run.path === `.github/workflows/${VALIDATION_WORKFLOWS[run.name]}` &&
+      run.event === 'pull_request' &&
+      run.status === 'completed' &&
+      run.repository?.full_name === repository &&
+      typeof run.head_repository?.full_name === 'string' &&
+      /^[\w.-]+\/[\w.-]+$/.test(run.head_repository.full_name),
+  );
+  requireEvidence(
+    [
+      'success',
+      'failure',
+      'cancelled',
+      'timed_out',
+      'neutral',
+      'skipped',
+      'action_required',
+      'stale',
+      'startup_failure',
+    ].includes(run.conclusion),
+  );
+  requireEvidence(Array.isArray(run.pull_requests) && run.pull_requests.length === 1);
+  const pull = run.pull_requests[0];
+  requireEvidence(
+    [
+      run.id,
+      run.run_attempt,
+      run.workflow_id,
+      run.repository.id,
+      run.head_repository.id,
+      pull?.number,
+    ].every((value) => Number.isSafeInteger(value) && value > 0),
+  );
+  requireEvidence(
+    revision(run.head_sha) &&
+      pull.head?.sha === run.head_sha &&
+      pull.head.repo?.id === run.head_repository.id &&
+      revision(pull.base?.sha) &&
+      pull.base.ref === branch &&
+      pull.base.repo?.id === run.repository.id,
+  );
+  return {
+    workflow: run.name,
+    path: run.path,
+    workflowId: run.workflow_id,
+    runId: String(run.id),
+    attempt: run.run_attempt,
+    conclusion: run.conclusion,
+    head: run.head_sha,
+    base: pull.base.sha,
+    number: pull.number,
+    repositoryId: run.repository.id,
+    headRepository: run.head_repository.full_name,
+    headRepositoryId: run.head_repository.id,
+  };
 }
 
 export function prObservabilityIdentity(env, event) {
@@ -681,9 +816,21 @@ export function prObservabilityIdentity(env, event) {
   requireEvidence(
     revision(env.GITHUB_SHA) && positiveId(env.GITHUB_RUN_ID) && positiveId(env.GITHUB_RUN_ATTEMPT),
   );
-  requireEvidence(['pull_request_target', 'workflow_dispatch'].includes(env.GITHUB_EVENT_NAME));
-  const number =
-    env.GITHUB_EVENT_NAME === 'pull_request_target'
+  requireEvidence(
+    ['pull_request_target', 'workflow_dispatch', 'workflow_run'].includes(env.GITHUB_EVENT_NAME),
+  );
+  let validationSource;
+  if (env.GITHUB_EVENT_NAME === 'workflow_run') {
+    requireEvidence(event.action === 'completed');
+    validationSource = validationRunSource(event.workflow_run, repository, branch);
+    requireEvidence(
+      event.repository.id === validationSource.repositoryId &&
+        env.GITHUB_RUN_ID !== validationSource.runId,
+    );
+  }
+  const number = validationSource
+    ? String(validationSource.number)
+    : env.GITHUB_EVENT_NAME === 'pull_request_target'
       ? String(event.pull_request?.number)
       : event.inputs?.pull_request;
   requireEvidence(positiveId(number));
@@ -697,6 +844,7 @@ export function prObservabilityIdentity(env, event) {
     repository,
     branch,
     number: Number(number),
+    ...(validationSource ? { validationSource } : {}),
     collector: {
       revision: env.GITHUB_SHA,
       runId: env.GITHUB_RUN_ID,
@@ -740,7 +888,8 @@ async function main() {
       fs.appendFileSync(process.env.GITHUB_OUTPUT, `readiness_report_path=${readinessReport}\n`);
     if (process.env.GITHUB_STEP_SUMMARY)
       fs.appendFileSync(process.env.GITHUB_STEP_SUMMARY, `${summary}\n`);
-    if (report.publication === 'stale-pr') process.exitCode = 1;
+    if (['stale-pr', 'stale-validation', 'unverified-validation'].includes(report.publication))
+      process.exitCode = 1;
     console.log(
       JSON.stringify({
         number: report.number,

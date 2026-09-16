@@ -514,6 +514,8 @@ test('PR observability API restricts writes to owned labels and marked comments'
   );
   await client.json('/pulls/7');
   await client.json('/issues/7/labels', { method: 'POST', body: { labels: ['area:docs'] } });
+  await client.json('/actions/workflows/ci.yml');
+  await client.json('/actions/workflows/security.yml');
   assert.equal(calls[0].options.redirect, 'error');
   assert.equal(calls[0].options.headers.Authorization, 'Bearer synthetic-token');
   for (const [resource, options] of [
@@ -522,10 +524,12 @@ test('PR observability API restricts writes to owned labels and marked comments'
     ['/issues/7/labels', { method: 'POST', body: { labels: ['unowned'] } }],
     ['/issues/7/comments', { method: 'POST', body: { body: 'Unmarked comment' } }],
     ['/issues/7/labels/unowned', { method: 'DELETE' }],
+    ['/actions/workflows/arbitrary.yml', {}],
+    ['/actions/runs/101/rerun', { method: 'POST' }],
     ['https://other.invalid', {}],
   ])
     await assert.rejects(client.json(resource, options));
-  assert.equal(calls.length, 2);
+  assert.equal(calls.length, 4);
 });
 
 test('PR observability archives reject unrelated files, traversal and oversized inputs', async (context) => {
@@ -674,6 +678,302 @@ test('PR observability runtime identity requires an enabled trusted default-bran
   }
 });
 
+function prValidationCompletion() {
+  const repository = 'Vmoosky/SlipStream';
+  return {
+    env: {
+      GITHUB_ACTIONS: 'true',
+      SLIPSTREAM_OBSERVABILITY_ENABLED: 'true',
+      GITHUB_REPOSITORY: repository,
+      GITHUB_REF: 'refs/heads/main',
+      GITHUB_WORKFLOW_REF: `${repository}/.github/workflows/pr-observability.yml@refs/heads/main`,
+      GITHUB_SERVER_URL: 'https://github.com',
+      GITHUB_API_URL: 'https://api.github.com',
+      GITHUB_SHA: META.revision,
+      GITHUB_RUN_ID: '123',
+      GITHUB_RUN_ATTEMPT: '1',
+      GITHUB_EVENT_NAME: 'workflow_run',
+    },
+    event: {
+      action: 'completed',
+      repository: { id: 9, full_name: repository, default_branch: 'main' },
+      workflow_run: {
+        id: 101,
+        run_attempt: 1,
+        workflow_id: 11,
+        name: 'CI',
+        path: '.github/workflows/ci.yml',
+        event: 'pull_request',
+        status: 'completed',
+        conclusion: 'failure',
+        head_sha: META.headRevision,
+        repository: { id: 9, full_name: repository },
+        head_repository: { id: 9, full_name: repository },
+        pull_requests: [
+          {
+            number: 7,
+            head: { sha: META.headRevision, repo: { id: 9 } },
+            base: { sha: META.baseRevision, ref: 'main', repo: { id: 9 } },
+          },
+        ],
+      },
+    },
+  };
+}
+
+test('PR observability completion identity binds a terminal run to one exact PR head', () => {
+  const { env, event } = prValidationCompletion();
+  const identity = prObservabilityIdentity(env, event);
+  assert.equal(identity.number, 7);
+  assert.deepEqual(identity.validationSource, {
+    workflow: 'CI',
+    path: '.github/workflows/ci.yml',
+    workflowId: 11,
+    runId: '101',
+    attempt: 1,
+    conclusion: 'failure',
+    head: META.headRevision,
+    base: META.baseRevision,
+    number: 7,
+    repositoryId: 9,
+    headRepository: 'Vmoosky/SlipStream',
+    headRepositoryId: 9,
+  });
+  assert.equal(identity.collector.revision, META.revision);
+  assert.equal(identity.collector.eventName, 'workflow_run');
+});
+
+test('PR observability completion identity rejects unrelated, incomplete, or untrusted events', () => {
+  for (const mutate of [
+    (value) => (value.event.action = 'requested'),
+    (value) => (value.event.repository.id = 19),
+    (value) => (value.env.GITHUB_REF = 'refs/pull/7/merge'),
+    (value) => (value.env.GITHUB_RUN_ID = '101'),
+    (value) => (value.env.SLIPSTREAM_OBSERVABILITY_ENABLED = 'false'),
+    (value) => (value.env.GITHUB_WORKFLOW_REF = 'untrusted'),
+    (value) => (value.event.workflow_run.name = 'Maintenance'),
+    (value) => (value.event.workflow_run.path = '.github/workflows/untrusted.yml'),
+    (value) => (value.event.workflow_run.event = 'push'),
+    (value) => (value.event.workflow_run.status = 'in_progress'),
+    (value) => (value.event.workflow_run.conclusion = null),
+    (value) => (value.event.workflow_run.conclusion = 'passed'),
+    (value) => (value.event.workflow_run.id = '101'),
+    (value) => (value.event.workflow_run.run_attempt = 0),
+    (value) => (value.event.workflow_run.workflow_id = -1),
+    (value) => (value.event.workflow_run.repository.full_name = 'other/repository'),
+    (value) => (value.event.workflow_run.head_repository.id = 19),
+    (value) => (value.event.workflow_run.head_sha = META.revision),
+    (value) => (value.event.workflow_run.pull_requests = []),
+    (value) =>
+      value.event.workflow_run.pull_requests.push(value.event.workflow_run.pull_requests[0]),
+    (value) => (value.event.workflow_run.pull_requests[0].number = '7'),
+    (value) => (value.event.workflow_run.pull_requests[0].base.ref = 'release'),
+    (value) => (value.event.workflow_run.pull_requests[0].base.sha = 'main'),
+    (value) => (value.event.workflow_run.pull_requests[0].base.repo.id = 19),
+  ]) {
+    const fixture = prValidationCompletion();
+    mutate(fixture);
+    assert.throws(() => prObservabilityIdentity(fixture.env, fixture.event));
+  }
+});
+
+function prCompletionHistory({
+  workflow = 'CI',
+  conclusion = 'failure',
+  fork = false,
+  attempt = 1,
+} = {}) {
+  const fixture = prValidationCompletion();
+  const run = fixture.event.workflow_run;
+  run.name = workflow;
+  run.path = `.github/workflows/${workflow === 'CI' ? 'ci' : 'security'}.yml`;
+  run.conclusion = conclusion;
+  run.run_attempt = attempt;
+  if (fork) {
+    run.head_repository = { id: 19, full_name: 'contributor/SlipStream' };
+    run.pull_requests[0].head.repo.id = 19;
+  }
+  const identity = prObservabilityIdentity(fixture.env, fixture.event);
+  const history = {
+    identity,
+    run: structuredClone(run),
+    workflow: { id: run.workflow_id, name: run.name, path: run.path },
+    pull: {
+      number: 7,
+      changed_files: 1,
+      state: 'open',
+      body: '',
+      user: { id: 1 },
+      head: { sha: META.headRevision, repo: { ...run.head_repository } },
+      base: { sha: META.baseRevision, ref: 'main', repo: { ...run.repository } },
+    },
+    reads: [],
+    writes: [],
+  };
+  history.client = {
+    async json(resource, options) {
+      if (options) {
+        history.writes.push({ resource, ...options });
+        return {};
+      }
+      history.reads.push(resource);
+      if (resource === '/pulls/7') return structuredClone(history.pull);
+      if (resource === '/actions/runs/101') return structuredClone(history.run);
+      if (resource === `/actions/workflows/${workflow === 'CI' ? 'ci' : 'security'}.yml`)
+        return structuredClone(history.workflow);
+      if (resource === '/pulls/7/files?per_page=100')
+        return [{ filename: 'README.md', status: 'modified' }];
+      if (resource === '/pulls/7/reviews?per_page=100') return [];
+      if (resource === '/issues/7/labels?per_page=100') return [{ name: 'area:docs' }];
+      if (resource === '/issues/7/comments?per_page=100')
+        return [
+          {
+            id: 9,
+            user: { type: 'Bot', login: 'github-actions[bot]' },
+            body: `${PR_OBSERVABILITY_MARKER}\nPrevious observation`,
+          },
+        ];
+      throw new Error('Unexpected fixture request');
+    },
+  };
+  return history;
+}
+
+test('PR observability completion verifies terminal API outcomes without claiming aggregate success or authorship', async () => {
+  for (const options of [
+    { conclusion: 'failure' },
+    { conclusion: 'success', workflow: 'Security' },
+    { conclusion: 'cancelled', fork: true },
+    { conclusion: 'timed_out', attempt: 2 },
+    { conclusion: 'skipped' },
+  ]) {
+    const history = prCompletionHistory(options);
+    const report = await collectPrObservability({ ...history.identity, client: history.client });
+    report.collector = history.identity.collector;
+    assert.equal(report.validation.status, 'verified-completion');
+    assert.equal(report.validation.source.conclusion, options.conclusion);
+    assert.equal(report.maintenance.status, 'not-requested');
+    assert.deepEqual(report.labels, ['area:docs']);
+    assert.deepEqual(report.errors, []);
+    await publishPrObservability(report, history.client);
+    assert.equal(report.publication, 'applied');
+    assert.deepEqual(
+      history.writes.map((entry) => [entry.method, entry.resource]),
+      [['PATCH', '/issues/comments/9']],
+    );
+    const summary = history.writes[0].body.body;
+    assert.ok(summary.includes(`reported **${options.conclusion}**`));
+    assert.ok(summary.includes(`/actions/runs/101/attempts/${options.attempt ?? 1}`));
+    assert.ok(
+      summary.includes(
+        'not aggregate required-check success, agent authorship, or a verified repair',
+      ),
+    );
+    assert.equal(history.reads.filter((resource) => resource === '/actions/runs/101').length, 3);
+  }
+});
+
+test('PR observability completion withholds publication for stale or mismatched API evidence', async () => {
+  for (const mutate of [
+    (value) => (value.run.id = 102),
+    (value) => (value.run.run_attempt = 2),
+    (value) => (value.run.workflow_id = 12),
+    (value) => (value.run.status = 'queued'),
+    (value) => (value.run.conclusion = 'success'),
+    (value) => (value.run.head_sha = META.revision),
+    (value) => (value.run.repository.full_name = 'other/repository'),
+    (value) => (value.run.pull_requests = []),
+    (value) => (value.run.pull_requests[0].number = 8),
+    (value) => (value.workflow.id = 12),
+    (value) => (value.workflow.name = 'Untrusted'),
+    (value) => (value.workflow.path = '.github/workflows/untrusted.yml'),
+    (value) => (value.pull.head.sha = META.revision),
+    (value) => (value.pull.base.sha = META.revision),
+    (value) => (value.pull.base.ref = 'release'),
+    (value) => (value.pull.head.repo.id = 19),
+    (value) => (value.pull.head.repo.full_name = 'other/repository'),
+    (value) => (value.pull.base.repo.id = 19),
+  ]) {
+    const history = prCompletionHistory();
+    mutate(history);
+    const report = await collectPrObservability({ ...history.identity, client: history.client });
+    assert.equal(report.validation.status, 'unverified');
+    assert.deepEqual(report.labels, []);
+    assert.equal(
+      history.reads.some((resource) => resource.includes('/files?')),
+      false,
+    );
+    await publishPrObservability(report, history.client);
+    assert.equal(report.publication, 'unverified-validation');
+    assert.deepEqual(history.writes, []);
+    assert.ok(renderPrObservability(report).includes('No validation outcome is verified'));
+    assert.ok(!renderPrObservability(report).includes('reported **failure**'));
+  }
+});
+
+test('PR observability completion rechecks run attempts and PR identity before metadata writes', async () => {
+  for (const duringPublication of [false, true]) {
+    const history = prCompletionHistory();
+    const report = await collectPrObservability({ ...history.identity, client: history.client });
+    if (duringPublication) {
+      const json = history.client.json;
+      history.client.json = async (resource, options) => {
+        if (resource === '/issues/7/comments?per_page=100') history.run.run_attempt++;
+        return json(resource, options);
+      };
+    } else history.run.run_attempt++;
+    await publishPrObservability(report, history.client);
+    assert.equal(report.publication, 'stale-validation');
+    assert.equal(report.validation.status, 'unverified');
+    assert.deepEqual(history.writes, []);
+  }
+  for (const mutate of [
+    (pull) => (pull.head.sha = META.revision),
+    (pull) => (pull.head.repo.id = 19),
+    (pull) => (pull.base.repo.id = 19),
+  ]) {
+    const history = prCompletionHistory();
+    const report = await collectPrObservability({ ...history.identity, client: history.client });
+    mutate(history.pull);
+    await publishPrObservability(report, history.client);
+    assert.equal(report.publication, 'stale-pr');
+    assert.deepEqual(history.writes, []);
+  }
+});
+
+test('PR observability completion withholds label definitions when a run changes during inventory reads', async () => {
+  const history = prCompletionHistory();
+  const report = await collectPrObservability({ ...history.identity, client: history.client });
+  const json = history.client.json;
+  history.client.json = async (resource, options) => {
+    if (resource === '/issues/7/labels?per_page=100') return [];
+    if (resource === '/labels/area%3Adocs') {
+      history.run.run_attempt++;
+      return null;
+    }
+    return json(resource, options);
+  };
+  await publishPrObservability(report, history.client);
+  assert.equal(report.publication, 'stale-validation');
+  assert.deepEqual(history.writes, []);
+});
+
+test('PR observability completion keeps unavailable API details out of reports', async () => {
+  const history = prCompletionHistory();
+  const json = history.client.json;
+  history.client.json = async (resource, options) => {
+    if (resource === '/actions/runs/101')
+      throw new Error('synthetic-private-token upstream failure');
+    return json(resource, options);
+  };
+  const report = await collectPrObservability({ ...history.identity, client: history.client });
+  await publishPrObservability(report, history.client);
+  assert.equal(report.publication, 'unverified-validation');
+  assert.deepEqual(history.writes, []);
+  assert.doesNotMatch(JSON.stringify(report), /synthetic-private-token|upstream failure/);
+  assert.doesNotMatch(renderPrObservability(report), /synthetic-private-token|upstream failure/);
+});
+
 test('PR observability validates real ZIPs and Git blobs before labeling a maintenance PR', async (context) => {
   const fixture = maintenanceEvidence(context);
   const change = documentationChange();
@@ -815,16 +1115,48 @@ test('PR observability workflow writes metadata only from trusted default-branch
   const workflow = parse(
     fs.readFileSync(path.join(REPO, '.github/workflows/pr-observability.yml'), 'utf8'),
   );
-  assert.deepEqual(Object.keys(workflow.on).sort(), ['pull_request_target', 'workflow_dispatch']);
+  assert.deepEqual(Object.keys(workflow.on).sort(), [
+    'pull_request_target',
+    'workflow_dispatch',
+    'workflow_run',
+  ]);
+  assert.deepEqual(workflow.on.workflow_run, {
+    workflows: ['CI', 'Security'],
+    types: ['completed'],
+  });
+  assert.deepEqual(
+    workflow.on.workflow_run.workflows,
+    ['ci', 'security'].map(
+      (name) =>
+        parse(fs.readFileSync(path.join(REPO, `.github/workflows/${name}.yml`), 'utf8')).name,
+    ),
+  );
   const job = workflow.jobs.observe;
   assert.match(job.if, /SLIPSTREAM_OBSERVABILITY_ENABLED == 'true'/);
   assert.match(job.if, /github.ref == format/);
+  assert.ok(job.if.includes("github.event.workflow_run.event == 'pull_request'"));
+  assert.ok(job.if.includes("github.event.action == 'completed'"));
+  assert.ok(job.if.includes('github.event.workflow_run.repository.full_name == github.repository'));
+  assert.ok(
+    job.if.includes(
+      'github.event.workflow_run.pull_requests[0].base.ref == github.event.repository.default_branch',
+    ),
+  );
   assert.deepEqual(job.permissions, {
     contents: 'read',
     actions: 'read',
     'pull-requests': 'write',
   });
   assert.equal(workflow.concurrency['cancel-in-progress'], false);
+  assert.equal(
+    workflow.concurrency.group,
+    'pr-observability-${{ github.repository }}-${{ github.event.pull_request.number || inputs.pull_request || github.event.workflow_run.pull_requests[0].number }}',
+  );
+  assert.ok(
+    job.steps
+      .find((step) => step.id === 'context')
+      .run.includes('pull_request_target|workflow_dispatch|workflow_run)'),
+  );
   const checkout = job.steps.find((step) => step.uses?.startsWith('actions/checkout@'));
   assert.deepEqual(checkout.with, { ref: '${{ github.sha }}', 'persist-credentials': false });
   assert.ok(job.steps.some((step) => step.run === 'npm ci --ignore-scripts'));
@@ -835,6 +1167,7 @@ test('PR observability workflow writes metadata only from trusted default-branch
   }
   assert.equal(job.steps.filter((step) => step.env?.GITHUB_TOKEN).length, 1);
   const upload = job.steps.find((step) => step.uses?.startsWith('actions/upload-artifact@'));
+  assert.ok(upload.with.name.includes('github.event.workflow_run.pull_requests[0].number'));
   assert.equal(upload.with['if-no-files-found'], 'error');
   assert.equal(upload.with['retention-days'], 30);
   assert.deepEqual(upload.with.path.trim().split('\n'), [
@@ -853,7 +1186,7 @@ test('PR observability workflow writes metadata only from trusted default-branch
   assert.equal(discovery.env, undefined);
   assert.equal(
     discovery.with.name,
-    'readiness-pr-observability-${{ github.event.pull_request.number || inputs.pull_request }}-${{ github.run_id }}-${{ github.run_attempt }}',
+    'readiness-pr-observability-${{ github.event.pull_request.number || inputs.pull_request || github.event.workflow_run.pull_requests[0].number }}-${{ github.run_id }}-${{ github.run_attempt }}',
   );
 });
 
