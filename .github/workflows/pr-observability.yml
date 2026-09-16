@@ -1,0 +1,84 @@
+name: PR Observability
+
+on:
+  pull_request_target:
+    types:
+      [
+        opened,
+        reopened,
+        synchronize,
+        edited,
+        ready_for_review,
+        converted_to_draft,
+        review_requested,
+        review_request_removed,
+        closed,
+      ]
+  workflow_dispatch:
+    inputs:
+      pull_request:
+        description: PR number to refresh from the default branch
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pr-observability-${{ github.repository }}-${{ github.event.pull_request.number || inputs.pull_request }}
+  cancel-in-progress: false
+
+jobs:
+  observe:
+    if: ${{ vars.SLIPSTREAM_OBSERVABILITY_ENABLED == 'true' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch) }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      actions: read
+      pull-requests: write
+    steps:
+      - id: context
+        name: Require trusted default-branch execution
+        shell: bash
+        env:
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          set -euo pipefail
+          test -n "$DEFAULT_BRANCH"
+          test "$GITHUB_REF" = "refs/heads/$DEFAULT_BRANCH"
+          test "$GITHUB_WORKFLOW_REF" = "$GITHUB_REPOSITORY/.github/workflows/pr-observability.yml@refs/heads/$DEFAULT_BRANCH"
+          case "$GITHUB_EVENT_NAME" in
+            pull_request_target|workflow_dispatch) ;;
+            *) exit 1 ;;
+          esac
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version-file: .node-version
+      - name: Install locked tooling without lifecycle scripts
+        timeout-minutes: 3
+        run: npm ci --ignore-scripts
+      - name: Test provenance and metadata guards
+        timeout-minutes: 2
+        run: node --test --test-name-pattern='^PR observability' tests/readiness.test.mjs
+      - name: Observe and reconcile PR metadata
+        timeout-minutes: 4
+        env:
+          SLIPSTREAM_OBSERVABILITY_ENABLED: ${{ vars.SLIPSTREAM_OBSERVABILITY_ENABLED }}
+          PR_OBSERVABILITY_APPLY: 'true'
+          GITHUB_TOKEN: ${{ github.token }}
+        run: node scripts/check-pr-observability.mjs
+      - name: Retain the observation snapshot
+        if: ${{ always() && steps.context.outcome == 'success' }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: pr-observability-${{ github.event.pull_request.number || inputs.pull_request }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            test-results/pr-observability/report.json
+            test-results/pr-observability/summary.md
+          if-no-files-found: error
+          retention-days: 30
