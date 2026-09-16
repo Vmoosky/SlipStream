@@ -9,6 +9,7 @@ import { parse } from 'yaml';
 import { ESLint } from 'eslint';
 import { resolveConfig, resolveConfigFile } from 'prettier';
 import { developmentPlan, runDevelopmentCommand, runDevelopment } from '../scripts/develop.mjs';
+import { writeReadinessReport } from '../scripts/check-readiness-reports.mjs';
 import {
   agentReviewArguments,
   agentReviewEnvironment,
@@ -173,6 +174,154 @@ function artifacts(context) {
     },
   };
 }
+
+test('readiness reports retain exact producer bytes, identities and unsuccessful statuses', (context) => {
+  const { root } = fixture(context);
+  for (const [kind, filename] of [
+    ['bounded-agent-review', 'agent-review.json'],
+    ['pr-observability', 'pr-observability.json'],
+  ]) {
+    const report = {
+      schemaVersion: 1,
+      kind,
+      ...META,
+      status: 'failed',
+      invocations: 0,
+      errors: ['Synthetic failure'],
+      automaticPublication: false,
+    };
+    const bytes = Buffer.from(`${JSON.stringify(report, null, 2)}\n`);
+    const relative = writeReadinessReport(root, bytes);
+    assert.equal(relative, `reports/${filename}`);
+    assert.deepEqual(fs.readFileSync(path.join(root, relative)), bytes);
+    assert.throws(() => writeReadinessReport(root, bytes), /EEXIST/);
+    assert.deepEqual(fs.readFileSync(path.join(root, relative)), bytes);
+  }
+});
+
+test('readiness reports reject malformed, oversized and unrelated inputs without writing', (context) => {
+  const { root } = fixture(context);
+  for (const bytes of [
+    '{}',
+    Buffer.alloc(0),
+    Buffer.alloc(1024 * 1024 + 1),
+    Buffer.from([0xff]),
+    Buffer.from('{'),
+    Buffer.from('null'),
+    Buffer.from('[]'),
+    Buffer.from('{}'),
+    Buffer.from('{"schemaVersion":2,"kind":"pr-observability"}'),
+    Buffer.from('{"schemaVersion":1,"kind":"../../report"}'),
+    Buffer.from('{"schemaVersion":1,"kind":"__proto__"}'),
+  ]) {
+    assert.throws(() => writeReadinessReport(root, bytes));
+  }
+  assert.equal(fs.existsSync(path.join(root, 'reports')), false);
+});
+
+test('readiness reports reject a linked output directory', (context) => {
+  const { root } = fixture(context);
+  const target = path.join(root, 'outside');
+  fs.mkdirSync(target);
+  fs.symlinkSync(
+    target,
+    path.join(root, 'reports'),
+    process.platform === 'win32' ? 'junction' : 'dir',
+  );
+  assert.throws(
+    () => writeReadinessReport(root, Buffer.from('{"schemaVersion":1,"kind":"pr-observability"}')),
+    /real output directory/,
+  );
+  assert.deepEqual(fs.readdirSync(target), []);
+});
+
+test('PR observability consumes conventional label configuration as its rule source', () => {
+  const configuration = {
+    'area:core': [{ 'changed-files': [{ 'any-glob-to-any-file': ['custom-core/**'] }] }],
+  };
+  assert.deepEqual(
+    pullRequestAreaLabels([{ filename: 'custom-core/engine.ts' }], 1, configuration),
+    ['area:core'],
+  );
+  assert.deepEqual(
+    pullRequestAreaLabels([{ filename: 'packages/core/src/engine.ts' }], 1, configuration),
+    [],
+  );
+});
+
+test('PR observability label configuration preserves path and rename boundaries', () => {
+  const cases = [
+    ['packages/core', ['area:core']],
+    ['packages/core/src/.internal.ts', ['area:core']],
+    ['packages/core/README.Md', ['area:core', 'area:docs']],
+    ['packages/core-extra/src/engine.ts', []],
+    ['packages/extension/src/extension.ts', ['area:extension']],
+    ['packages/mcp-server/src/server.ts', ['area:mcp']],
+    ['packages/hook-runtime/src/hook.ts', ['area:hooks']],
+    ['packages/copilot-plugin/plugin.json', ['area:plugin']],
+    ['.github/labeler.yml', ['area:tooling']],
+    ['.github/.nested/config.yml', ['area:tooling']],
+    ['scripts/check.mjs', ['area:tooling']],
+    ['tests/example.test.mjs', ['area:tooling']],
+    ['e2e/README.markdown', ['area:docs', 'area:tooling']],
+    ['docs/guide.MARKdown', ['area:docs']],
+    ['.node-version', ['area:tooling']],
+    ['package.json', ['area:tooling']],
+    ['README.MD', ['area:docs']],
+    ['GUIDE.MARKDOWN', ['area:docs']],
+    ['llms.txt', ['area:docs']],
+    ['LLMS.txt', ['area:tooling']],
+    ['docs/llms.txt', []],
+  ];
+  for (const [filename, expected] of cases) {
+    assert.deepEqual(pullRequestAreaLabels([{ filename }], 1), expected, filename);
+  }
+  assert.deepEqual(
+    pullRequestAreaLabels(
+      [{ filename: 'docs/guide.md', previous_filename: 'scripts/guide.md' }],
+      1,
+    ),
+    ['area:docs', 'area:tooling'],
+  );
+  assert.deepEqual(
+    pullRequestAreaLabels(
+      [{ filename: 'README.md' }, { filename: 'packages/core/src/engine.ts' }],
+      2,
+    ),
+    ['area:core', 'area:docs'],
+  );
+});
+
+test('PR observability rejects unsupported label rules and configuration-based provenance', () => {
+  const rules = [{ 'changed-files': [{ 'any-glob-to-any-file': '**' }] }];
+  const configurationFor = (selector) => ({
+    'area:core': [{ 'changed-files': [selector] }],
+  });
+  for (const configuration of [
+    null,
+    [],
+    {},
+    { 'area:unknown': rules },
+    { 'automation:maintenance': rules },
+    { 'area:core': [] },
+    { 'area:core': [rules[0], rules[0]] },
+    { 'area:core': [{ 'head-branch': '.*' }] },
+    { 'area:core': [{ 'changed-files': [] }] },
+    { 'area:core': [{ 'changed-files': rules[0]['changed-files'], all: [] }] },
+    configurationFor({ 'all-globs-to-all-files': '**' }),
+    configurationFor({ 'any-glob-to-any-file': [] }),
+    configurationFor({ 'any-glob-to-any-file': [''] }),
+    configurationFor({ 'any-glob-to-any-file': [42] }),
+    configurationFor({ 'any-glob-to-any-file': ['x'.repeat(501)] }),
+    configurationFor({ 'any-glob-to-any-file': Array(33).fill('**') }),
+    configurationFor({ 'any-glob-to-any-file': '**', 'all-globs-to-any-file': '**' }),
+  ]) {
+    assert.throws(
+      () => pullRequestAreaLabels([{ filename: 'packages/core/src/engine.ts' }], 1, configuration),
+      /Invalid or incomplete PR observability evidence/,
+    );
+  }
+});
 
 test('PR observability accepts only exact same-repository maintenance attempt references', () => {
   const repository = 'Vmoosky/SlipStream';
@@ -1025,6 +1174,20 @@ test('PR observability workflow writes metadata only from trusted default-branch
     'test-results/pr-observability/report.json',
     'test-results/pr-observability/summary.md',
   ]);
+  const observation = job.steps.find((step) => step.id === 'observation');
+  assert.equal(observation.run, 'node scripts/check-pr-observability.mjs');
+  const discovery = job.steps.find((step) => step.with?.path === 'reports/pr-observability.json');
+  assert.equal(
+    discovery.if,
+    "${{ always() && steps.context.outcome == 'success' && steps.observation.outputs.readiness_report_path != '' }}",
+  );
+  assert.equal(discovery.with['if-no-files-found'], 'error');
+  assert.equal(discovery.with['retention-days'], 30);
+  assert.equal(discovery.env, undefined);
+  assert.equal(
+    discovery.with.name,
+    'readiness-pr-observability-${{ github.event.pull_request.number || inputs.pull_request || github.event.workflow_run.pull_requests[0].number }}-${{ github.run_id }}-${{ github.run_attempt }}',
+  );
 });
 
 test('workspaces build in dependency order including the source-bundled plugin', () => {
@@ -1243,13 +1406,15 @@ function developmentFixture(context) {
   return { root, npmCli, nodeVersion: '24.14.1', log: () => {} };
 }
 
-test('development runner retains LF in Windows-style Git checkouts', (context) => {
+test('development runner and label configuration retain LF in Windows-style Git checkouts', (context) => {
   const { root } = fixture(context);
-  const file = 'scripts/develop.mjs';
+  const files = ['scripts/develop.mjs', '.github/labeler.yml'];
   const checkout = path.join(root, 'windows checkout');
-  fs.mkdirSync(path.join(root, 'scripts'));
   fs.copyFileSync(path.join(REPO, '.gitattributes'), path.join(root, '.gitattributes'));
-  fs.copyFileSync(path.join(REPO, file), path.join(root, file));
+  for (const file of files) {
+    fs.mkdirSync(path.dirname(path.join(root, file)), { recursive: true });
+    fs.copyFileSync(path.join(REPO, file), path.join(root, file));
+  }
   const git = (args) =>
     execFileSync(
       'git',
@@ -1257,11 +1422,13 @@ test('development runner retains LF in Windows-style Git checkouts', (context) =
       { stdio: 'pipe' },
     );
   git(['init', '--quiet']);
-  git(['add', '--', '.gitattributes', file]);
-  git(['checkout-index', `--prefix=${checkout.replaceAll(path.sep, '/')}/`, '--', file]);
-  const checkedOut = fs.readFileSync(path.join(checkout, file), 'utf8');
-  assert.equal(checkedOut.includes('\r\n'), false, 'Git checkout must keep LF for Prettier');
-  assert.equal(checkedOut, fs.readFileSync(path.join(REPO, file), 'utf8'));
+  git(['add', '--', '.gitattributes', ...files]);
+  git(['checkout-index', `--prefix=${checkout.replaceAll(path.sep, '/')}/`, '--', ...files]);
+  for (const file of files) {
+    const checkedOut = fs.readFileSync(path.join(checkout, file), 'utf8');
+    assert.equal(checkedOut.includes('\r\n'), false, `${file} must keep LF for Prettier`);
+    assert.equal(checkedOut, fs.readFileSync(path.join(REPO, file), 'utf8'));
+  }
 });
 
 test('development setup rejects invalid modes and Node pins before running commands', async (context) => {
@@ -5072,7 +5239,7 @@ test('maintenance workflow stays opt-in, read-only, bounded and default-branch-o
       assert.equal(step.with['node-version-file'], '.node-version');
   }
   const uploads = job.steps.filter((step) => step.uses?.startsWith('actions/upload-artifact@'));
-  assert.equal(uploads.length, 2);
+  assert.equal(uploads.length, 3);
   for (const step of uploads) {
     assert.equal(step.with['retention-days'], 7);
     assert.equal(step.with['if-no-files-found'], 'error');
@@ -5089,6 +5256,16 @@ test('maintenance workflow stays opt-in, read-only, bounded and default-branch-o
     "${{ !cancelled() && steps.verify.outcome == 'success' && steps.verify.outputs.proposal_path != '' }}",
   );
   assert.equal(uploads[1].with.path, '${{ steps.verify.outputs.proposal_path }}');
+  assert.equal(
+    uploads[2].if,
+    "${{ always() && steps.context.outcome == 'success' && steps.agent_review.outputs.readiness_report_path != '' }}",
+  );
+  assert.equal(uploads[2].with.path, 'reports/agent-review.json');
+  assert.equal(
+    uploads[2].with.name,
+    'readiness-agent-review-${{ github.run_id }}-${{ github.run_attempt }}',
+  );
+  assert.equal(uploads[2].env, undefined);
 });
 
 test('bounded agent review workflow exposes its dedicated credential only after verified opt-in preparation', () => {

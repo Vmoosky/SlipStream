@@ -146,6 +146,37 @@ required checks actually being enforced. The
 [readiness reassessment](docs/readiness-assessment.md) records the local progress,
 verified snapshot, evaluator limitations, and outstanding activation steps.
 
+## Readiness Reports
+
+The existing review and observability producers also use the
+[report writer](scripts/check-readiness-reports.mjs) to emit byte-identical,
+normalized JSON at `reports/agent-review.json` and `reports/pr-observability.json`.
+Separate `readiness-agent-review-RUN-ATTEMPT` and
+`readiness-pr-observability-PR-RUN-ATTEMPT` artifacts retain these files for seven
+and 30 days, respectively. Uploads require an emitted report path, not a successful
+decision; failure and unavailable states remain visible. Existing evidence and
+proposal archives, their verification contracts, and runtime safeguards are unchanged.
+Raw sessions, credentials, runtime archives, and additional source text are not uploaded.
+
+These files are transient evaluation inputs, not committed source or proof that
+an operation succeeded. For a local evaluation, select explicit retained producer
+runs and verify the repository, workflow, run, attempt, source revision, artifact
+size and SHA-256 digest against GitHub metadata. Match the source snapshot to the
+report's collector or review revision; the observed PR head and base remain separate
+identities. Extract only the expected JSON into `reports/` in a disposable checkout,
+preserving its bytes and original status. Do not copy reports into the primary
+worktree, stage them, select them by file timestamp, or relabel historical reports
+as current execution.
+
+The installed extractor discovers actual, nonignored files in `reports/`, but not
+an upload declaration alone, ignored files, or reports under `test-results/`.
+Evaluate the prepared local checkout; a fresh URL-based checkout will not contain
+downloaded runtime artifacts. Its static agentic-workflow detector still misses
+the guarded Node review runner, including local composite-action and timeout-wrapper
+forms. Report discovery does not change that flag, replace independent approval,
+or establish a successful review, repair, or score increase. No review artifact
+exists until an eligible real run produces one.
+
 ## PR Observability
 
 The [observability workflow](.github/workflows/pr-observability.yml) is opt-in via
@@ -179,6 +210,13 @@ The [collector](scripts/check-pr-observability.mjs) manages `area:core`,
 `area:extension`, `area:mcp`, `area:hooks`, `area:plugin`, `area:tooling`, and
 `area:docs` from a complete, bounded PR file inventory. These are area labels,
 not claims of automation origin. Other labels and human comments are preserved.
+Area rules come from the conventional [label configuration](.github/labeler.yml),
+which is consumed by the collector rather than a second labeling workflow. Its
+supported subset is one `changed-files` group per allowed area label, using
+`any-glob-to-any-file` or `all-globs-to-any-file`. Dotfiles and previous paths of
+renamed files are included; unsupported configuration fails closed. File rules
+cannot grant `automation:maintenance`, which still requires the provenance below.
+
 It maintains one marked GitHub Actions comment linking the exact PR head, current
 PR checks, maintenance source and artifacts where verified, human review snapshot,
 and observation run. JSON and Markdown observations are retained for 30 days,

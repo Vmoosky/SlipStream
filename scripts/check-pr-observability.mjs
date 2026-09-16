@@ -4,10 +4,13 @@ import * as path from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { isDeepStrictEqual } from 'node:util';
+import { Minimatch } from 'minimatch';
+import { parse } from 'yaml';
 import yauzl from 'yauzl';
-import { DOC_CONTRACTS, isDocumentationFile } from './check-ci.mjs';
+import { DOC_CONTRACTS } from './check-ci.mjs';
 import { MAINTENANCE_LIMITS, validateDocumentationProposal } from './maintenance.mjs';
 import { createImprovementClient } from './check-improvement.mjs';
+import { writeReadinessReport } from './check-readiness-reports.mjs';
 
 export const PR_OBSERVABILITY_LIMITS = Object.freeze({
   files: 100,
@@ -38,6 +41,46 @@ export const PR_OBSERVABILITY_LABELS = Object.freeze({
       'Maintenance proposal verified at the linked PR snapshot; not approval or authorship',
   },
 });
+
+const AREA_LABEL_CONFIGURATION = parse(
+  fs.readFileSync(new URL('../.github/labeler.yml', import.meta.url), 'utf8'),
+  { maxAliasCount: 0 },
+);
+
+function areaLabelRules(configuration) {
+  requireEvidence(
+    configuration && typeof configuration === 'object' && !Array.isArray(configuration),
+  );
+  const entries = Object.entries(configuration);
+  requireEvidence(
+    entries.length > 0 && entries.length < Object.keys(PR_OBSERVABILITY_LABELS).length,
+  );
+  return entries.map(([label, rules]) => {
+    requireEvidence(label.startsWith('area:') && Object.hasOwn(PR_OBSERVABILITY_LABELS, label));
+    requireEvidence(Array.isArray(rules) && rules.length === 1);
+    const group = rules[0];
+    requireEvidence(group && Object.keys(group).length === 1);
+    const selectors = group['changed-files'];
+    requireEvidence(Array.isArray(selectors) && selectors.length > 0 && selectors.length <= 8);
+    const checks = selectors.map((selector) => {
+      requireEvidence(selector && Object.keys(selector).length === 1);
+      const [strategy] = Object.keys(selector);
+      requireEvidence(['any-glob-to-any-file', 'all-globs-to-any-file'].includes(strategy));
+      const globs =
+        typeof selector[strategy] === 'string' ? [selector[strategy]] : selector[strategy];
+      requireEvidence(Array.isArray(globs) && globs.length > 0 && globs.length <= 32);
+      const matchers = globs.map((glob) => {
+        requireEvidence(typeof glob === 'string' && glob.length > 0 && glob.length <= 500);
+        return new Minimatch(glob, { dot: true });
+      });
+      return (filename) =>
+        strategy === 'all-globs-to-any-file'
+          ? matchers.every((matcher) => matcher.match(filename))
+          : matchers.some((matcher) => matcher.match(filename));
+    });
+    return { label, matches: (filename) => checks.some((check) => check(filename)) };
+  });
+}
 
 function requireEvidence(condition) {
   if (!condition) throw new Error('Invalid or incomplete PR observability evidence');
@@ -76,7 +119,11 @@ export function parseMaintenanceRun(repository, body = '') {
   return { runId, attempt, url: value };
 }
 
-export function pullRequestAreaLabels(files, changedFiles) {
+export function pullRequestAreaLabels(
+  files,
+  changedFiles,
+  configuration = AREA_LABEL_CONFIGURATION,
+) {
   requireEvidence(Array.isArray(files) && files.length === changedFiles);
   requireEvidence(
     Number.isSafeInteger(changedFiles) &&
@@ -85,14 +132,7 @@ export function pullRequestAreaLabels(files, changedFiles) {
   );
   requireEvidence(files.every((file) => typeof file?.filename === 'string'));
   requireEvidence(new Set(files.map((file) => file.filename)).size === files.length);
-  const labels = new Set();
-  const workspaces = {
-    core: 'area:core',
-    extension: 'area:extension',
-    'mcp-server': 'area:mcp',
-    'hook-runtime': 'area:hooks',
-    'copilot-plugin': 'area:plugin',
-  };
+  const filenames = [];
   for (const file of files) {
     for (const filename of [file.filename, file.previous_filename].filter(
       (value) => value !== undefined,
@@ -108,18 +148,13 @@ export function pullRequestAreaLabels(files, changedFiles) {
           !filename.startsWith('/'),
       );
       requireEvidence(filename.split('/').every((part) => part && part !== '.' && part !== '..'));
-      const segments = filename.split('/');
-      if (segments[0] === 'packages' && Object.hasOwn(workspaces, segments[1]))
-        labels.add(workspaces[segments[1]]);
-      if (
-        ['.github', 'scripts', 'tests', 'e2e'].includes(segments[0]) ||
-        (segments.length === 1 && !isDocumentationFile(filename))
-      )
-        labels.add('area:tooling');
-      if (isDocumentationFile(filename)) labels.add('area:docs');
+      filenames.push(filename);
     }
   }
-  return [...labels].sort();
+  return areaLabelRules(configuration)
+    .filter((rule) => filenames.some(rule.matches))
+    .map((rule) => rule.label)
+    .sort();
 }
 
 const digest = (bytes) => createHash('sha256').update(bytes).digest('hex');
@@ -844,9 +879,13 @@ async function main() {
     report.errors.push('Metadata publication failed; no automatic retry was attempted.');
     process.exitCode = 1;
   } finally {
-    fs.writeFileSync(path.join(directory, 'report.json'), `${JSON.stringify(report, null, 2)}\n`);
+    const bytes = Buffer.from(`${JSON.stringify(report, null, 2)}\n`);
+    fs.writeFileSync(path.join(directory, 'report.json'), bytes);
     const summary = renderPrObservability(report);
     fs.writeFileSync(path.join(directory, 'summary.md'), `${summary}\n`);
+    const readinessReport = writeReadinessReport(root, bytes);
+    if (process.env.GITHUB_OUTPUT)
+      fs.appendFileSync(process.env.GITHUB_OUTPUT, `readiness_report_path=${readinessReport}\n`);
     if (process.env.GITHUB_STEP_SUMMARY)
       fs.appendFileSync(process.env.GITHUB_STEP_SUMMARY, `${summary}\n`);
     if (['stale-pr', 'stale-validation', 'unverified-validation'].includes(report.publication))
