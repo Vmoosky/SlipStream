@@ -1,0 +1,36 @@
+{
+  "name": "Slipstream",
+  "build": {
+    "dockerfile": "Dockerfile",
+    "context": "."
+  },
+  "workspaceMount": "source=${localWorkspaceFolder},target=/workspaces/slipstream,type=bind",
+  "workspaceFolder": "/workspaces/slipstream",
+  "containerUser": "node",
+  "remoteUser": "node",
+  "updateRemoteUserUID": true,
+  "init": true,
+  "runArgs": ["--shm-size=1g"],
+  "mounts": [
+    "source=slipstream-${devcontainerId}-root-node-modules,target=${containerWorkspaceFolder}/node_modules,type=volume,volume-nocopy",
+    "source=slipstream-${devcontainerId}-core-node-modules,target=${containerWorkspaceFolder}/packages/core/node_modules,type=volume,volume-nocopy",
+    "source=slipstream-${devcontainerId}-hook-runtime-node-modules,target=${containerWorkspaceFolder}/packages/hook-runtime/node_modules,type=volume,volume-nocopy",
+    "source=slipstream-${devcontainerId}-mcp-server-node-modules,target=${containerWorkspaceFolder}/packages/mcp-server/node_modules,type=volume,volume-nocopy",
+    "source=slipstream-${devcontainerId}-copilot-plugin-node-modules,target=${containerWorkspaceFolder}/packages/copilot-plugin/node_modules,type=volume,volume-nocopy",
+    "source=slipstream-${devcontainerId}-extension-node-modules,target=${containerWorkspaceFolder}/packages/extension/node_modules,type=volume,volume-nocopy"
+  ],
+  "postCreateCommand": "sudo -n /usr/bin/chown -R node /workspaces/slipstream/node_modules /workspaces/slipstream/packages/core/node_modules /workspaces/slipstream/packages/hook-runtime/node_modules /workspaces/slipstream/packages/mcp-server/node_modules /workspaces/slipstream/packages/copilot-plugin/node_modules /workspaces/slipstream/packages/extension/node_modules && npm run setup",
+  "waitFor": "postCreateCommand",
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "EditorConfig.EditorConfig",
+        "dbaeumer.vscode-eslint",
+        "esbenp.prettier-vscode"
+      ],
+      "settings": {
+        "typescript.tsdk": "node_modules/typescript/lib"
+      }
+    }
+  }
+}

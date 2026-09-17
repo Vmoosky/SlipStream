@@ -60,6 +60,35 @@ proof applies its known fix in a scratch copy. Do not repair the original fixtur
 or run a separate install there. The policy arm is simulated, not live-provider
 quality, billing, routing, or budget-enforcement evidence.
 
+## Development Container
+
+With Docker running in Linux-container mode and the VS Code Dev Containers
+extension installed, open the Slipstream repository folder and select
+**Dev Containers: Reopen in Container**. The
+[container configuration](.devcontainer/devcontainer.json) uses a
+[Node image](.devcontainer/Dockerfile) pinned to [.node-version](.node-version).
+It provisions Chromium's system libraries with the locked Playwright version at
+image build time, then runs `npm run setup` as the non-root `node` user during
+container creation. VS Code waits for setup to finish before attaching.
+
+Root and workspace `node_modules` directories use separate, per-checkout Docker
+volumes without copying host dependencies. A narrowly scoped, noninteractive sudo
+command grants `node` ownership of only those volumes before setup. Source files
+and build/test outputs remain shared with the host; use a separate checkout for
+simultaneous host and container builds. No Docker socket or extra credential
+directories are mounted, and Git hooks remain opt-in.
+
+Run `npm run validate` in the container after setup. Reopening an existing container
+does not reinstall dependencies automatically; rerun setup after lockfile changes.
+When the Node pin or locked Playwright version changes, update the Dockerfile and
+select **Dev Containers: Rebuild Container**. The readiness tests check these pins,
+dependency mounts, and lifecycle commands for drift.
+
+The shared [EditorConfig](.editorconfig) supplies UTF-8, LF, and two-space defaults
+consistent with Prettier, preserving Markdown trailing-space line breaks. The
+container includes EditorConfig, ESLint, and Prettier editor extensions and uses
+the repository's TypeScript installation. It does not enable format-on-save.
+
 ## Pre-Commit Checks
 
 After setup, opt in to the repository's Git hook explicitly:

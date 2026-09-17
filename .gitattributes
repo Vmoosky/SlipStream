@@ -12,3 +12,5 @@ tests/readiness.test.mjs text eol=lf
 .github/dependabot.yml text eol=lf
 .github/labeler.yml text eol=lf
 .husky/pre-commit text eol=lf
+.editorconfig text eol=lf
+.devcontainer/* text eol=lf

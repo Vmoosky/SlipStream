@@ -7,7 +7,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { execFileSync, spawnSync } from 'node:child_process';
 import { parse } from 'yaml';
 import { ESLint } from 'eslint';
-import { resolveConfig, resolveConfigFile } from 'prettier';
+import { check, resolveConfig, resolveConfigFile } from 'prettier';
 import { developmentPlan, runDevelopmentCommand, runDevelopment } from '../scripts/develop.mjs';
 import { writeReadinessReport } from '../scripts/check-readiness-reports.mjs';
 import {
@@ -1350,6 +1350,102 @@ test('workspace boundaries apply to source and tests in every module format, not
     });
     assert.equal(result.errorCount, 0, JSON.stringify(result.messages));
     assert.equal(result.warningCount, 0);
+  }
+});
+
+test('development container pins toolchains and isolates non-root setup', async () => {
+  const manifest = JSON.parse(fs.readFileSync(path.join(REPO, 'package.json'), 'utf8'));
+  const lock = JSON.parse(fs.readFileSync(path.join(REPO, 'package-lock.json'), 'utf8'));
+  const filename = path.join(REPO, '.devcontainer/devcontainer.json');
+  const source = fs.readFileSync(filename, 'utf8');
+  const container = JSON.parse(source);
+  const dockerfile = fs.readFileSync(path.join(REPO, '.devcontainer/Dockerfile'), 'utf8');
+  const nodeVersion = fs.readFileSync(path.join(REPO, '.node-version'), 'utf8').trim();
+  const playwrightVersion = lock.packages['node_modules/playwright'].version;
+  assert.equal(dockerfile.split('\n')[0], `FROM node:${nodeVersion}-bookworm`);
+  assert.ok(dockerfile.includes(`npx --yes playwright@${playwrightVersion} install-deps chromium`));
+  assert.match(dockerfile, /WORKDIR \/workspaces\/slipstream\nUSER node\n$/);
+  assert.deepEqual(container.build, { dockerfile: 'Dockerfile', context: '.' });
+  assert.equal(container.workspaceFolder, '/workspaces/slipstream');
+  assert.equal(
+    container.workspaceMount,
+    'source=${localWorkspaceFolder},target=/workspaces/slipstream,type=bind',
+  );
+  assert.equal(container.containerUser, 'node');
+  assert.equal(container.remoteUser, 'node');
+  assert.equal(container.updateRemoteUserUID, true);
+  assert.equal(container.init, true);
+  assert.deepEqual(container.runArgs, ['--shm-size=1g']);
+  const dependencyRoots = [
+    ['root', 'node_modules'],
+    ...manifest.workspaces.map((workspace) => [
+      path.posix.basename(workspace),
+      `${workspace}/node_modules`,
+    ]),
+  ];
+  assert.deepEqual(
+    container.mounts,
+    dependencyRoots.map(
+      ([name, directory]) =>
+        `source=slipstream-\${devcontainerId}-${name}-node-modules,target=\${containerWorkspaceFolder}/${directory},type=volume,volume-nocopy`,
+    ),
+  );
+  const ownership = `/usr/bin/chown -R node ${dependencyRoots
+    .map(([, directory]) => `${container.workspaceFolder}/${directory}`)
+    .join(' ')}`;
+  assert.equal(container.postCreateCommand, `sudo -n ${ownership} && npm run setup`);
+  assert.ok(dockerfile.includes(`'node ALL=(root) NOPASSWD: ${ownership}'`));
+  assert.doesNotMatch(dockerfile, /NOPASSWD:\s+ALL/);
+  assert.equal(container.waitFor, 'postCreateCommand');
+  for (const lifecycle of [
+    'initializeCommand',
+    'onCreateCommand',
+    'updateContentCommand',
+    'postStartCommand',
+    'postAttachCommand',
+  ])
+    assert.equal(container[lifecycle], undefined);
+  assert.ok(container.customizations.vscode.extensions.includes('EditorConfig.EditorConfig'));
+  assert.equal(
+    container.customizations.vscode.settings['typescript.tsdk'],
+    'node_modules/typescript/lib',
+  );
+  assert.equal(
+    await check(source, {
+      ...(await resolveConfig(filename, { editorconfig: true })),
+      filepath: filename,
+    }),
+    true,
+  );
+});
+
+test('development editor defaults preserve formatting and LF container inputs', async () => {
+  const manifest = JSON.parse(fs.readFileSync(path.join(REPO, 'package.json'), 'utf8'));
+  const formatter = JSON.parse(fs.readFileSync(path.join(REPO, '.prettierrc.json'), 'utf8'));
+  for (const file of [
+    'scripts/develop.mjs',
+    'CONTRIBUTING.md',
+    '.devcontainer/devcontainer.json',
+    ...manifest.workspaces.map((workspace) => `${workspace}/package.json`),
+  ])
+    assert.deepEqual(
+      await resolveConfig(path.join(REPO, file), { editorconfig: true }),
+      { useTabs: false, tabWidth: 2, ...formatter },
+      file,
+    );
+  const files = ['.editorconfig', '.devcontainer/Dockerfile', '.devcontainer/devcontainer.json'];
+  const attributes = execFileSync('git', ['check-attr', 'eol', '--', ...files], {
+    cwd: REPO,
+    encoding: 'utf8',
+  });
+  assert.deepEqual(
+    attributes.trim().split(/\r?\n/),
+    files.map((file) => `${file}: eol: lf`),
+  );
+  for (const file of files) {
+    const source = fs.readFileSync(path.join(REPO, file), 'utf8');
+    assert.doesNotMatch(source, /\r/, file);
+    assert.ok(source.endsWith('\n'), file);
   }
 });
 
