@@ -10,7 +10,8 @@ import { recordModelObservation, type ModelObservation } from '../src/modelTelem
 import { startDashboardServer, watchLedgerChanges, type DashboardServerHandle, type DashboardServerOptions } from '../src/dashboardServer.js';
 import { SavingsLedger } from '../src/savingsLedger.js';
 import type { DashboardDetailPayload, DashboardSummaryPayload } from '../src/dashboard.js';
-import { buildSummaryPayload } from '../src/dashboard.js';
+import { buildSummaryPayload, renderDashboardReportMarkdown, renderDashboardReportJson, renderDashboardReportCsv } from '../src/dashboard.js';
+import { formatDashboardReportMarkdown, formatDashboardReportJson, formatDashboardReportCsv } from '../src/dashboardReports.js';
 import { jestFailureLog, sourceFile } from './fixtures.js';
 
 const tempRoots: string[] = [];
@@ -66,6 +67,13 @@ async function json<T>(url: string): Promise<T> {
   const response = await fetch(url);
   expect(response.status).toBe(200);
   return (await response.json()) as T;
+}
+
+function freezeSnapshot(value: object): void {
+  for (const entry of Object.values(value)) {
+    if (entry !== null && typeof entry === 'object') freezeSnapshot(entry);
+  }
+  Object.freeze(value);
 }
 
 describe('dashboard end to end', () => {
@@ -863,6 +871,78 @@ describe('dashboard end to end', () => {
     expect(csv).toContain('"traffic","producerSessions"');
     expect(csv).toContain('"workspace"');
     expect(csv).toContain('"event","$ npm test"');
+  });
+
+  it.each(['empty', 'populated'] as const)('formats a captured %s report snapshot without a live engine or mutation', async (kind) => {
+    const engine = kind === 'populated'
+      ? (await startSeededDashboard()).engine
+      : new CompressionEngine({ rootDir: tempRoot(), workspaceRoots: [] });
+    const clock = vi.spyOn(Date, 'now').mockReturnValue(Date.now());
+    try {
+      const generatedAt = new Date('2026-09-16T12:00:00.000Z');
+      const status = { viewerConnections: 3 };
+      const snapshot = structuredClone(buildSummaryPayload(engine, status));
+      const original = structuredClone(snapshot);
+      const expected = {
+        markdown: renderDashboardReportMarkdown(engine, generatedAt, status),
+        json: renderDashboardReportJson(engine, generatedAt, status),
+        csv: renderDashboardReportCsv(engine, generatedAt, status),
+      };
+      freezeSnapshot(snapshot);
+      engine.dispose();
+
+      expect(formatDashboardReportMarkdown(snapshot, generatedAt.toISOString())).toBe(expected.markdown);
+      expect(formatDashboardReportJson(snapshot, generatedAt.toISOString())).toBe(expected.json);
+      expect(formatDashboardReportCsv(snapshot, generatedAt.toISOString())).toBe(expected.csv);
+      expect(snapshot).toEqual(original);
+      expect(JSON.parse(expected.json)).toEqual({ generatedAt: generatedAt.toISOString(), ...snapshot });
+      expect(expected.markdown).toContain('| Dashboard viewers | 3 |');
+      expect(expected.csv).toContain('"traffic","dashboardViewers","3",""');
+      for (const report of Object.values(expected)) expect(report).toMatch(/[^\n]\n$/);
+    } finally {
+      clock.mockRestore();
+      engine.dispose();
+    }
+  });
+
+  it('escapes captured report fields and preserves unknown costs in every format', async () => {
+    const { engine } = await startSeededDashboard();
+    try {
+      const snapshot = structuredClone(buildSummaryPayload(engine));
+      const generatedAt = '2026-09-16T12:00:00.000Z';
+      const label = 'path "report", left\\|right\r\nsecond row';
+      snapshot.workspaceAttribution[0]!.label = label;
+      snapshot.events[0]!.label = label;
+      snapshot.summary.estimatedCostSavedUsd = null;
+      freezeSnapshot(snapshot);
+
+      const markdown = formatDashboardReportMarkdown(snapshot, generatedAt);
+      expect(markdown).toContain(String.raw`| path "report", left\\\|right second row |`);
+      expect(markdown).toContain('| Estimated saving | N/A |');
+      expect(markdown).toContain('## Outcome reasons\n\n| Reason | Calls | Saved |\n|---|---:|---:|\n');
+      expect(markdown).toContain('## Daily savings\n\n| Date | Calls | In | Out | Saved | % |\n|---|---:|---:|---:|---:|---:|\n');
+      const csv = formatDashboardReportCsv(snapshot, generatedAt);
+      expect(csv).toContain('"event","path ""report"", left\\|right\r\nsecond row",');
+      expect(csv).toContain('"summary","estimatedCostSavedUsd","N/A",""');
+      const jsonReport = JSON.parse(formatDashboardReportJson(snapshot, generatedAt));
+      expect(jsonReport.events[0].label).toBe(label);
+      expect(jsonReport.workspaceAttribution[0].label).toBe(label);
+      expect(jsonReport.summary.estimatedCostSavedUsd).toBeNull();
+    } finally {
+      engine.dispose();
+    }
+  });
+
+  it('rejects an invalid JSON report timestamp before reading the ledger', () => {
+    const engine = new CompressionEngine({ rootDir: tempRoot(), workspaceRoots: [] });
+    const readLedger = vi.spyOn(engine.ledger, 'all');
+    try {
+      expect(() => renderDashboardReportJson(engine, new Date(Number.NaN))).toThrow(RangeError);
+      expect(readLedger).not.toHaveBeenCalled();
+    } finally {
+      readLedger.mockRestore();
+      engine.dispose();
+    }
   });
 
   it('preserves literal backslashes in Markdown activity labels', async () => {
