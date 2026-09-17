@@ -5,6 +5,7 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { pathToFileURL } from 'node:url';
+import { stringify } from 'yaml';
 import { checkDocs } from '../scripts/check-docs.mjs';
 import { DOC_CONTRACTS } from '../scripts/check-ci.mjs';
 
@@ -31,13 +32,25 @@ function fixture(context) {
     write(`packages/${name}/package.json`, { name, scripts: { build: 'build' } });
   const extension = {
     name: 'extension',
+    publisher: 'slipstream',
     contributes: {
       commands: [{ command: 'slipstream.start', title: 'Start' }],
       languageModelTools: [
         {
           name: 'slipstream_readFile',
+          toolReferenceName: 'hrRead',
+          canBeReferencedInPrompt: true,
           inputSchema: { required: ['path'], properties: { path: { type: 'string' } } },
         },
+        ...[
+          ['slipstream_runCommand', 'hrRun'],
+          ['slipstream_retrieveArtifact', 'hrGet'],
+          ['slipstream_getSavings', 'hrStats'],
+        ].map(([name, toolReferenceName]) => ({
+          name,
+          toolReferenceName,
+          canBeReferencedInPrompt: true,
+        })),
       ],
       configuration: { properties: { 'slipstream.enabled': { type: 'boolean', default: true } } },
     },
@@ -51,7 +64,13 @@ function fixture(context) {
         localInstall: {
           command: 'node',
           args: ['server.js'],
-          modes: { standalone: { additionalArgs: [], tools: ['read_file'] } },
+          modes: {
+            standalone: { additionalArgs: [], tools: ['read_file', 'retrieve_artifact'] },
+            'retrieval-only': {
+              additionalArgs: ['--retrieval-only'],
+              tools: ['retrieve_artifact'],
+            },
+          },
         },
       },
     },
@@ -64,7 +83,53 @@ function fixture(context) {
   write('docs/mcp.md', '# MCP\n');
   write('packages/extension/README.md', '# Extension\n');
   write('README.md', '# Project\n\n[Architecture](docs/architecture.md#architecture)\n');
-  return { root, write, extension };
+  const specification = {
+    contractId: 'slipstream.mcp.artifact-retrieval',
+    version: 1,
+    modeRequirement: 'MCP-MODES',
+    modes: {
+      standalone: ['read_file', 'retrieve_artifact'],
+      'retrieval-only': ['retrieve_artifact'],
+    },
+    examples: [
+      {
+        id: 'range',
+        requirement: 'MCP-RANGE',
+        arguments: { id: '$artifact', startLine: 1, endLine: 1 },
+        expected: { body: 'example', truncated: false },
+      },
+      {
+        id: 'invalid-range',
+        requirement: 'MCP-RANGE',
+        arguments: { id: '$artifact', startLine: 0 },
+        expected: { error: 'startLine' },
+      },
+    ],
+  };
+  const writeSpec = (value = specification) =>
+    write(
+      'specs/mcp/v1/artifact-retrieval.md',
+      `# Contract\n\n### MCP-MODES\n\n### MCP-RANGE\n\n\`\`\`json slipstream-mcp-contract\n${JSON.stringify(value)}\n\`\`\`\n`,
+    );
+  writeSpec();
+  const agent = {
+    name: 'Spec Maintainer',
+    description: 'Maintain executable MCP specifications.',
+    target: 'vscode',
+    'user-invocable': true,
+    'disable-model-invocation': true,
+    agents: [],
+    tools: ['search', 'edit', 'hrRead', 'hrRun', 'hrGet', 'hrStats'].map((name) =>
+      name.startsWith('hr') ? `slipstream.extension/${name}` : name,
+    ),
+  };
+  const writeAgent = (value = agent) =>
+    write(
+      '.github/agents/spec-maintainer.agent.md',
+      `---\n${stringify(value)}---\n# Spec Maintainer\n`,
+    );
+  writeAgent();
+  return { root, write, extension, specification, writeSpec, agent, writeAgent };
 }
 
 function gitFixture(root) {
@@ -147,8 +212,135 @@ test('all maintained markdown is scanned while generated and installed content i
   write('test-results/report.md', '[bad](missing.md)');
   const result = checkDocs(root);
   assert.equal(result.errors.length, 3);
-  assert.equal(result.coverage.markdownFiles, 7);
+  assert.equal(result.coverage.markdownFiles, 9);
   assert.ok(result.errors.some((error) => error.startsWith('llms.txt:')));
+});
+
+test('versioned MCP specifications are required and normative examples are never rewritten', (context) => {
+  const { root, specification, writeSpec } = fixture(context);
+  assert.equal(checkDocs(root, { write: true }).passed, true);
+  specification.version = 2;
+  writeSpec();
+  const file = path.join(root, 'specs/mcp/v1/artifact-retrieval.md');
+  const original = fs.readFileSync(file);
+  const result = checkDocs(root, { write: true });
+  assert.equal(result.passed, false);
+  assert.match(result.errors.join('\n'), /unsupported contract identity, version, or fields/);
+  assert.deepEqual(fs.readFileSync(file), original);
+  fs.rmSync(file);
+  assert.match(checkDocs(root).errors.join('\n'), /versioned specification is missing/);
+});
+
+test('MCP mode inventory drift fails instead of regenerating the specification', (context) => {
+  const { root, specification, writeSpec } = fixture(context);
+  checkDocs(root, { write: true });
+  specification.modes['retrieval-only'].push('read_file');
+  writeSpec();
+  const result = checkDocs(root, { write: true });
+  assert.equal(result.passed, false);
+  assert.match(result.errors.join('\n'), /retrieval-only tool inventory is stale or invalid/);
+});
+
+test('MCP examples require unique IDs, declared requirements and unambiguous results', (context) => {
+  const { root, specification, writeSpec } = fixture(context);
+  checkDocs(root, { write: true });
+  const mutations = [
+    (value) => value.examples.push(structuredClone(value.examples[0])),
+    (value) => (value.examples[0].requirement = 'MCP-UNDECLARED'),
+    (value) => (value.examples[0].arguments = []),
+    (value) => (value.examples[0].expected.error = 'ambiguous'),
+    (value) => (value.examples[0].expected.truncated = 'false'),
+    (value) => (value.examples = []),
+    (value) => (value.examples = value.examples.filter((example) => 'body' in example.expected)),
+    (value) =>
+      (value.examples = value.examples.map((example) => ({
+        ...example,
+        requirement: 'MCP-MODES',
+      }))),
+  ];
+  for (const mutate of mutations) {
+    const changed = structuredClone(specification);
+    mutate(changed);
+    writeSpec(changed);
+    const result = checkDocs(root);
+    assert.equal(result.passed, false, JSON.stringify(changed));
+    assert.ok(result.errors.some((error) => error.includes('specs/mcp/v1/artifact-retrieval.md')));
+  }
+});
+
+test('MCP executable blocks cannot disappear or become ambiguous', (context) => {
+  const { root, write } = fixture(context);
+  checkDocs(root, { write: true });
+  const file = 'specs/mcp/v1/artifact-retrieval.md';
+  const original = fs.readFileSync(path.join(root, file), 'utf8');
+  for (const changed of [
+    original.replace('json slipstream-mcp-contract', 'json'),
+    original.repeat(2),
+  ]) {
+    write(file, changed);
+    assert.match(
+      checkDocs(root).errors.join('\n'),
+      /expected exactly one executable contract block/,
+    );
+  }
+});
+
+test('the spec maintainer requires manual invocation and an exact tool allowlist', (context) => {
+  const { root, agent, writeAgent } = fixture(context);
+  assert.equal(checkDocs(root, { write: true }).passed, true);
+  const mutations = [
+    (value) => value.tools.push('execute'),
+    (value) => value.tools.push('github/*'),
+    (value) => value.tools.pop(),
+    (value) => (value.tools[2] = 'slipstream.extension/unknown'),
+    (value) => (value['disable-model-invocation'] = false),
+    (value) => (value['user-invocable'] = false),
+    (value) => value.agents.push('another-agent'),
+    (value) => (value.model = 'fixed-model'),
+    (value) => (value.hooks = {}),
+  ];
+  for (const mutate of mutations) {
+    const changed = structuredClone(agent);
+    mutate(changed);
+    writeAgent(changed);
+    const result = checkDocs(root);
+    assert.equal(result.passed, false, JSON.stringify(changed));
+    assert.ok(result.errors.some((error) => error.includes('spec-maintainer.agent.md')));
+  }
+});
+
+test('renamed or unreferenceable extension tools fail the spec maintainer gate', (context) => {
+  const { root, write, extension } = fixture(context);
+  checkDocs(root, { write: true });
+  extension.contributes.languageModelTools[0].toolReferenceName = 'renamed';
+  write('packages/extension/package.json', extension);
+  assert.match(checkDocs(root).errors.join('\n'), /tool allowlist does not match/);
+  extension.contributes.languageModelTools[0].canBeReferencedInPrompt = false;
+  write('packages/extension/package.json', extension);
+  assert.match(checkDocs(root).errors.join('\n'), /has no prompt reference/);
+});
+
+test('missing, malformed or duplicate-key agent frontmatter fails check-only validation', (context) => {
+  const { root, write } = fixture(context);
+  checkDocs(root, { write: true });
+  const file = '.github/agents/spec-maintainer.agent.md';
+  const original = fs.readFileSync(path.join(root, file), 'utf8');
+  for (const changed of [
+    '# Missing header',
+    '---\nname: [\n---\n',
+    original.replace('target: vscode', 'target: vscode\ntarget: vscode'),
+  ]) {
+    write(file, changed);
+    const result = checkDocs(root);
+    assert.equal(result.passed, false);
+    assert.ok(result.errors.some((error) => error.includes('spec-maintainer.agent.md')));
+    assert.equal(fs.readFileSync(path.join(root, file), 'utf8'), changed);
+  }
+  fs.rmSync(path.join(root, file));
+  assert.match(
+    checkDocs(root).errors.join('\n'),
+    /manual spec maintainer configuration is missing/,
+  );
 });
 
 test('removed npm scripts fail documentation checks outside generated reference documents', (context) => {

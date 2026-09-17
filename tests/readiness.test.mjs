@@ -4536,12 +4536,21 @@ function maintenanceRepository(context) {
     ]);
     return git(['rev-parse', 'HEAD']);
   };
+  const contractFiles = [
+    'scripts/check-docs.mjs',
+    'specs/mcp/v1/artifact-retrieval.md',
+    '.github/agents/spec-maintainer.agent.md',
+    'docs/mcp.md',
+  ];
+  for (const file of contractFiles) {
+    const target = path.join(root, file);
+    fs.mkdirSync(path.dirname(target), { recursive: true });
+    fs.copyFileSync(path.join(REPO, file), target);
+  }
   const baseline = checkDocs(root, { write: true });
   assert.equal(baseline.passed, true, JSON.stringify(baseline));
-  if (baseline.written.length > 0) {
-    git(['add', '--', ...baseline.written]);
-    commit();
-  }
+  git(['add', '--', ...new Set([...contractFiles, ...baseline.written])]);
+  if (git(['diff', '--cached', '--name-only'])) commit();
   return { root, git, sentinel, commit };
 }
 

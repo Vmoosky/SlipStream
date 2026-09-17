@@ -126,6 +126,26 @@ permissions. See [Security](../README.md#security) for implementation boundaries
 After building, run the MCP smoke suite to compare live discovery with the
 manifest and package version, and to validate metadata and documentation links:
 
+The [artifact retrieval v1 specification](../specs/mcp/v1/artifact-retrieval.md)
+defines stable requirement IDs and data-only conformance examples. The smoke
+suite executes those examples against both standalone and retrieval-only servers
+using temporary storage. Runtime schemas remain authoritative; examples assert
+observable compatibility rather than defining a second schema.
+
+For a contract change, select the manually invoked
+[Spec Maintainer](../.github/agents/spec-maintainer.agent.md) in Copilot's agent
+picker with the Slipstream folder open as a workspace and its VS Code extension
+available. It uses the existing compressing tools, does not select a model or
+delegate work, and stops if its tools are missing. Opening only a parent folder
+may not discover repository-local agents. No installation or settings change is
+performed by this workflow. The CLI plugin remains retrieval-only.
+
+`npm run check:docs` checks spec identity, requirement/example coverage, mode
+inventory, agent frontmatter, and extension tool references. Missing specs,
+uncovered requirements, invalid configuration, and renamed tools fail the gate.
+This validates repository configuration, not editor runtime discovery or model
+availability. Normative examples are reviewed edits, never `docs:write` output.
+
 Schema validation uses AJV and the unmodified, pinned official schema fixture
 `packages/mcp-server/test/fixtures/mcp-server-2025-12-11.schema.json`, downloaded
 from the manifest's `$schema` URL. Tests do not fetch schemas over the network.
