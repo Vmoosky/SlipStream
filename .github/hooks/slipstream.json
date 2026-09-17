@@ -1,0 +1,13 @@
+{
+  "version": 1,
+  "hooks": {
+    "sessionStart": [
+      {
+        "type": "command",
+        "command": "node scripts/check-agent-session.mjs",
+        "cwd": ".",
+        "timeoutSec": 5
+      }
+    ]
+  }
+}

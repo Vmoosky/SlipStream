@@ -53,6 +53,20 @@ open. **Tasks: Run Build Task** selects the root build, and **Tasks: Run Test Ta
 selects full validation. After setup, the **Run Slipstream Extension** debug
 configuration builds all workspaces before starting the Extension Development Host.
 
+The repository-local [VS Code MCP configuration](.vscode/mcp.json) starts the
+standalone Slipstream server after setup, bounds its workspace root to the open
+repository, and supplies no credentials. Run `npm run setup` before using it so
+the referenced `packages/mcp-server/dist/index.js` bundle exists.
+
+Shared agent controls are intentionally restrictive. Claude Code reads
+[project settings](.claude/settings.json) that deny environment-file reads and
+destructive or forced Git commands, while requiring confirmation for commits and
+pushes. GitHub Copilot CLI reads the bounded
+[session-start hook](.github/hooks/slipstream.json), which checks the Node pin,
+locked manifest, and repository-scoped working directory without writing files or
+logging hook input. These controls do not grant publication, merge, secret, or
+user-store access, and they do not replace `npm run validate` or human review.
+
 Browser tests start temporary loopback servers and cover desktop/mobile layouts.
 They do not need a running dashboard or the user's savings store. The
 [offline workload](tests/fixtures/outcome-workload) deliberately fails before the
