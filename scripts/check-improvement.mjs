@@ -14,6 +14,15 @@ import {
   prepareAgentReviewDispositions,
   validateAgentReviewDispositions,
 } from './check-agent-review.mjs';
+import {
+  IMPROVEMENT_REGISTRY_PATH,
+  improvementRuleHash,
+  parseImprovementRuleRegistry,
+  readImprovementRules,
+  validateImprovementRules,
+  validateImprovementRuleTransition,
+} from './check-improvement-rules.mjs';
+import { writeReadinessReport } from './check-readiness-reports.mjs';
 
 const ROOT = fileURLToPath(new URL('../', import.meta.url));
 
@@ -522,6 +531,148 @@ async function readReviewedDisposition(client, revision, file) {
   return { bytes, sha: entry.sha, files: tree.tree };
 }
 
+async function readPassingMergeCi(client, run, repository, branch) {
+  const aggregate = await readAgentRepairArtifact(client, run, 'ci-required', 'ci-required.json');
+  const validation = compareImprovementReports(null, {
+    expected: {
+      revision: run.head_sha,
+      runId: String(run.id),
+      attempt: '1',
+      eventName: 'push',
+      workflow: `${repository}/.github/workflows/ci.yml@refs/heads/${branch}`,
+      headRevision: run.head_sha,
+      baseRevision: aggregate.contents?.baseRevision,
+      kind: 'required-validation',
+      conclusion: 'success',
+    },
+    report: aggregate.contents,
+  }).after;
+  requireEvidence(validation?.valid === true && validation.passed === true);
+  return aggregate;
+}
+
+export async function verifyImprovementRulePromotion({ repository, branch, client, rule }) {
+  const result = {
+    status: 'unresolved',
+    verified: false,
+    humanApprovalRequired: true,
+    automaticPublication: false,
+    preventionTestExecuted: false,
+    resolutionVerified: false,
+  };
+  if (rule?.promotion === undefined)
+    return { ...result, status: 'not-requested', missing: ['promotion-reference'] };
+  let missing = 'promotion-reference';
+  try {
+    validateImprovementRules({ schemaVersion: 1, regressions: [], learnedRules: [rule] });
+    const promotion = rule.promotion;
+    missing = 'promotion-pull-request';
+    const pull = await client.json(`/pulls/${promotion.pullRequest}`);
+    requireEvidence(
+      pull?.number === promotion.pullRequest && pull.head?.sha === promotion.fixCommit,
+    );
+    requireEvidence(pull.merged === true && pull.state === 'closed');
+    requireEvidence(
+      pull.head.repo?.full_name === repository && pull.base?.repo?.full_name === repository,
+    );
+    requireEvidence(pull.base.ref === branch && /^[a-f0-9]{40}$/.test(pull.base.sha));
+    const payloadSha256 = improvementRuleHash(rule);
+    const matches = (registry) =>
+      validateImprovementRules(registry).find(
+        (entry) => entry.id === rule.id && entry.version === rule.version,
+      );
+    const activePayload = (registry) => {
+      const entry = matches(registry);
+      requireEvidence(entry?.status === 'active' && improvementRuleHash(entry) === payloadSha256);
+    };
+    missing = 'active-rule-payload';
+    const head = await readReviewedDisposition(
+      client,
+      promotion.fixCommit,
+      IMPROVEMENT_REGISTRY_PATH,
+    );
+    const headRegistry = parseImprovementRuleRegistry(head.bytes);
+    activePayload(headRegistry);
+    missing = 'rule-activation-transition';
+    const base = await readReviewedDisposition(client, pull.base.sha, IMPROVEMENT_REGISTRY_PATH);
+    const baseRegistry = parseImprovementRuleRegistry(base.bytes);
+    requireEvidence(matches(baseRegistry)?.status === 'proposed');
+    validateImprovementRuleTransition(baseRegistry, headRegistry);
+    missing = 'rule-file-change';
+    const files = await client.json(`/pulls/${promotion.pullRequest}/files?per_page=100`);
+    requireEvidence(
+      Number.isSafeInteger(pull.changed_files) &&
+        pull.changed_files > 0 &&
+        pull.changed_files < 100,
+    );
+    requireEvidence(Array.isArray(files) && files.length === pull.changed_files);
+    requireEvidence(new Set(files.map((file) => file.filename)).size === files.length);
+    requireEvidence(
+      files.some(
+        (file) =>
+          file.filename === IMPROVEMENT_REGISTRY_PATH &&
+          file.status === 'modified' &&
+          Number.isSafeInteger(file.changes) &&
+          file.changes > 0 &&
+          file.sha === head.sha,
+      ),
+    );
+    missing = 'passing-merge-ci';
+    const run = await client.json(`/actions/runs/${promotion.afterRunId}`);
+    validateRetainedRun(run, repository, branch, 'ci.yml', ['push']);
+    requireEvidence(String(run.id) === promotion.afterRunId && run.conclusion === 'success');
+    requireEvidence(run.head_sha === pull.merge_commit_sha && run.head_sha !== pull.base.sha);
+    requireEvidence(Date.parse(run.run_started_at) >= Date.parse(pull.merged_at));
+    const aggregate = await readPassingMergeCi(client, run, repository, branch);
+    missing = 'promotion-history';
+    const history = verifyReviewedFix(pull.base.sha, run.head_sha, promotion, {
+      repository,
+      branch,
+      pull,
+      commits: await client.json(`/pulls/${promotion.pullRequest}/commits?per_page=100`),
+      reviews: await client.json(`/pulls/${promotion.pullRequest}/reviews?per_page=100`),
+      comparison: await client.json(`/compare/${pull.base.sha}...${run.head_sha}?per_page=100`),
+    });
+    if (!history.verified) return { ...result, missing: history.missing };
+    missing = 'merged-rule-payload';
+    const merged = await readReviewedDisposition(client, run.head_sha, IMPROVEMENT_REGISTRY_PATH);
+    activePayload(parseImprovementRuleRegistry(merged.bytes));
+    missing = 'changed-pull-request';
+    const latest = await client.json(`/pulls/${promotion.pullRequest}`);
+    requireEvidence(
+      latest?.number === pull.number && latest.merged === true && latest.state === 'closed',
+    );
+    requireEvidence(
+      latest.head?.sha === pull.head.sha && latest.head.repo?.full_name === repository,
+    );
+    requireEvidence(
+      latest.base?.sha === pull.base.sha &&
+        latest.base.ref === branch &&
+        latest.base.repo?.full_name === repository,
+    );
+    requireEvidence(
+      latest.merge_commit_sha === pull.merge_commit_sha && latest.merged_at === pull.merged_at,
+    );
+    requireEvidence(
+      latest.commits === pull.commits &&
+        latest.changed_files === pull.changed_files &&
+        latest.user?.id === pull.user.id,
+    );
+    return {
+      ...result,
+      ...history,
+      status: 'verified-promotion',
+      payloadSha256,
+      headRegistryBlob: head.sha,
+      mergeRegistryBlob: merged.sha,
+      ci: { runId: String(run.id), attempt: '1', revision: run.head_sha },
+      artifact: { id: String(aggregate.artifact.id), digest: aggregate.artifact.digest },
+    };
+  } catch {
+    return { ...result, missing: [missing] };
+  }
+}
+
 export async function verifyAgentReviewRepair({ repository, branch, client, link }) {
   const result = {
     schemaVersion: 1,
@@ -645,22 +796,7 @@ export async function verifyAgentReviewRepair({ repository, branch, client, link
     requireEvidence(String(run.id) === link.afterRunId && run.conclusion === 'success');
     requireEvidence(run.head_sha === pull.merge_commit_sha && run.head_sha !== reviewRun.head_sha);
     requireEvidence(Date.parse(run.run_started_at) >= Date.parse(pull.merged_at));
-    const aggregate = await readAgentRepairArtifact(client, run, 'ci-required', 'ci-required.json');
-    const validation = compareImprovementReports(null, {
-      expected: {
-        revision: run.head_sha,
-        runId: String(run.id),
-        attempt: '1',
-        eventName: 'push',
-        workflow: `${repository}/.github/workflows/ci.yml@refs/heads/${branch}`,
-        headRevision: run.head_sha,
-        baseRevision: aggregate.contents?.baseRevision,
-        kind: 'required-validation',
-        conclusion: 'success',
-      },
-      report: aggregate.contents,
-    }).after;
-    requireEvidence(validation?.valid === true && validation.passed === true);
+    const aggregate = await readPassingMergeCi(client, run, repository, branch);
     missing = 'repair-history';
     const details = {
       repository,
@@ -840,6 +976,7 @@ const SOURCES = [
 
 export function validateImprovementRegistry(registry) {
   requireEvidence(registry?.schemaVersion === 1 && Array.isArray(registry.regressions));
+  validateImprovementRules(registry);
   requireEvidence(registry.regressions.length <= IMPROVEMENT_LIMITS.regressions);
   if (Object.hasOwn(registry, 'agentReviewRepairs'))
     validateAgentReviewRepairLinks(registry.agentReviewRepairs);
@@ -891,6 +1028,7 @@ export async function collectImprovementReports({
   registry = { schemaVersion: 1, regressions: [] },
 }) {
   const regressions = validateImprovementRegistry(registry);
+  const learnedRules = validateImprovementRules(registry);
   requireEvidence(/^[\w.-]+\/[\w.-]+$/.test(repository) && repository.length <= 200);
   requireEvidence(typeof branch === 'string' && /^[\w./-]+$/.test(branch) && branch.length <= 200);
   const sources = trigger === undefined ? SOURCES : [validateCompletionTrigger(trigger)];
@@ -1203,6 +1341,85 @@ export async function collectImprovementReports({
   const agentReviewRepairs = [];
   for (const link of registry.agentReviewRepairs ?? [])
     agentReviewRepairs.push(await verifyAgentReviewRepair({ repository, branch, client, link }));
+  const learningCache = new Map();
+  const cached = (key, load) => {
+    if (!learningCache.has(key)) learningCache.set(key, load());
+    return learningCache.get(key);
+  };
+  const learningClient = {
+    json: (resource) =>
+      resource.startsWith('/git/') || resource.startsWith('/compare/')
+        ? cached(resource, () => client.json(resource))
+        : client.json(resource),
+    archive: (artifact) =>
+      cached(`archive:${artifact.id}:${artifact.digest}`, () => client.archive(artifact)),
+  };
+  const learningEntries = [];
+  for (const rule of learnedRules) {
+    const ciSource = rule.source.kind === 'ci-regression';
+    const candidates = (ciSource ? proofs : agentReviewRepairs).filter(
+      (entry) => entry.findingId === rule.source.findingId,
+    );
+    const sourceVerified = candidates.length === 1 && candidates[0].verified === true;
+    const sourceRepairs = (ciSource ? repairs : agentReviewRepairs).filter(
+      (entry) => entry.findingId === rule.source.findingId,
+    );
+    const repairVerified = sourceRepairs.length === 1 && sourceRepairs[0].verified === true;
+    const promotion = await verifyImprovementRulePromotion({
+      repository,
+      branch,
+      client: learningClient,
+      rule,
+    });
+    learningEntries.push({
+      id: rule.id,
+      version: rule.version,
+      status: rule.status,
+      payloadSha256: improvementRuleHash(rule),
+      source: {
+        ...rule.source,
+        verified: sourceVerified,
+        status: sourceVerified
+          ? ciSource
+            ? 'verified-regression'
+            : 'verified-link'
+          : 'unresolved',
+      },
+      regressionStatus: ciSource ? (sourceVerified ? 'verified' : 'unresolved') : 'not-supported',
+      repairReviewVerified: repairVerified,
+      preventionTest: { ...rule.preventionTest, executionVerified: false },
+      promotion,
+      governanceStatus: promotion.verified ? 'verified-promotion' : 'configured-only',
+      ruleUseVerified: false,
+      resolutionVerified: false,
+      missing: [
+        ...(!sourceVerified ? ['unique-verified-source'] : []),
+        ...(!repairVerified ? ['reviewed-source-repair'] : []),
+        ...promotion.missing,
+      ],
+    });
+  }
+  const learning = {
+    status:
+      learnedRules.length === 0
+        ? 'not-requested'
+        : learningEntries.some(
+              (entry) =>
+                !entry.source.verified ||
+                (entry.promotion.status !== 'not-requested' && !entry.promotion.verified),
+            )
+          ? 'insufficient-evidence'
+          : learningEntries.every((entry) => entry.promotion.verified)
+            ? 'verified-governance'
+            : 'configured-only',
+    counts: Object.fromEntries(
+      ['proposed', 'active', 'retired'].map((status) => [
+        status,
+        learnedRules.filter((rule) => rule.status === status).length,
+      ]),
+    ),
+    rules: learningEntries,
+  };
   const entries = [...verifiedKeys]
     .filter((key) => captures.has(key))
     .map((key) => captures.get(key));
@@ -1246,6 +1463,7 @@ export async function collectImprovementReports({
       proofs.every((proof) => proof.verified) &&
       repairs.every((repair, index) => !regressions[index].repair || repair.verified) &&
       agentReviewRepairs.every((repair) => repair.verified) &&
+      learning.status !== 'insufficient-evidence' &&
       retention.status !== 'insufficient-evidence'
         ? 'reported'
         : 'insufficient-evidence',
@@ -1267,6 +1485,7 @@ export async function collectImprovementReports({
           ? 'verified'
           : 'insufficient-evidence',
     agentReviewRepairs,
+    learning,
     retention,
     retainedEvidence: {
       schemaVersion: 1,
@@ -1294,6 +1513,7 @@ export async function collectImprovementReports({
       'Reruns, missing history and unavailable originals cannot establish improvement.',
       'Named regressions and live review/merge history are separate; neither establishes causality or automatic repair.',
       'Agent-review repair links require available original artifacts and reviewed acceptance; they do not prove semantic resolution or the recorded identity.',
+      'Rule configuration, reviewed promotion, source regression proof and observed reuse are separate; prevention-test references alone do not prove execution or resolution.',
     ],
   };
 }
@@ -1372,10 +1592,8 @@ export async function runImprovementReview(
   } else {
     const collector = improvementIdentity(env, event);
     const repository = event.repository.full_name;
-    const registry = readLocalJson(
-      path.join(root, '.github', 'improvement-regressions.json'),
-      64 * 1024,
-    );
+    const { registry } = readImprovementRules(root);
+    requireEvidence(registry);
     const collected = await collectImprovementReports({
       repository,
       branch: event.repository.default_branch,
@@ -1428,6 +1646,19 @@ export async function runImprovementReview(
         ? `- Verified agent-review link ${repair.findingId}: ${repair.pullRequestUrl}; fix ${repair.fixCommit}; merge ${repair.mergeCommit}; CI run ${repair.ci.runId}.`
         : `- Unresolved agent-review link ${repair.findingId}: ${repair.missing.join(', ')}.`,
     ),
+    ...(report.learning
+      ? [
+          '',
+          '### Learned Rules',
+          '',
+          `Configured: ${report.learning.counts.proposed} proposed, ${report.learning.counts.active} active, ${report.learning.counts.retired} retired. Evidence: ${report.learning.status}.`,
+          ...report.learning.rules.map(
+            (rule) =>
+              `- ${rule.id}/v${rule.version} (${rule.status}): source ${rule.source.status}; source repair reviewed ${rule.repairReviewVerified}; promotion ${rule.promotion.status}; named regression ${rule.regressionStatus}. Missing: ${rule.missing.join(', ') || 'none'}.`,
+          ),
+          'Rule configuration and reviewed promotion do not prove model compliance, prevention-test execution or semantic resolution.',
+        ]
+      : []),
     ...report.errors.map((error) => `- Missing or invalid evidence: ${error}.`),
     '',
     'CI recovery is not causal or automatic repair proof. Evidence still requires human review.',
@@ -1439,10 +1670,8 @@ export async function runImprovementReview(
   const base = path.join(root, 'test-results', 'improvement');
   fs.mkdirSync(base, { recursive: true });
   const outputDirectory = fs.mkdtempSync(path.join(base, 'run-'));
-  fs.writeFileSync(
-    path.join(outputDirectory, 'report.json'),
-    `${JSON.stringify(report, null, 2)}\n`,
-  );
+  const reportBytes = Buffer.from(`${JSON.stringify(report, null, 2)}\n`);
+  fs.writeFileSync(path.join(outputDirectory, 'report.json'), reportBytes);
   fs.writeFileSync(path.join(outputDirectory, 'summary.md'), summary);
   const relativeDirectory = path.relative(root, outputDirectory).split(path.sep).join('/');
   if (retainedEvidence) {
@@ -1451,6 +1680,10 @@ export async function runImprovementReview(
       `${JSON.stringify(retainedEvidence, null, 2)}\n`,
     );
   }
+  const readinessReportPath =
+    report.collector && report.source === 'github-actions'
+      ? writeReadinessReport(root, reportBytes)
+      : null;
   if (report.collector && env.GITHUB_OUTPUT)
     fs.appendFileSync(
       env.GITHUB_OUTPUT,
@@ -1458,6 +1691,7 @@ export async function runImprovementReview(
         status: report.status,
         'report-path': `${relativeDirectory}/report.json`,
         'evidence-path': `${relativeDirectory}/evidence.json`,
+        'readiness-report-path': readinessReportPath,
         'trigger-workflow': report.trigger?.workflow ?? '',
         'trigger-run-id': report.trigger?.runId ?? '',
         'trigger-attempt': report.trigger?.attempt ?? '',
@@ -1473,6 +1707,7 @@ export async function runImprovementReview(
   return {
     report,
     outputDirectory: relativeDirectory,
+    readinessReportPath,
   };
 }
 

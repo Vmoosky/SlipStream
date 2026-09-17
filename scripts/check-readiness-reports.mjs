@@ -4,6 +4,7 @@ import * as path from 'node:path';
 const REPORT_FILENAMES = Object.freeze({
   'bounded-agent-review': 'agent-review.json',
   'pr-observability': 'pr-observability.json',
+  'continuous-improvement-review': 'improvement.json',
 });
 
 export function writeReadinessReport(root, bytes) {

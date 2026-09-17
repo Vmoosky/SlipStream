@@ -11,6 +11,15 @@ import { resolveConfig, resolveConfigFile } from 'prettier';
 import { developmentPlan, runDevelopmentCommand, runDevelopment } from '../scripts/develop.mjs';
 import { writeReadinessReport } from '../scripts/check-readiness-reports.mjs';
 import {
+  IMPROVEMENT_RULE_LIMITS,
+  improvementRuleHash,
+  parseImprovementRuleRegistry,
+  readImprovementRules,
+  validateImprovementRules,
+  validateImprovementRuleTransition,
+} from '../scripts/check-improvement-rules.mjs';
+
+import {
   agentReviewArguments,
   agentReviewEnvironment,
   agentReviewFindingIds,
@@ -35,6 +44,7 @@ import {
   verifyImprovementRepair,
   validateAgentReviewRepairLinks,
   verifyAgentReviewRepair,
+  verifyImprovementRulePromotion,
   improvementIdentity,
   runImprovementReview,
 } from '../scripts/check-improvement.mjs';
@@ -181,6 +191,7 @@ test('readiness reports retain exact producer bytes, identities and unsuccessful
   for (const [kind, filename] of [
     ['bounded-agent-review', 'agent-review.json'],
     ['pr-observability', 'pr-observability.json'],
+    ['continuous-improvement-review', 'improvement.json'],
   ]) {
     const report = {
       schemaVersion: 1,
@@ -2513,6 +2524,237 @@ function agentReviewRepairHistory(context) {
   };
 }
 
+function improvementRulePromotionHistory(context) {
+  const fixture = agentReviewRepairHistory(context);
+  const { state } = fixture;
+  state.rule = improvementRule({
+    source: { kind: 'agent-review', findingId: fixture.review.findingIds[0] },
+    promotion: { pullRequest: 7, fixCommit: state.link.fixCommit, afterRunId: '124' },
+  });
+  state.details.pull.base.sha = 'a'.repeat(40);
+  state.details.pull.changed_files = 3;
+  state.baseCommit = { sha: state.details.pull.base.sha, tree: { sha: '8'.repeat(40) } };
+  state.baseTree = { ...structuredClone(state.tree), sha: state.baseCommit.tree.sha };
+  state.ruleBlobs = new Map();
+  const registryPath = '.github/improvement-regressions.json';
+  const setRules = (location, rules) => {
+    const bytes = Buffer.from(
+      JSON.stringify({ schemaVersion: 1, regressions: [], learnedRules: rules }),
+    );
+    const sha = createHash('sha1').update(`blob ${bytes.length}\0`).update(bytes).digest('hex');
+    state.ruleBlobs.set(sha, {
+      sha,
+      encoding: 'base64',
+      size: bytes.length,
+      content: bytes.toString('base64'),
+    });
+    const tree =
+      location === 'head' ? state.tree : location === 'merge' ? state.mergeTree : state.baseTree;
+    tree.tree = tree.tree.filter((entry) => entry.path !== registryPath);
+    tree.tree.push({ path: registryPath, type: 'blob', mode: '100644', sha });
+    if (location === 'head') {
+      state.files = state.files.filter((file) => file.filename !== registryPath);
+      state.files.push({ filename: registryPath, status: 'modified', changes: 1, sha });
+    }
+  };
+  const payload = { ...state.rule };
+  delete payload.promotion;
+  setRules('base', [{ ...payload, status: 'proposed' }]);
+  setRules('head', [payload]);
+  setRules('merge', [payload, improvementRule({ id: 'unrelated-rule', status: 'proposed' })]);
+  const client = {
+    async json(resource) {
+      if (resource === `/git/commits/${state.baseCommit.sha}`)
+        return structuredClone(state.baseCommit);
+      if (resource === `/git/trees/${state.baseCommit.tree.sha}?recursive=1`)
+        return structuredClone(state.baseTree);
+      const blob = state.ruleBlobs.get(resource.replace('/git/blobs/', ''));
+      if (resource.startsWith('/git/blobs/') && blob) return structuredClone(blob);
+      return fixture.client.json(resource);
+    },
+    archive: (artifact) => fixture.client.archive(artifact),
+  };
+  return {
+    ...fixture,
+    client,
+    setRules,
+    verify: () =>
+      verifyImprovementRulePromotion({
+        repository: 'Vmoosky/SlipStream',
+        branch: 'main',
+        client,
+        rule: state.rule,
+      }),
+  };
+}
+
+test('improvement rule promotions bind reviewed activation and exact merge CI without hash cycles', async (context) => {
+  const fixture = improvementRulePromotionHistory(context);
+  const result = await fixture.verify();
+  assert.equal(result.verified, true, JSON.stringify(result));
+  assert.equal(result.status, 'verified-promotion');
+  assert.equal(result.payloadSha256, improvementRuleHash(fixture.state.rule));
+  assert.notEqual(result.headRegistryBlob, result.mergeRegistryBlob);
+  assert.deepEqual(result.ci, { runId: '124', attempt: '1', revision: 'd'.repeat(40) });
+  assert.equal(result.resolutionVerified, false);
+  assert.equal(result.preventionTestExecuted, false);
+  assert.equal(result.automaticPublication, false);
+  fixture.state.rule.reason = 'A later human bookkeeping change.';
+  assert.equal((await fixture.verify()).verified, true);
+  fixture.state.rule.status = 'retired';
+  assert.equal((await fixture.verify()).verified, true);
+  const unrecorded = { ...fixture.state.rule };
+  delete unrecorded.promotion;
+  const absent = await verifyImprovementRulePromotion({ rule: unrecorded });
+  assert.equal(absent.status, 'not-requested');
+  assert.equal(absent.verified, false);
+});
+
+test('improvement learning reports distinguish configured rules, typed sources and verified promotion', async (context) => {
+  const fixture = improvementRulePromotionHistory(context);
+  const { state, client } = fixture;
+  const options = { repository: 'Vmoosky/SlipStream', branch: 'main', client };
+  const empty = await collectImprovementReports(options);
+  assert.equal(empty.learning.status, 'not-requested');
+  assert.deepEqual(empty.learning.counts, { proposed: 0, active: 0, retired: 0 });
+  assert.equal(
+    fixture.history.calls.some(
+      (resource) => resource.startsWith('/git/') || resource.startsWith('/pulls/'),
+    ),
+    false,
+  );
+  const registry = {
+    schemaVersion: 1,
+    regressions: [],
+    agentReviewRepairs: [state.link],
+    learnedRules: [state.rule],
+  };
+  const verified = await collectImprovementReports({ ...options, registry });
+  assert.equal(verified.status, 'reported', JSON.stringify(verified.learning));
+  assert.equal(verified.learning.status, 'verified-governance');
+  assert.deepEqual(verified.learning.counts, { proposed: 0, active: 1, retired: 0 });
+  const entry = verified.learning.rules[0];
+  assert.equal(entry.source.status, 'verified-link');
+  assert.equal(entry.repairReviewVerified, true);
+  assert.equal(entry.regressionStatus, 'not-supported');
+  assert.equal(entry.preventionTest.executionVerified, false);
+  assert.equal(entry.ruleUseVerified, false);
+  assert.equal(entry.resolutionVerified, false);
+  const unrecorded = { ...state.rule };
+  delete unrecorded.promotion;
+  const configured = await collectImprovementReports({
+    ...options,
+    registry: { ...registry, learnedRules: [unrecorded] },
+  });
+  assert.equal(configured.status, 'reported');
+  assert.equal(configured.learning.status, 'configured-only');
+  assert.deepEqual(configured.learning.rules[0].promotion.missing, ['promotion-reference']);
+  const wrongKind = { ...unrecorded, source: { ...unrecorded.source, kind: 'ci-regression' } };
+  const unresolved = await collectImprovementReports({
+    ...options,
+    registry: { ...registry, learnedRules: [wrongKind] },
+  });
+  assert.equal(unresolved.status, 'insufficient-evidence');
+  assert.equal(unresolved.learning.rules[0].source.verified, false);
+  assert.equal(unresolved.learning.rules[0].regressionStatus, 'unresolved');
+  state.details.reviews = [];
+  const unapproved = await collectImprovementReports({ ...options, registry });
+  assert.equal(unapproved.status, 'insufficient-evidence');
+  assert.equal(unapproved.learning.rules[0].promotion.verified, false);
+  assert.equal(unapproved.learning.rules[0].governanceStatus, 'configured-only');
+  const calls = fixture.history.calls.length;
+  await assert.rejects(
+    collectImprovementReports({
+      ...options,
+      registry: { ...registry, learnedRules: [{ ...state.rule, command: 'synthetic' }] },
+    }),
+  );
+  assert.equal(fixture.history.calls.length, calls);
+});
+
+test('improvement rule promotions reject changed payloads, unsafe review and incomplete provenance', async (context) => {
+  const fixture = improvementRulePromotionHistory(context);
+  const { state } = fixture;
+  state.tamperCiArchive = false;
+  const original = structuredClone(state);
+  const mutations = [
+    () => {
+      state.rule.criterion = 'Changed after approval.';
+    },
+    () => fixture.setRules('head', [{ ...state.rule, status: 'retired' }]),
+    () => fixture.setRules('merge', [{ ...state.rule, criterion: 'Changed at merge.' }]),
+    () => fixture.setRules('base', [state.rule]),
+    () => {
+      state.tree.truncated = true;
+    },
+    () => {
+      state.tree.tree.find((entry) => entry.path === '.github').mode = '120000';
+    },
+    () => {
+      state.ruleBlobs.values().next().value.content = 'invalid';
+    },
+    () => {
+      state.files = state.files.slice(0, 2);
+    },
+    () => {
+      state.details.pull.changed_files = 100;
+    },
+    () => {
+      state.details.reviews[0].user.id = state.details.pull.user.id;
+    },
+    () => {
+      state.details.reviews[0].user.type = 'Bot';
+    },
+    () => {
+      state.details.reviews[0].commit_id = 'f'.repeat(40);
+    },
+    () => {
+      state.details.reviews[0].state = 'DISMISSED';
+    },
+    () => {
+      state.details.reviews[0].submitted_at = '2026-09-16T00:00:06Z';
+    },
+    () => {
+      state.details.reviews.push({
+        ...state.details.reviews[0],
+        id: 999,
+        state: 'CHANGES_REQUESTED',
+      });
+    },
+    () => {
+      state.details.commits = [];
+    },
+    () => {
+      state.details.comparison.total_commits = 100;
+    },
+    () => {
+      state.run.run_attempt = 2;
+    },
+    () => {
+      state.run.head_sha = 'e'.repeat(40);
+    },
+    () => {
+      state.run.head_repository.full_name = 'other/fork';
+    },
+    () => {
+      state.ciArtifact.expired = true;
+    },
+    () => {
+      state.tamperCiArchive = true;
+    },
+  ];
+  for (const [index, mutate] of mutations.entries()) {
+    Object.assign(state, structuredClone(original));
+    mutate();
+    const result = await fixture.verify();
+    assert.equal(result.verified, false, `Mutation ${index}: ${JSON.stringify(result)}`);
+    assert.equal(result.status, 'unresolved');
+    assert.ok(result.missing.length > 0);
+  }
+  Object.assign(state, structuredClone(original));
+  assert.equal((await fixture.verify()).verified, true);
+});
+
 test('improvement agent-review repairs bind real archive bytes, reviewed decisions and merge CI', async (context) => {
   const fixture = agentReviewRepairHistory(context);
   const before = structuredClone(fixture.state);
@@ -3058,6 +3300,20 @@ test('improvement registry connects an explicit run pair to a verified regressio
   assert.equal(report.retainedEvidence.entries.length, 4);
   assert.equal(report.repairHistoryStatus, 'insufficient-evidence');
   assert.deepEqual(report.repairs[0].missing, ['repair-reference']);
+  const learning = await collectImprovementReports({
+    ...options,
+    registry: {
+      ...registry,
+      learnedRules: [
+        improvementRule({ source: { kind: 'ci-regression', findingId: regression.findingId } }),
+      ],
+    },
+  });
+  assert.equal(learning.learning.status, 'configured-only');
+  assert.equal(learning.learning.rules[0].source.status, 'verified-regression');
+  assert.equal(learning.learning.rules[0].regressionStatus, 'verified');
+  assert.equal(learning.learning.rules[0].repairReviewVerified, false);
+  assert.equal(learning.learning.rules[0].preventionTest.executionVerified, false);
   const originals = [];
   for (const runId of [123, 124]) {
     const artifact = history.artifactLists.get(runId)[1];
@@ -3341,6 +3597,14 @@ test('improvement workflow is opt-in, default-branch-only, read-only and artifac
   assert.equal(originals.with['retention-days'], IMPROVEMENT_LIMITS.retentionDays);
   assert.equal(originals.with.path, '${{ steps.review.outputs.evidence-path }}');
   assert.equal(originals.with['if-no-files-found'], 'error');
+  const readiness = job.steps.find((step) => step.with?.name?.startsWith('readiness-improvement-'));
+  assert.equal(
+    readiness.if,
+    "${{ always() && steps.context.outcome == 'success' && steps.review.outputs.readiness-report-path != '' }}",
+  );
+  assert.equal(readiness.with.path, '${{ steps.review.outputs.readiness-report-path }}');
+  assert.equal(readiness.with['retention-days'], 90);
+  assert.equal(readiness.with['if-no-files-found'], 'error');
   assert.deepEqual(
     job.outputs,
     Object.fromEntries(
@@ -3348,6 +3612,7 @@ test('improvement workflow is opt-in, default-branch-only, read-only and artifac
         'status',
         'report-path',
         'evidence-path',
+        'readiness-report-path',
         'trigger-workflow',
         'trigger-run-id',
         'trigger-attempt',
@@ -3390,6 +3655,12 @@ test('improvement runner preserves the checkout and separates local from workflo
   assert.equal(result.report.status, 'reported');
   assert.equal(result.report.collector.revision, env.GITHUB_SHA);
   assert.equal(result.report.source, 'github-actions');
+  assert.equal(result.readinessReportPath, 'reports/improvement.json');
+  const exportedPath = path.join(history.root, result.readinessReportPath);
+  assert.deepEqual(
+    fs.readFileSync(exportedPath),
+    fs.readFileSync(path.join(history.root, result.outputDirectory, 'report.json')),
+  );
   assert.ok(fs.existsSync(path.join(history.root, result.outputDirectory, 'report.json')));
   assert.ok(fs.existsSync(path.join(history.root, result.outputDirectory, 'summary.md')));
   const retainedBundle = JSON.parse(
@@ -3411,6 +3682,7 @@ test('improvement runner preserves the checkout and separates local from workflo
     status: 'reported',
     'report-path': `${result.outputDirectory}/report.json`,
     'evidence-path': `${result.outputDirectory}/evidence.json`,
+    'readiness-report-path': 'reports/improvement.json',
     'trigger-workflow': '',
     'trigger-run-id': '',
     'trigger-attempt': '',
@@ -3494,6 +3766,7 @@ test('improvement runner preserves the checkout and separates local from workflo
     );
   assert.throws(() => improvementIdentity(completionEnv, { ...completion, action: 'requested' }));
   assert.throws(() => improvementIdentity(completionEnv, event));
+  fs.rmSync(exportedPath);
   const completed = await runImprovementReview(history.root, {
     env: completionEnv,
     event: completion,
@@ -3506,6 +3779,7 @@ test('improvement runner preserves the checkout and separates local from workflo
     status: 'reported',
     'report-path': `${completed.outputDirectory}/report.json`,
     'evidence-path': `${completed.outputDirectory}/evidence.json`,
+    'readiness-report-path': 'reports/improvement.json',
     'trigger-workflow': 'ci.yml',
     'trigger-run-id': '124',
     'trigger-attempt': '1',
@@ -3514,6 +3788,8 @@ test('improvement runner preserves the checkout and separates local from workflo
     'trigger-verified': 'true',
   });
   const completionSummary = fs.readFileSync(completionEnv.GITHUB_STEP_SUMMARY, 'utf8');
+  assert.match(completionSummary, /### Learned Rules/);
+  assert.match(completionSummary, /0 proposed, 0 active, 0 retired/);
   assert.match(completionSummary, /ci\.yml run 124, attempt 1/);
   const summaryUrls = completionSummary.match(/https?:\/\/[^\s)]+/g) ?? [];
   assert.ok(
@@ -3533,12 +3809,18 @@ test('improvement runner preserves the checkout and separates local from workflo
   assert.ok(completionSummary.includes(`Source revision: ${'d'.repeat(40)}`));
   assert.ok(completionSummary.includes(`Collector revision: ${env.GITHUB_SHA}`));
   history.runs[1].conclusion = 'failure';
+  fs.rmSync(exportedPath);
   const failed = await runImprovementReview(history.root, {
     env: completionEnv,
     event: { ...completion, workflow_run: { ...completion.workflow_run, conclusion: 'failure' } },
     client: history.client,
   });
   assert.equal(failed.report.status, 'insufficient-evidence');
+  assert.deepEqual(
+    fs.readFileSync(exportedPath),
+    fs.readFileSync(path.join(history.root, failed.outputDirectory, 'report.json')),
+  );
+  const failedExport = fs.readFileSync(exportedPath);
   assert.equal(outputs(completionEnv.GITHUB_OUTPUT).status, 'insufficient-evidence');
   assert.equal(outputs(completionEnv.GITHUB_OUTPUT)['trigger-conclusion'], 'failure');
   const input = path.join(history.root, 'local-evidence.json');
@@ -3553,6 +3835,8 @@ test('improvement runner preserves the checkout and separates local from workflo
   const local = await runImprovementReview(history.root, { env: {}, input });
   assert.equal(local.report.source, 'local-unverified');
   assert.equal(local.report.collector, undefined);
+  assert.equal(local.readinessReportPath, null);
+  assert.deepEqual(fs.readFileSync(exportedPath), failedExport);
   assert.equal(
     fs.existsSync(path.join(history.root, local.outputDirectory, 'evidence.json')),
     false,
@@ -3744,6 +4028,7 @@ test('required CI has no path bypass, unpinned actions, or success-by-skipping p
   const retained = workflow.jobs['ci-required'].steps.find((step) =>
     step.uses?.startsWith('actions/upload-artifact@'),
   );
+  assert.equal(retained.with.name, 'ci-required');
   assert.match(retained.with.path, /test-results\/ci-contain-ci\.json/);
   assert.deepEqual(
     workflow.jobs.unit.strategy.matrix.include.map((entry) => entry.id),
@@ -3762,7 +4047,7 @@ test('required CI has no path bypass, unpinned actions, or success-by-skipping p
       if (step.uses?.startsWith('actions/checkout@'))
         assert.equal(step.with['persist-credentials'], false);
       if (step.uses?.startsWith('actions/upload-artifact@')) {
-        assert.equal(step.with['retention-days'], 7);
+        assert.equal(step.with['retention-days'], step === retained ? 90 : 7);
         assert.equal(step.with['if-no-files-found'], 'error');
         assert.equal(step.if, '${{ always() }}');
         assert.ok(
@@ -5270,6 +5555,12 @@ test('bounded agent review invokes once, binds its report and removes temporary 
       assert.equal(childOptions.cwd, path.join(temporary, 'work'));
       assert.equal(childOptions.env.HOME, path.join(temporary, 'home'));
       const prepared = prepareAgentReview(root, options);
+      assert.ok(args[args.indexOf('--prompt') + 1].includes('supplied learnedRules criteria'));
+      assert.ok(
+        args[args.indexOf('--prompt') + 1].includes(
+          JSON.parse(prepared.input).learnedRules.rules[0].criterion,
+        ),
+      );
       fs.writeFileSync(
         args[args.indexOf('--usage-output-file') + 1],
         JSON.stringify(agentReviewUsage()),
@@ -5303,6 +5594,11 @@ test('bounded agent review invokes once, binds its report and removes temporary 
   report.outcome = 'proposed';
   report.proposal = validateDocumentationProposal([documentationChange()], patch);
   write(options.reportPath, report);
+  write('.github/improvement-regressions.json', {
+    schemaVersion: 1,
+    regressions: [],
+    learnedRules: [improvementRule({ files: [report.proposal.files[0].path] })],
+  });
   const reviewed = await runBoundedAgentReview(root, runnerOptions);
   assert.equal(reviewed.status, 'reviewed', JSON.stringify(reviewed.errors));
   assert.equal(reviewed.response.humanApprovalRequired, true);
@@ -5310,6 +5606,8 @@ test('bounded agent review invokes once, binds its report and removes temporary 
   assert.equal(reviewed.invocations, 1);
   assert.equal(reviewed.usage.model, 'synthetic-model');
   assert.equal(reviewed.patchSha256, report.proposal.patchSha256);
+  assert.deepEqual(reviewed.learnedRules, prepareAgentReview(root, options).learnedRules);
+  assert.equal(Object.keys(reviewed.evidenceSha256).length, 3);
   assert.deepEqual(reviewed.findingIds, agentReviewFindingIds(reviewed));
   assert.equal(reviewed.findingIds.length, 1);
   assert.deepEqual(Object.keys(reviewed.response.findings[0]), ['file', 'severity', 'message']);
@@ -5390,6 +5688,242 @@ test('bounded agent review fails closed and cleans up without retrying or leakin
     assert.equal(JSON.stringify(reviewed).includes(token), false, failure);
     assert.equal(JSON.stringify(reviewed).includes('private diagnostic'), false, failure);
     assert.equal(calls, ['runtime', 'cancelled'].includes(failure) ? 0 : 1, failure);
+  }
+});
+
+function improvementRule(overrides = {}) {
+  return {
+    id: 'generated-reference',
+    version: 1,
+    status: 'active',
+    files: ['docs/mcp.md'],
+    criterion: 'Generated references must match the manifest in the reviewed proposal.',
+    source: { kind: 'agent-review', findingId: 'a'.repeat(64) },
+    preventionTest: {
+      file: 'tests/check-docs.test.mjs',
+      name: 'Synthetic generated-reference regression',
+    },
+    reason: 'Synthetic reviewed lesson; not operational evidence.',
+    ...overrides,
+  };
+}
+
+test('improvement learned rules enforce bounded schema and immutable lifecycle', () => {
+  const registry = (rules) => ({ schemaVersion: 1, regressions: [], learnedRules: rules });
+  const rule = improvementRule();
+  assert.deepEqual(validateImprovementRules({ schemaVersion: 1, regressions: [] }), []);
+  assert.deepEqual(validateImprovementRules(registry([rule])), [rule]);
+  assert.throws(() => validateImprovementRules({ ...registry([]), command: 'synthetic' }));
+  const invalid = [
+    { id: '../invalid' },
+    { version: 0 },
+    { status: 'approved' },
+    { files: [] },
+    { files: ['docs/mcp.md', 'docs/mcp.md'] },
+    { files: ['docs/../docs/mcp.md'] },
+    { files: ['docs/*.md'] },
+    { criterion: ' ' },
+    { criterion: 'x'.repeat(1001) },
+    { criterion: '\u00e9'.repeat(501) },
+    { criterion: 'unsafe\ncriterion' },
+    { criterion: 'unsafe\u009bcriterion' },
+    { criterion: 'unsafe\u202ecriterion' },
+    { source: { kind: 'unknown', findingId: 'a'.repeat(64) } },
+    { source: { ...rule.source, command: 'synthetic' } },
+    { preventionTest: { ...rule.preventionTest, file: 'tests/../scripts/run.test.mjs' } },
+    { preventionTest: { ...rule.preventionTest, file: '/tests/one.test.mjs' } },
+    { preventionTest: { ...rule.preventionTest, name: '' } },
+    { reason: '' },
+    { command: 'synthetic' },
+    {
+      promotion: { pullRequest: 1, fixCommit: 'a'.repeat(40), afterRunId: '2' },
+      status: 'proposed',
+    },
+    { promotion: { pullRequest: 1, fixCommit: 'a'.repeat(40), afterRunId: '02' } },
+  ];
+  for (const override of invalid) {
+    assert.throws(
+      () => validateImprovementRules(registry([{ ...rule, ...override }])),
+      JSON.stringify(override),
+    );
+  }
+  assert.throws(() => validateImprovementRules(registry([rule, rule])));
+  assert.throws(() => validateImprovementRules(registry([rule, { ...rule, version: 2 }])));
+  assert.throws(() =>
+    validateImprovementRules(
+      registry(Array.from({ length: 5 }, (_, index) => improvementRule({ id: `rule-${index}` }))),
+    ),
+  );
+  assert.throws(() =>
+    validateImprovementRules(
+      registry(
+        Array.from({ length: 17 }, (_, index) =>
+          improvementRule({ version: index + 1, status: 'retired' }),
+        ),
+      ),
+    ),
+  );
+  const proposed = { ...rule, status: 'proposed' };
+  const retired = { ...rule, status: 'retired', reason: 'Superseded.' };
+  assert.equal(improvementRuleHash(rule), improvementRuleHash(retired));
+  assert.notEqual(
+    improvementRuleHash(rule),
+    improvementRuleHash({ ...rule, criterion: 'Changed criterion.' }),
+  );
+  validateImprovementRuleTransition(registry([]), registry([proposed]));
+  validateImprovementRuleTransition(registry([proposed]), registry([rule]));
+  validateImprovementRuleTransition(
+    registry([rule]),
+    registry([retired, { ...proposed, version: 2 }]),
+  );
+  for (const [before, after] of [
+    [[rule], []],
+    [[rule], [proposed]],
+    [[retired], [rule]],
+    [[rule], [{ ...rule, criterion: 'Changed criterion.' }]],
+    [[], [rule]],
+    [[{ ...retired, version: 2 }], [{ ...retired, version: 2 }, proposed]],
+  ])
+    assert.throws(() => validateImprovementRuleTransition(registry(before), registry(after)));
+});
+
+test('improvement learned rule loader rejects invalid bytes and linked paths', (context) => {
+  const { root, write } = fixture(context);
+  const relative = '.github/improvement-regressions.json';
+  const target = path.join(root, relative);
+  assert.deepEqual(readImprovementRules(root).rules, []);
+  write(relative, { schemaVersion: 1, regressions: [], learnedRules: [improvementRule()] });
+  assert.equal(readImprovementRules(root).rules.length, 1);
+  for (const bytes of [
+    Buffer.alloc(0),
+    Buffer.from([0xff]),
+    Buffer.from('{'),
+    Buffer.alloc(IMPROVEMENT_RULE_LIMITS.registryBytes + 1),
+  ]) {
+    fs.writeFileSync(target, bytes);
+    assert.throws(() => readImprovementRules(root));
+    assert.throws(() => parseImprovementRuleRegistry(bytes));
+  }
+  fs.rmSync(target);
+  fs.mkdirSync(target);
+  assert.throws(() => readImprovementRules(root));
+  fs.rmSync(path.dirname(target), { recursive: true });
+  const other = path.join(root, 'linked-registry');
+  fs.mkdirSync(other);
+  fs.symlinkSync(other, path.dirname(target), 'junction');
+  assert.throws(() => readImprovementRules(root));
+});
+
+test('bounded agent review supplies only applicable active learned rules with bound input', (context) => {
+  const { root, write, report, options } = maintenanceEvidence(context);
+  const patch = Buffer.from('Synthetic patch data; never executed');
+  fs.writeFileSync(path.join(root, path.dirname(options.reportPath), 'proposal.patch'), patch);
+  report.outcome = 'proposed';
+  report.proposal = validateDocumentationProposal([documentationChange()], patch);
+  write(options.reportPath, report);
+  const baseline = prepareAgentReview(root, options);
+  const file = report.proposal.files[0].path;
+  const rule = improvementRule({ files: [file] });
+  const registryPath = '.github/improvement-regressions.json';
+  write(registryPath, { schemaVersion: 1, regressions: [], learnedRules: [rule] });
+  const prepared = prepareAgentReview(root, options);
+  const payload = JSON.parse(prepared.input);
+  assert.deepEqual(
+    payload.learnedRules?.rules.map((entry) => entry.id),
+    [rule.id],
+  );
+  assert.notEqual(prepared.inputSha256, baseline.inputSha256);
+  assert.equal(prepared.inputSha256, createHash('sha256').update(prepared.input).digest('hex'));
+  assert.equal(prepared.learnedRules.rulesetSha256, payload.learnedRules.rulesetSha256);
+  assert.equal(
+    payload.learnedRules.rulesetSha256,
+    createHash('sha256').update(JSON.stringify(payload.learnedRules.rules)).digest('hex'),
+  );
+  assert.equal(payload.learnedRules.rules[0].status, undefined);
+  assert.equal(payload.learnedRules.rules[0].reason, undefined);
+  assert.equal(
+    prepared.learnedRules.registrySha256,
+    createHash('sha256')
+      .update(fs.readFileSync(path.join(root, registryPath)))
+      .digest('hex'),
+  );
+  write(registryPath, {
+    schemaVersion: 1,
+    regressions: [],
+    learnedRules: [
+      improvementRule({ id: 'proposed-rule', files: [file], status: 'proposed' }),
+      { ...rule, reason: 'Later bookkeeping with unchanged criteria.' },
+      improvementRule({ id: 'retired-rule', files: [file], status: 'retired' }),
+      improvementRule({
+        id: 'other-scope',
+        files: [DOC_CONTRACTS.find((entry) => entry !== file)],
+      }),
+    ],
+  });
+  const unchanged = prepareAgentReview(root, options);
+  assert.deepEqual(unchanged.input, prepared.input);
+  assert.equal(unchanged.inputSha256, prepared.inputSha256);
+  assert.notEqual(unchanged.learnedRules.registrySha256, prepared.learnedRules.registrySha256);
+  for (const learnedRules of [
+    [],
+    [improvementRule({ files: [file], status: 'proposed' })],
+    [improvementRule({ files: [file], status: 'retired' })],
+    [improvementRule({ files: [DOC_CONTRACTS.find((entry) => entry !== file)] })],
+  ]) {
+    write(registryPath, { schemaVersion: 1, regressions: [], learnedRules });
+    const unused = prepareAgentReview(root, options);
+    assert.deepEqual(unused.input, baseline.input);
+    assert.equal(unused.inputSha256, baseline.inputSha256);
+    assert.equal(unused.learnedRules, undefined);
+  }
+});
+
+test('bounded agent review rejects invalid or over-budget rules before runtime preparation', async (context) => {
+  const { root, write, report, options } = maintenanceEvidence(context);
+  const setPatch = (patch) => {
+    fs.writeFileSync(path.join(root, path.dirname(options.reportPath), 'proposal.patch'), patch);
+    report.outcome = 'proposed';
+    report.proposal = validateDocumentationProposal([documentationChange()], patch);
+    write(options.reportPath, report);
+  };
+  setPatch(Buffer.from('x'));
+  const overhead = prepareAgentReview(root, options).input.length;
+  setPatch(Buffer.from('"'.repeat(Math.floor((96 * 1024 - overhead - 2000) / 2))));
+  const prepared = prepareAgentReview(root, options);
+  const env = {
+    ...options.env,
+    SLIPSTREAM_AGENT_REVIEW_ENABLED: 'true',
+    SLIPSTREAM_AGENT_REVIEW_NO_OVERAGE_CONFIRMED: 'true',
+    SLIPSTREAM_AGENT_REVIEW_MODEL: 'synthetic-model',
+    SLIPSTREAM_AGENT_REVIEW_TOKEN: `github_pat_${'synthetic'.repeat(4)}`,
+  };
+  agentReviewArguments(prepared, agentReviewPolicy(env), root);
+  for (const learnedRules of [
+    [improvementRule({ criterion: 'x'.repeat(1001) })],
+    Array.from({ length: 4 }, (_, index) =>
+      improvementRule({
+        id: `rule-${index}`,
+        files: [report.proposal.files[0].path],
+        criterion: 'x'.repeat(1000),
+      }),
+    ),
+  ]) {
+    write('.github/improvement-regressions.json', {
+      schemaVersion: 1,
+      regressions: [],
+      learnedRules,
+    });
+    assert.throws(() => prepareAgentReview(root, options));
+    const result = await runBoundedAgentReview(root, {
+      ...options,
+      env,
+      event: { ...options.event, schedule: '0 7 * * 1' },
+      prepareRuntime: () => assert.fail('Invalid rule input must not prepare a runtime'),
+      runCommand: () => assert.fail('Invalid rule input must not invoke a model'),
+    });
+    assert.equal(result.status, 'failed');
+    assert.equal(result.invocations, 0);
+    assert.equal(result.learnedRules, undefined);
   }
 });
 
@@ -5684,8 +6218,15 @@ test('maintenance workflow stays opt-in, read-only, bounded and default-branch-o
   }
   const uploads = job.steps.filter((step) => step.uses?.startsWith('actions/upload-artifact@'));
   assert.equal(uploads.length, 3);
+  assert.deepEqual(
+    uploads.map((step) => [step.with.name, step.with['retention-days']]),
+    [
+      ['maintenance-evidence-${{ github.run_id }}-${{ github.run_attempt }}', 90],
+      ['maintenance-proposal-${{ github.run_id }}-${{ github.run_attempt }}', 7],
+      ['readiness-agent-review-${{ github.run_id }}-${{ github.run_attempt }}', 90],
+    ],
+  );
   for (const step of uploads) {
-    assert.equal(step.with['retention-days'], 7);
     assert.equal(step.with['if-no-files-found'], 'error');
     assert.ok(step.with.name.endsWith('${{ github.run_id }}-${{ github.run_attempt }}'));
   }
