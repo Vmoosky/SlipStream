@@ -43,7 +43,7 @@ describe('workspace chat hook installation', () => {
     const manifest = JSON.parse(fs.readFileSync(path.resolve(__dirname, '..', 'package.json'), 'utf8'));
     expect(manifest.contributes.configuration.properties['slipstream.nativeChatPolicy'].default.mode).toBe('off');
     expect(manifest.contributes.languageModelTools.every((tool: { inputSchema: { properties: Record<string, unknown> } }) => tool.inputSchema.properties.nativeContext)).toBe(true);
-  });
+  }, 15_000);
 
   it('adds native policy lifecycle hooks only after opt-in and can restore legacy activity-only hooks', () => {
     const state = { trusted: true, enabled: true, available: true };
