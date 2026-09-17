@@ -506,6 +506,46 @@ export function pullRequestSnapshot(pull) {
   });
 }
 
+export function observabilityLifecycle(report) {
+  const validation = report.validation;
+  return {
+    schemaVersion: 1,
+    snapshot: {
+      status: 'verified',
+      pullRequest: report.number,
+      head: report.head,
+      base: report.base,
+      state: report.state,
+    },
+    validation: validation
+      ? {
+          status: validation.status,
+          workflow: validation.source?.workflow,
+          runId: validation.source?.runId,
+          attempt: validation.source?.attempt,
+          conclusion: validation.source?.conclusion,
+          head: validation.source?.head,
+          base: validation.source?.base,
+        }
+      : { status: 'not-requested' },
+    maintenance: { status: report.maintenance?.status ?? 'unavailable' },
+    review: {
+      status: report.review?.status ?? 'unavailable',
+      count: report.review?.reviews?.length ?? 0,
+    },
+    publication: { status: report.publication ?? 'not-applied' },
+    collector: report.collector
+      ? {
+          status: 'verified',
+          runId: report.collector.runId,
+          attempt: report.collector.attempt,
+          eventName: report.collector.eventName,
+          revision: report.collector.revision,
+        }
+      : { status: 'not-recorded' },
+  };
+}
+
 async function validationSourceCurrent(report, client) {
   try {
     const source = report.validation.source;
@@ -570,6 +610,7 @@ export async function collectPrObservability({
     pullUrl: `https://github.com/${repository}/pull/${number}`,
     publication: 'not-applied',
   };
+  report.lifecycle = observabilityLifecycle(report);
   if (validationSource) {
     report.validation = { status: 'unverified', source: validationSource };
     if (
@@ -582,6 +623,7 @@ export async function collectPrObservability({
       report.errors.push(
         'The triggering validation run is unavailable, stale, or does not match this PR snapshot.',
       );
+      report.lifecycle = observabilityLifecycle(report);
       return report;
     }
     report.validation.status = 'verified-completion';
@@ -604,18 +646,21 @@ export async function collectPrObservability({
   } catch {
     report.errors.push('Review history is unavailable.');
   }
+  report.lifecycle = observabilityLifecycle(report);
   return report;
 }
 
 export function renderPrObservability(report) {
   const base = `https://github.com/${report.repository}`;
   const maintenance = report.maintenance;
+  const lifecycle = observabilityLifecycle(report);
   return [
     PR_OBSERVABILITY_MARKER,
     '## Automation Observability',
     '',
     `Snapshot: [${report.head.slice(0, 12)}](${base}/commit/${report.head}) at ${report.checkedAt}.`,
     `PR state: ${report.state}${report.draft ? ' (draft)' : ''}.`,
+    `Lifecycle evidence: snapshot **${lifecycle.snapshot.status}**, validation **${lifecycle.validation.status}**, review **${lifecycle.review.status}**, maintenance **${lifecycle.maintenance.status}**, publication **${lifecycle.publication.status}**.`,
     `Maintenance provenance: **${maintenance.status}**.`,
     ...(maintenance.reason ? [`Verification detail: ${maintenance.reason}.`] : []),
     ...(maintenance.reference
@@ -672,6 +717,7 @@ export async function publishPrObservability(report, client) {
   );
   if (report.validation && report.validation.status !== 'verified-completion') {
     report.publication = 'unverified-validation';
+    report.lifecycle = observabilityLifecycle(report);
     return;
   }
   const number = report.number;
@@ -690,7 +736,10 @@ export async function publishPrObservability(report, client) {
     }
     return true;
   };
-  if (!(await fresh())) return;
+  if (!(await fresh())) {
+    report.lifecycle = observabilityLifecycle(report);
+    return;
+  }
   const labels = await client.json(`/issues/${number}/labels?per_page=100`);
   const comments = await client.json(`/issues/${number}/comments?per_page=100`);
   requireEvidence(
@@ -713,7 +762,10 @@ export async function publishPrObservability(report, client) {
   for (const name of additions) {
     if (!(await client.json(`/labels/${encodeURIComponent(name)}`))) definitions.push(name);
   }
-  if (!(await fresh())) return;
+  if (!(await fresh())) {
+    report.lifecycle = observabilityLifecycle(report);
+    return;
+  }
   for (const name of definitions) {
     await client.json('/labels', {
       method: 'POST',
@@ -729,12 +781,13 @@ export async function publishPrObservability(report, client) {
   }
   if (additions.length)
     await client.json(`/issues/${number}/labels`, { method: 'POST', body: { labels: additions } });
+  report.publication = 'applied';
+  report.lifecycle = observabilityLifecycle(report);
   const body = renderPrObservability(report);
   if (!owned.length)
     await client.json(`/issues/${number}/comments`, { method: 'POST', body: { body } });
   else if (owned[0].body !== body)
     await client.json(`/issues/comments/${owned[0].id}`, { method: 'PATCH', body: { body } });
-  report.publication = 'applied';
 }
 
 function validationRunSource(run, repository, branch) {
@@ -870,6 +923,7 @@ async function main() {
   const client = createPrObservabilityClient(identity.repository, process.env.GITHUB_TOKEN);
   const report = await collectPrObservability({ ...identity, client });
   report.collector = identity.collector;
+  report.lifecycle = observabilityLifecycle(report);
   const directory = path.join(root, 'test-results/pr-observability');
   fs.mkdirSync(directory, { recursive: true });
   try {
@@ -879,6 +933,7 @@ async function main() {
     report.errors.push('Metadata publication failed; no automatic retry was attempted.');
     process.exitCode = 1;
   } finally {
+    report.lifecycle = observabilityLifecycle(report);
     const bytes = Buffer.from(`${JSON.stringify(report, null, 2)}\n`);
     fs.writeFileSync(path.join(directory, 'report.json'), bytes);
     const summary = renderPrObservability(report);

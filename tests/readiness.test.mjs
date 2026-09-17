@@ -92,6 +92,7 @@ import {
   collectPrObservability,
   publishPrObservability,
   pullRequestSnapshot,
+  observabilityLifecycle,
   renderPrObservability,
   PR_OBSERVABILITY_MARKER,
   prObservabilityIdentity,
@@ -606,6 +607,22 @@ test('PR observability collects ordinary PRs and withholds unverifiable automati
   assert.deepEqual(ordinary.labels, ['area:docs']);
   assert.equal(ordinary.maintenance.status, 'not-requested');
   assert.equal(ordinary.review.status, 'review-required');
+  assert.deepEqual(ordinary.lifecycle, {
+    schemaVersion: 1,
+    snapshot: {
+      status: 'verified',
+      pullRequest: 7,
+      head: META.headRevision,
+      base: META.baseRevision,
+      state: 'open',
+    },
+    validation: { status: 'not-requested' },
+    maintenance: { status: 'not-requested' },
+    review: { status: 'review-required', count: 0 },
+    publication: { status: 'not-applied' },
+    collector: { status: 'not-recorded' },
+  });
+  assert.match(renderPrObservability(ordinary), /Lifecycle evidence: snapshot \*\*verified\*\*/);
   assert.equal(calls.length, 3);
   pull.body = 'Maintenance-Run: https://github.com/Vmoosky/SlipStream/actions/runs/123/attempts/1';
   const missing = await collect();
