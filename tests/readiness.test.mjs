@@ -1280,7 +1280,8 @@ test('agent harness configurations are bounded, non-publishing, and workspace-sc
   assert.equal(JSON.stringify({ claude, copilot, mcp }).includes('TOKEN'), false);
   assert.equal(JSON.stringify({ claude, copilot, mcp }).includes('SECRET'), false);
 
-  const current = checkAgentSession({ root: REPO, cwd: REPO });
+  const pinnedNode = fs.readFileSync(path.join(REPO, '.node-version'), 'utf8').trim();
+  const current = checkAgentSession({ root: REPO, cwd: REPO, nodeVersion: pinnedNode });
   assert.equal(current.passed, true);
   assert.match(agentSessionContext(current), /matches \.node-version/);
   const mismatch = checkAgentSession({ root: REPO, cwd: REPO, nodeVersion: '20.0.0' });
