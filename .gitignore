@@ -22,4 +22,3 @@ test-results/
 id_rsa
 id_ed25519
 .vscode/settings.json
-.vscode/mcp.json

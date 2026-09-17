@@ -1,0 +1,16 @@
+{
+  "servers": {
+    "slipstream": {
+      "type": "stdio",
+      "command": "node",
+      "args": [
+        "${workspaceFolder}/packages/mcp-server/dist/index.js",
+        "--root",
+        "${workspaceFolder}",
+        "--label",
+        "VS Code workspace"
+      ]
+    }
+  },
+  "inputs": []
+}

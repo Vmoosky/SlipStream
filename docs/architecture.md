@@ -588,7 +588,7 @@ Supported Node.js: >=20. The pinned development runtime is in [.node-version](..
 | test:dashboard | npm run test:e2e -- |
 | typecheck | npm run typecheck --workspaces --if-present |
 | lint | eslint . --max-warnings 0 |
-| format:check | prettier --check eslint.config.mjs lint-staged.config.mjs playwright.config.ts scripts/check-*.mjs scripts/develop.mjs scripts/install-hooks.mjs scripts/maintenance.mjs tests/check-docs.test.mjs tests/readiness.test.mjs .github/workflows/*.yml .github/dependabot.yml .github/labeler.yml |
+| format:check | prettier --check eslint.config.mjs lint-staged.config.mjs playwright.config.ts scripts/check-*.mjs scripts/develop.mjs scripts/install-hooks.mjs scripts/maintenance.mjs tests/check-docs.test.mjs tests/readiness.test.mjs .claude/settings.json .github/hooks/*.json .github/workflows/*.yml .github/dependabot.yml .github/labeler.yml .vscode/mcp.json |
 | check:docs | node scripts/check-docs.mjs |
 | docs:write | node scripts/check-docs.mjs --write |
 | maintenance:docs | node scripts/maintenance.mjs |
@@ -614,5 +614,5 @@ Supported Node.js: >=20. The pinned development runtime is in [.node-version](..
 | precommit | node scripts/develop.mjs precommit |
 | test:coverage | npm run build && npm run test:coverage --workspaces --if-present |
 
-<!-- source-sha256: 01f328e7c4d3b2c71a5dbaa8b7ba3b0c7d7d10995f00e1892aafe18ccd7e9477 -->
+<!-- source-sha256: fd59a61ff4604b7afe550402def7808a40103736a7a685c05ad8242b0f978d19 -->
 <!-- slipstream-reference:build:end -->

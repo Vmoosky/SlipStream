@@ -5,10 +5,16 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { execFileSync, spawnSync } from 'node:child_process';
+import { Readable } from 'node:stream';
 import { parse } from 'yaml';
 import { ESLint } from 'eslint';
 import { check, resolveConfig, resolveConfigFile } from 'prettier';
 import { checkDocs } from '../scripts/check-docs.mjs';
+import {
+  agentSessionContext,
+  checkAgentSession,
+  readHookInput,
+} from '../scripts/check-agent-session.mjs';
 
 import { developmentPlan, runDevelopmentCommand, runDevelopment } from '../scripts/develop.mjs';
 import { writeReadinessReport } from '../scripts/check-readiness-reports.mjs';
@@ -1224,6 +1230,70 @@ test('PR observability workflow writes metadata only from trusted default-branch
   assert.equal(
     discovery.with.name,
     'readiness-pr-observability-${{ github.event.pull_request.number || inputs.pull_request || github.event.workflow_run.pull_requests[0].number }}-${{ github.run_id }}-${{ github.run_attempt }}',
+  );
+});
+
+test('agent harness configurations are bounded, non-publishing, and workspace-scoped', async () => {
+  const claude = JSON.parse(fs.readFileSync(path.join(REPO, '.claude/settings.json'), 'utf8'));
+  assert.equal(claude.$schema, 'https://json.schemastore.org/claude-code-settings.json');
+  assert.deepEqual(Object.keys(claude).sort(), ['$schema', 'permissions']);
+  assert.equal(claude.permissions.allow, undefined);
+  for (const tool of ['Bash', 'PowerShell']) {
+    assert.ok(claude.permissions.ask.includes(`${tool}(git commit *)`));
+    assert.ok(claude.permissions.ask.includes(`${tool}(git push *)`));
+    for (const command of ['git clean -f*', 'git push --force*', 'git reset --hard*']) {
+      assert.ok(claude.permissions.deny.includes(`${tool}(${command})`));
+    }
+  }
+  assert.ok(claude.permissions.deny.includes('Read(./.env)'));
+  assert.ok(claude.permissions.deny.includes('Read(./.env.*)'));
+
+  const copilot = JSON.parse(
+    fs.readFileSync(path.join(REPO, '.github/hooks/slipstream.json'), 'utf8'),
+  );
+  assert.deepEqual(Object.keys(copilot), ['version', 'hooks']);
+  assert.equal(copilot.version, 1);
+  assert.deepEqual(Object.keys(copilot.hooks), ['sessionStart']);
+  assert.deepEqual(copilot.hooks.sessionStart, [
+    {
+      type: 'command',
+      command: 'node scripts/check-agent-session.mjs',
+      cwd: '.',
+      timeoutSec: 5,
+    },
+  ]);
+
+  const mcp = JSON.parse(fs.readFileSync(path.join(REPO, '.vscode/mcp.json'), 'utf8'));
+  assert.deepEqual(Object.keys(mcp.servers), ['slipstream']);
+  assert.deepEqual(mcp.inputs, []);
+  assert.deepEqual(mcp.servers.slipstream, {
+    type: 'stdio',
+    command: 'node',
+    args: [
+      '${workspaceFolder}/packages/mcp-server/dist/index.js',
+      '--root',
+      '${workspaceFolder}',
+      '--label',
+      'VS Code workspace',
+    ],
+  });
+  assert.equal(JSON.stringify({ claude, copilot, mcp }).includes('TOKEN'), false);
+  assert.equal(JSON.stringify({ claude, copilot, mcp }).includes('SECRET'), false);
+
+  const pinnedNode = fs.readFileSync(path.join(REPO, '.node-version'), 'utf8').trim();
+  const current = checkAgentSession({ root: REPO, cwd: REPO, nodeVersion: pinnedNode });
+  assert.equal(current.passed, true);
+  assert.match(agentSessionContext(current), /matches \.node-version/);
+  const mismatch = checkAgentSession({ root: REPO, cwd: REPO, nodeVersion: '20.0.0' });
+  assert.equal(mismatch.passed, false);
+  assert.match(agentSessionContext(mismatch), /does not match required/);
+  assert.throws(
+    () => checkAgentSession({ root: REPO, cwd: path.dirname(REPO) }),
+    /outside the repository/,
+  );
+  await assert.rejects(
+    readHookInput(Readable.from([Buffer.alloc(16 * 1024 + 1)])),
+    /exceeds 16 KiB/,
   );
 });
 
