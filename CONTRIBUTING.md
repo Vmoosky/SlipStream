@@ -25,7 +25,7 @@ npm exec -- playwright install-deps chromium
 ```
 
 `validate` rebuilds before typechecking and running the script and workspace tests,
-lint, formatting, documentation contracts, browser tests, the five-run offline
+coverage thresholds, lint, formatting, documentation contracts, browser tests, the five-run offline
 proof, and extension packaging. It writes the documentation, browser, and proof
 reports under `test-results/`. It does not install the VSIX, register plugins, or
 change user stores. Each command stops on failure or cancellation without retries
@@ -119,6 +119,58 @@ Untracked files remain in place and may still be inspected by repository-wide li
 The hook checks commits with staged additions, copies, modifications, or renames;
 empty and deletion-only commits do not trigger lint-staged tasks. Hooks are a local,
 bypassable guard, not a replacement for `npm run validate` or required CI gates.
+
+## Test Coverage
+
+Run the instrumented suites from the repository root:
+
+```sh
+npm run test:coverage
+```
+
+This rebuilds the workspaces, then runs the four Vitest suites with the matching
+V8 coverage provider. Every `src/**/*.ts` file is included, even when no test
+imports it. Each workspace writes its own `coverage-summary.json`,
+`coverage-final.json`, LCOV/HTML reports, and `unit.json` under
+`test-results/coverage/<workspace>/`. Ordinary `unit-*.json` reports are not
+overwritten. Reports are generated evidence, not committed source.
+
+Each Vitest configuration resolves its root through `fs.realpathSync.native`.
+Keep this canonicalization: on Windows, different drive-letter casing can cause
+V8 coverage to credit the wrong source locations even when test results match.
+The readiness tests verify the actual configurations across drive-letter casings.
+
+The fixed floors below apply to the complete source set within each workspace,
+not just the files touched by a test. Threshold failures exit nonzero; thresholds
+do not automatically decrease or update themselves. The floors are unchanged
+after correcting the path-sensitive local coverage measurements.
+
+| Workspace | Statements | Branches | Functions | Lines |
+| --- | ---: | ---: | ---: | ---: |
+| core | 95% | 82% | 94% | 95% |
+| hook-runtime | 46% | 51% | 48% | 45% |
+| mcp-server | 33% | 48% | 18% | 32% |
+| extension | 72% | 65% | 71% | 72% |
+
+`npm run validate` includes the coverage gate. The Node 24 Linux and Windows unit
+CI jobs also require it, retain the coverage files, and verify both test receipts
+and consistent coverage counters before the aggregate can pass. Node 20/22
+compatibility jobs retain their existing uninstrumented test commands.
+
+These are **in-process source-coverage measurements**, not whole-product coverage
+or proof of assertion quality. Child-process execution is not captured by this
+provider, so the hook and MCP smoke tests exercise behavior that appears uncovered
+here. Browser E2E, the Node-based script/plugin tests, bundled webview execution,
+and the offline outcome proof remain separate required checks; their execution
+must not be represented as covered source without instrumentation. Do not exclude
+uncovered entry points or lower thresholds merely to make CI pass.
+
+Use the JSON or HTML report to find meaningful untested branches, add focused
+regressions, then rerun the complete workspace coverage suite. Run focused tests
+without `--coverage` when only part of the suite is selected: full-source
+thresholds intentionally reject partial-suite coverage. Changes to coverage
+configuration, source scope, or floors need explicit review and new measured
+evidence. No CodeBlend score increase is implied by these reports.
 
 ## Checks And Evidence
 

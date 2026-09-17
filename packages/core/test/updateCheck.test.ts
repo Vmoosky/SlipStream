@@ -2,9 +2,10 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import {
+  defaultFetchLatest,
   compareVersions,
   formatUpdateNotice,
   isNewerVersion,
@@ -21,6 +22,8 @@ beforeEach(() => {
 
 afterEach(() => {
   fs.rmSync(stateDir, { recursive: true, force: true });
+  vi.unstubAllGlobals();
+  vi.useRealTimers();
 });
 
 function readState(): { lastCheckMs: number; latestVersion: string | null } {
@@ -58,7 +61,87 @@ describe('isUpdateCheckDisabled', () => {
   });
 });
 
+describe('default update transport', () => {
+  const fetchStub = vi.fn<typeof fetch>();
+  const url = 'https://updates.example.test/latest';
+
+  beforeEach(() => {
+    vi.useFakeTimers();
+    fetchStub.mockReset();
+    vi.stubGlobal('fetch', fetchStub);
+  });
+
+  it('does not fetch without a URL or fetch implementation', async () => {
+    await expect(defaultFetchLatest({ SLIPSTREAM_UPDATE_URL: ' ' })).resolves.toBeNull();
+    vi.stubGlobal('fetch', undefined);
+    await expect(defaultFetchLatest({ SLIPSTREAM_UPDATE_URL: url })).resolves.toBeNull();
+    expect(fetchStub).not.toHaveBeenCalled();
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it.each([
+    { data: { version: 'v2.0.0', tag_name: 'v9.0.0' }, expected: '2.0.0' },
+    { data: { version: 42, tag_name: 'v3.0.0' }, expected: '3.0.0' },
+    { data: { tag_name: 'v4.0.0' }, expected: '4.0.0' },
+    { data: { version: '' }, expected: null },
+    { data: { version: 42, tag_name: false }, expected: null },
+    { data: null, expected: null },
+  ])('validates the response shape and version precedence: $data', async ({ data, expected }) => {
+    fetchStub.mockResolvedValue(new Response(JSON.stringify(data), { status: 200 }));
+    await expect(defaultFetchLatest({ SLIPSTREAM_UPDATE_URL: ` ${url} ` })).resolves.toBe(expected);
+    expect(fetchStub).toHaveBeenCalledWith(url, { signal: expect.any(AbortSignal) });
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('ignores unsuccessful responses without reading the body', async () => {
+    const response = new Response('unavailable', { status: 503 });
+    fetchStub.mockResolvedValue(response);
+    await expect(defaultFetchLatest({ SLIPSTREAM_UPDATE_URL: url })).resolves.toBeNull();
+    expect(response.bodyUsed).toBe(false);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('fails open for malformed JSON and rejected requests', async () => {
+    fetchStub.mockResolvedValueOnce(new Response('{invalid', { status: 200 }));
+    await expect(defaultFetchLatest({ SLIPSTREAM_UPDATE_URL: url })).resolves.toBeNull();
+    fetchStub.mockRejectedValueOnce(new TypeError('offline'));
+    await expect(defaultFetchLatest({ SLIPSTREAM_UPDATE_URL: url })).resolves.toBeNull();
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('aborts a stalled request at the deadline and clears its timer', async () => {
+    let requestSignal: AbortSignal | undefined;
+    fetchStub.mockImplementation((_url, options) => {
+      const signal = options?.signal;
+      if (!signal) return Promise.reject(new Error('Missing abort signal'));
+      requestSignal = signal;
+      return new Promise<Response>((_resolve, reject) => {
+        signal.addEventListener('abort', () => reject(signal.reason), { once: true });
+      });
+    });
+    const pending = defaultFetchLatest({ SLIPSTREAM_UPDATE_URL: url });
+    expect(vi.getTimerCount()).toBe(1);
+    await vi.advanceTimersByTimeAsync(1500);
+    await expect(pending).resolves.toBeNull();
+    expect(requestSignal?.aborted).toBe(true);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+});
+
 describe('maybeCheckForUpdate', () => {
+  it('uses the default transport and records its result when no fetch override is supplied', async () => {
+    const fetchStub = vi.fn<typeof fetch>().mockResolvedValue(
+      new Response(JSON.stringify({ tag_name: 'v2.0.0' }), { status: 200 }),
+    );
+    vi.stubGlobal('fetch', fetchStub);
+    await expect(maybeCheckForUpdate({
+      currentVersion: '1.0.0', stateDir, now: 3000,
+      env: { SLIPSTREAM_UPDATE_URL: 'https://updates.example.test/latest' },
+    })).resolves.toEqual({ currentVersion: '1.0.0', latestVersion: '2.0.0' });
+    expect(fetchStub).toHaveBeenCalledOnce();
+    expect(readState()).toEqual({ lastCheckMs: 3000, latestVersion: '2.0.0' });
+  });
+
   it('returns a notice when a newer version is published', async () => {
     const notice = await maybeCheckForUpdate({
       currentVersion: '0.1.0',

@@ -8,6 +8,8 @@ import { execFileSync, spawnSync } from 'node:child_process';
 import { parse } from 'yaml';
 import { ESLint } from 'eslint';
 import { check, resolveConfig, resolveConfigFile } from 'prettier';
+import { checkDocs } from '../scripts/check-docs.mjs';
+
 import { developmentPlan, runDevelopmentCommand, runDevelopment } from '../scripts/develop.mjs';
 import { writeReadinessReport } from '../scripts/check-readiness-reports.mjs';
 import {
@@ -59,6 +61,7 @@ import {
   verifyImprovementRegression,
   UNIT_JOBS,
   BROWSER_JOBS,
+  COVERAGE_JOBS,
   UNIT_REPORTS,
   DOC_CONTRACTS,
 } from '../scripts/check-ci.mjs';
@@ -87,7 +90,6 @@ import {
   PR_OBSERVABILITY_MARKER,
   prObservabilityIdentity,
 } from '../scripts/check-pr-observability.mjs';
-import { checkDocs } from '../scripts/check-docs.mjs';
 
 const REPO = fileURLToPath(new URL('../', import.meta.url));
 const META = {
@@ -100,7 +102,7 @@ const META = {
   baseRevision: 'c'.repeat(40),
 };
 const unitSteps = Object.fromEntries(
-  ['install', 'build', 'types', 'tests', 'lint', 'format'].map((name) => [
+  ['install', 'build', 'types', 'tests', 'coverage', 'lint', 'format'].map((name) => [
     name,
     { outcome: 'success' },
   ]),
@@ -117,15 +119,27 @@ function fixture(context) {
     fs.mkdirSync(path.dirname(target), { recursive: true });
     fs.writeFileSync(target, JSON.stringify(data));
   };
-  for (const file of UNIT_REPORTS)
-    write(file, {
+  for (const file of UNIT_REPORTS) {
+    const suite = {
       success: true,
       numTotalTests: 2,
       numPassedTests: 2,
       numPendingTests: 0,
       numFailedTests: 0,
       numFailedTestSuites: 0,
+    };
+    write(file, suite);
+    const directory = `coverage/${file.slice('unit-'.length, -'.json'.length)}`;
+    write(`${directory}/unit.json`, suite);
+    write(`${directory}/coverage-summary.json`, {
+      total: Object.fromEntries(
+        ['statements', 'branches', 'functions', 'lines'].map((metric) => [
+          metric,
+          { total: 100, covered: 99, skipped: 0, pct: 99 },
+        ]),
+      ),
     });
+  }
   write('browser/report.json', {
     stats: { expected: 2, unexpected: 0, flaky: 0, skipped: 0 },
     errors: [],
@@ -1172,7 +1186,17 @@ test('PR observability workflow writes metadata only from trusted default-branch
   );
   const checkout = job.steps.find((step) => step.uses?.startsWith('actions/checkout@'));
   assert.deepEqual(checkout.with, { ref: '${{ github.sha }}', 'persist-credentials': false });
-  assert.ok(job.steps.some((step) => step.run === 'npm ci --ignore-scripts'));
+  const installIndex = job.steps.findIndex((step) => step.run === 'npm ci --ignore-scripts');
+  const buildIndex = job.steps.findIndex(
+    (step) => step.run === 'npm run build --workspace @slipstream/core',
+  );
+  const guardsIndex = job.steps.findIndex(
+    (step) =>
+      step.run === "node --test --test-name-pattern='^PR observability' tests/readiness.test.mjs",
+  );
+  assert.ok(installIndex >= 0 && buildIndex > installIndex && guardsIndex > buildIndex);
+  assert.equal(job.steps[buildIndex].if, undefined);
+  assert.equal(job.steps[buildIndex].env, undefined);
   for (const step of job.steps) {
     if (step.uses) assert.match(step.uses, /@[a-f0-9]{40}$/);
     assert.equal(step['continue-on-error'], undefined);
@@ -1596,6 +1620,7 @@ test('development validation retains all existing gates and CI evidence outputs'
     ['run', 'build'],
     ['run', 'typecheck'],
     ['test'],
+    ['run', 'test:coverage'],
     ['run', 'lint'],
     ['run', 'format:check'],
     ['run', 'check:docs', '--', '--report', 'test-results/docs.json'],
@@ -1853,6 +1878,137 @@ test('missing or failed unit evidence cannot pass despite successful command sta
   assert.equal(collectUnit(root, { ...META, job: UNIT_JOBS[0], steps: unitSteps }).passed, false);
   write(UNIT_REPORTS[0], { success: true, numTotalTests: 0, numPassedTests: 0, numFailedTests: 0 });
   assert.equal(collectUnit(root, { ...META, job: UNIT_JOBS[0], steps: unitSteps }).passed, false);
+});
+
+test('coverage roots use canonical filesystem paths for every workspace', async () => {
+  const { loadConfigFromFile } = await import('vite');
+  for (const workspace of ['core', 'hook-runtime', 'mcp-server', 'extension']) {
+    const root = path.join(REPO, 'packages', workspace);
+    const configPath = path.join(root, 'vitest.config.mts');
+    const filenames = new Set([configPath]);
+    if (process.platform === 'win32') {
+      filenames.add(configPath.replace(/^[A-Za-z]:/, (drive) => drive.toLowerCase()));
+      filenames.add(configPath.replace(/^[A-Za-z]:/, (drive) => drive.toUpperCase()));
+    }
+    for (const filename of filenames) {
+      const loaded = await loadConfigFromFile({ command: 'serve', mode: 'test' }, filename);
+      assert.ok(loaded, filename);
+      assert.equal(loaded.config.root, fs.realpathSync.native(root), filename);
+    }
+  }
+});
+
+test('coverage includes unimported source and enforces thresholds with a nonzero exit', (context) => {
+  fs.mkdirSync(path.join(REPO, 'test-results'), { recursive: true });
+  const root = fs.mkdtempSync(path.join(REPO, 'test-results/coverage-gate-'));
+  context.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  fs.mkdirSync(path.join(root, 'src'));
+  fs.mkdirSync(path.join(root, 'test'));
+  fs.writeFileSync(path.join(root, 'src/used.ts'), 'export const used = () => 1;\n');
+  fs.writeFileSync(path.join(root, 'src/uncovered.ts'), 'export const uncovered = () => 2;\n');
+  const testFile = path.join(root, 'test/coverage.test.ts');
+  const source = [
+    "import { test, expect } from 'vitest';",
+    "import { used } from '../src/used';",
+    "test('used source', () => expect(used()).toBe(1));",
+    '',
+  ].join('\n');
+  fs.writeFileSync(testFile, source);
+  const run = () =>
+    spawnSync(
+      process.execPath,
+      [
+        path.join(REPO, 'node_modules/vitest/vitest.mjs'),
+        'run',
+        '--root',
+        root,
+        '--config',
+        path.join(REPO, 'packages/core/vitest.config.mts'),
+        '--maxWorkers=1',
+        '--coverage',
+        `--coverage.reportsDirectory=${path.join(root, 'reports')}`,
+        `--outputFile.json=${path.join(root, 'unit.json')}`,
+      ],
+      { cwd: REPO, encoding: 'utf8', timeout: 60_000, env: { ...process.env, CI: 'true' } },
+    );
+  const failed = run();
+  assert.ifError(failed.error);
+  assert.equal(failed.status, 1, failed.stdout + failed.stderr);
+  assert.equal(JSON.parse(fs.readFileSync(path.join(root, 'unit.json'), 'utf8')).success, true);
+  const summary = JSON.parse(
+    fs.readFileSync(path.join(root, 'reports/coverage-summary.json'), 'utf8'),
+  );
+  assert.ok(Object.keys(summary).some((file) => file.endsWith('uncovered.ts')));
+  assert.ok(summary.total.functions.pct < 94);
+  assert.match(failed.stdout + failed.stderr, /coverage.*threshold/i);
+  fs.appendFileSync(
+    testFile,
+    "import { uncovered } from '../src/uncovered';\ntest('previously uncovered source', () => expect(uncovered()).toBe(2));\n",
+  );
+  const passed = run();
+  assert.ifError(passed.error);
+  assert.equal(passed.status, 0, passed.stdout + passed.stderr);
+  const complete = JSON.parse(
+    fs.readFileSync(path.join(root, 'reports/coverage-summary.json'), 'utf8'),
+  );
+  assert.equal(complete.total.functions.pct, 100);
+});
+
+test('required coverage evidence is revision-bound and cannot disappear from a successful aggregate', (context) => {
+  const { root, write, options } = artifacts(context);
+  assert.equal(verifyRequired(root, options).passed, true);
+  const filename = `ci-unit-${COVERAGE_JOBS[0]}/ci-unit.json`;
+  const report = JSON.parse(fs.readFileSync(path.join(root, filename), 'utf8'));
+  for (const invalid of [
+    { ...report, coverage: undefined },
+    { ...report, coverage: [] },
+    { ...report, revision: 'd'.repeat(40) },
+    { ...report, coverage: [report.coverage[0], ...report.coverage.slice(0, -1)] },
+  ]) {
+    write(filename, invalid);
+    assert.equal(verifyRequired(root, options).passed, false);
+  }
+  write(filename, report);
+  assert.equal(verifyRequired(root, options).passed, true);
+});
+
+test('coverage evidence rejects missing reports, invalid totals, and failed coverage commands', (context) => {
+  const { root, write } = fixture(context);
+  for (const job of COVERAGE_JOBS) {
+    const options = { ...META, job, steps: unitSteps };
+    const valid = collectUnit(root, options);
+    assert.equal(valid.passed, true);
+    assert.equal(valid.coverage.length, UNIT_REPORTS.length);
+    for (const outcome of ['failure', 'cancelled', 'skipped', undefined]) {
+      const report = collectUnit(root, {
+        ...options,
+        steps: { ...unitSteps, coverage: { outcome, conclusion: 'success' } },
+      });
+      assert.equal(report.passed, false);
+      assert.ok(report.errors.some((error) => error.startsWith('coverage:')));
+    }
+    const filename = 'coverage/core/coverage-summary.json';
+    const summary = JSON.parse(fs.readFileSync(path.join(root, filename), 'utf8'));
+    for (const invalid of [
+      undefined,
+      { ...summary, total: {} },
+      { total: { ...summary.total, branches: { total: 0, covered: 0, skipped: 0, pct: 100 } } },
+      { total: { ...summary.total, lines: { total: 100, covered: 1, skipped: 0, pct: 99 } } },
+      { total: { ...summary.total, lines: { total: 100, covered: 101, skipped: 0, pct: 101 } } },
+    ]) {
+      if (invalid) write(filename, invalid);
+      else fs.rmSync(path.join(root, filename));
+      assert.equal(collectUnit(root, options).passed, false);
+      write(filename, summary);
+    }
+    const suiteFile = 'coverage/core/unit.json';
+    const suite = JSON.parse(fs.readFileSync(path.join(root, suiteFile), 'utf8'));
+    write(suiteFile, { ...suite, success: false, numFailedTests: 1 });
+    assert.equal(collectUnit(root, options).passed, false);
+    fs.rmSync(path.join(root, suiteFile));
+    assert.equal(collectUnit(root, options).passed, false);
+    write(suiteFile, suite);
+  }
 });
 
 test('failed commands and cancelled or skipped jobs fail the required gate', (context) => {
@@ -4158,6 +4314,13 @@ test('required CI has no path bypass, unpinned actions, or success-by-skipping p
   }
   const ids = workflow.jobs.unit.steps.map((step) => step.id).filter(Boolean);
   assert.deepEqual(ids, Object.keys(unitSteps));
+  const coverage = workflow.jobs.unit.steps.find((step) => step.id === 'coverage');
+  assert.equal(coverage.run, 'npm run test:coverage');
+  assert.equal(coverage.if, "${{ matrix.id == 'linux-node24' || matrix.id == 'windows-node24' }}");
+  const unitArtifacts = workflow.jobs.unit.steps.find((step) =>
+    step.uses?.startsWith('actions/upload-artifact@'),
+  );
+  assert.match(unitArtifacts.with.path, /test-results\/coverage\//);
   const browserIds = workflow.jobs['browser-proof'].steps.map((step) => step.id).filter(Boolean);
   assert.deepEqual(browserIds, Object.keys(browserSteps));
   assert.deepEqual(

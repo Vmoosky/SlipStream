@@ -174,5 +174,5 @@ Registry identity: local.slipstream/slipstream. Distribution: local-source-only.
 | standalone |  | get_savings, read_file, retrieve_artifact, run_command |
 | retrieval-only | --retrieval-only | get_savings, retrieve_artifact |
 
-<!-- source-sha256: 6ce8404afda3c6b3e5a9ac918ddadaa64c5e4d5fa24cfa41186d8e168c4aed01 -->
+<!-- source-sha256: 50e353f3e7dd04f0984ba0a0e3c2ccea4d35d994bebebe7d3761bd0458e9b381 -->
 <!-- slipstream-reference:mcp:end -->

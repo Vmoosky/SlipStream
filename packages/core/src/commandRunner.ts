@@ -148,12 +148,19 @@ export async function runCommand(options: RunCommandOptions): Promise<RunCommand
 
   const started = Date.now();
   return await new Promise<RunCommandResult>((resolve, reject) => {
-    const child = spawn(needsShell ? command : resolved, args, {
-      cwd,
-      shell: needsShell,
-      windowsHide: true,
-      env: { ...process.env, NO_COLOR: '1', FORCE_COLOR: '0', CI: '1' },
-    });
+    let child: ReturnType<typeof spawn>;
+    try {
+      child = spawn(needsShell ? command : resolved, args, {
+        cwd,
+        shell: needsShell,
+        windowsHide: true,
+        env: { ...process.env, NO_COLOR: '1', FORCE_COLOR: '0', CI: '1' },
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      reject(new CommandRejectedError(`Failed to start "${command}": ${message}`));
+      return;
+    }
 
     let stdout = '';
     let stderr = '';

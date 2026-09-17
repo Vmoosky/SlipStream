@@ -2,7 +2,7 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { NativeContextStore, nativeChatMessage, nativeChatStatus, nativePolicyRevision, recordNativeCheck, recordNativeEvent, validateNativeChatPolicy } from '../src/nativeChat.js';
+import { NativeContextStore, nativeChatMessage, nativeChatStatus, nativeCommandKey, nativePolicyRevision, recordNativeCheck, recordNativeEvent, validateNativeChatPolicy } from '../src/nativeChat.js';
 import { SavingsLedger } from '../src/savingsLedger.js';
 import type { LedgerEntry } from '../src/types.js';
 
@@ -28,7 +28,24 @@ function observation(sessionId: string, inputTokens?: number, outputTokens?: num
       startedAt: 1, endedAt: 2, ...(inputTokens !== undefined ? { inputTokens } : {}), ...(outputTokens !== undefined ? { outputTokens } : {}) } };
 }
 
+function contextDirectory(): string {
+  const parent = path.join(storage, 'native-contexts');
+  const directories = fs.readdirSync(parent);
+  expect(directories).toHaveLength(1);
+  return path.join(parent, directories[0]!);
+}
+
 describe('native chat policy', () => {
+  it('rejects non-object policies and policies whose serialized content exceeds the size limit', () => {
+    for (const value of [null, [], true, 'guard']) {
+      expect(() => validateNativeChatPolicy(value)).toThrow('object');
+    }
+    expect(() => validateNativeChatPolicy({
+      version: 1, mode: 'guard',
+      checks: [{ kind: 'test', command: 'npm', args: Array.from({ length: 5 }, () => 'x'.repeat(2048)) }],
+    })).toThrow('8 KiB');
+  });
+
   it('defaults off without changing the owned policy contract', () => {
     expect(validateNativeChatPolicy()).toMatchObject({ version: 1, mode: 'off', checks: [] });
     expect(nativeChatStatus([], workspace, 'session', validateNativeChatPolicy(), 'balanced')).toMatchObject({ state: 'off', observedTokens: null, usage: 'unknown' });
@@ -41,6 +58,9 @@ describe('native chat policy', () => {
     { version: 1, mode: 'guard', tokenLimit: NaN }, { version: 1, mode: 'guard', compressionProfiles: [] },
     { version: 1, mode: 'observe', modelSelection: 'policy' }, { version: 1, mode: 'observe', checks: [{ kind: 'test', command: 'npm test' }] },
     { version: 1, mode: 'observe', checks: [{ kind: 'test', command: 'npm', args: 'test' }] },
+    { version: 1, mode: 'guard', checks: [{ kind: 'lint', command: 'npm' }] },
+    { version: 1, mode: 'guard', checks: [{ kind: 'test', command: 'npm', cwd: '' }] },
+    { version: 1, mode: 'guard', checks: [{ kind: 'build', command: 'npm', cwd: 0 }] },
   ])('rejects invalid settings %j', (value) => expect(() => validateNativeChatPolicy(value)).toThrow());
 
   it('uses exact session IDs and deduplicates model spans without counting cached input twice', () => {
@@ -88,7 +108,72 @@ describe('native chat policy', () => {
   });
 });
 
+describe('native command identity', () => {
+  it.each([
+    { name: 'null', value: null },
+    { name: 'array', value: [] },
+    { name: 'missing executable', value: {} },
+    { name: 'shell command', value: { command: 'npm test' } },
+    { name: 'non-array arguments', value: { command: 'npm', args: 'test' } },
+    { name: 'non-string argument', value: { command: 'npm', args: [1] } },
+    { name: 'invalid working directory', value: { command: 'npm', cwd: 1 } },
+  ])('does not create a key for $name', ({ value }) => {
+    expect(nativeCommandKey(value, workspace)).toBeUndefined();
+  });
+
+  it('normalizes default arguments and equivalent working directories', () => {
+    const key = nativeCommandKey({ command: 'npm' }, workspace);
+    expect(key).toMatch(/^[a-f0-9]{64}$/);
+    expect(nativeCommandKey({ command: 'npm', args: [], cwd: '.' }, workspace)).toBe(key);
+    expect(nativeCommandKey({ command: 'npm', args: [], cwd: workspace }, workspace)).toBe(key);
+    expect(nativeCommandKey({ command: 'npm', args: ['test'] }, workspace)).not.toBe(key);
+  });
+});
+
 describe('native invocation handoff', () => {
+  it('does not write an approval for oversized tool input', () => {
+    const store = new NativeContextStore(storage, workspace);
+    expect(() => store.issue('session', 'call', 'slipstream_readFile', {
+      path: 'x'.repeat(65_536),
+    }, policy)).toThrow('too large');
+    expect(fs.readdirSync(contextDirectory())).toEqual([]);
+  });
+
+  it('cleans expired pending approvals without deleting a fresh approval', () => {
+    const store = new NativeContextStore(storage, workspace);
+    const expired = store.issue('session', 'expired-call', 'slipstream_runCommand', input, policy);
+    const directory = contextDirectory();
+    const fresh = store.issue('session', 'fresh-call', 'slipstream_runCommand', input, policy);
+    fs.utimesSync(path.join(directory, `${expired}.json`), 0, 0);
+    const newest = store.issue('session', 'new-call', 'slipstream_runCommand', input, policy);
+
+    expect(fs.existsSync(path.join(directory, `${expired}.json`))).toBe(false);
+    expect(fs.readdirSync(directory).sort()).toEqual([`${fresh}.json`, `${newest}.json`].sort());
+    expect(store.claim(fresh, 'slipstream_runCommand', input, policy).toolCallId).toBe('fresh-call');
+  });
+
+  it('refuses excess pending approvals instead of evicting fresh tokens', () => {
+    const store = new NativeContextStore(storage, workspace);
+    const token = store.issue('session', 'first-call', 'slipstream_runCommand', input, policy);
+    const directory = contextDirectory();
+    for (let index = 0; index < 255; index++) {
+      fs.writeFileSync(path.join(directory, `${index.toString(16).padStart(64, '0')}.json`), '{}', { flag: 'wx' });
+    }
+    expect(() => store.issue('session', 'extra-call', 'slipstream_runCommand', input, policy)).toThrow('Too many pending');
+    expect(fs.readdirSync(directory)).toHaveLength(256);
+    expect(fs.existsSync(path.join(directory, `${token}.json`))).toBe(true);
+  });
+
+  it('consumes an oversized persisted context without accepting or retaining it', () => {
+    const store = new NativeContextStore(storage, workspace);
+    const token = store.issue('session', 'call', 'slipstream_runCommand', input, policy);
+    const directory = contextDirectory();
+    fs.writeFileSync(path.join(directory, `${token}.json`), ' '.repeat(4097));
+
+    expect(() => store.claim(token, 'slipstream_runCommand', input, policy)).toThrow('context');
+    expect(fs.readdirSync(directory)).toEqual([]);
+  });
+
   it('binds a single-use context to the actual host IDs, input, workspace and policy', () => {
     const store = new NativeContextStore(storage, workspace);
     const token = store.issue('session', 'tool-call', 'slipstream_runCommand', input, policy);
@@ -128,6 +213,11 @@ describe('native invocation handoff', () => {
     recordNativeCheck(ledger, workspace, context, result);
     expect(ledger.all()).toHaveLength(1);
     expect(ledger.all()[0].nativeChat).toMatchObject({ event: 'check', outcome, checkKind: 'test', toolCallId: 'tool-call' });
+    expect(nativeChatStatus(ledger.all(), workspace, 'session', policy, 'balanced')).toMatchObject({
+      passed: outcome === 'pass' ? 1 : 0,
+      failed: outcome === 'fail' ? 1 : 0,
+      incomplete: outcome !== 'pass' && outcome !== 'fail' ? 1 : 0,
+    });
     expect(ledger.all()[0].taskUsage).toBeUndefined();
     expect(ledger.summary()).toMatchObject({ calls: 0, tokensSaved: 0 });
     const serialized = JSON.stringify(ledger.all());

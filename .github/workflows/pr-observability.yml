@@ -66,6 +66,9 @@ jobs:
       - name: Install locked tooling without lifecycle scripts
         timeout-minutes: 3
         run: npm ci --ignore-scripts
+      - name: Build core for guard tests
+        timeout-minutes: 2
+        run: npm run build --workspace @slipstream/core
       - name: Test provenance and metadata guards
         timeout-minutes: 2
         run: node --test --test-name-pattern='^PR observability' tests/readiness.test.mjs

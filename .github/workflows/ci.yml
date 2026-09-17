@@ -43,6 +43,9 @@ jobs:
         run: npm run typecheck
       - id: tests
         run: npm test
+      - id: coverage
+        if: ${{ matrix.id == 'linux-node24' || matrix.id == 'windows-node24' }}
+        run: npm run test:coverage
       - id: lint
         run: npm run lint
       - id: format
@@ -61,6 +64,7 @@ jobs:
           path: |
             test-results/ci-unit.json
             test-results/unit-*.json
+            test-results/coverage/
           if-no-files-found: error
           retention-days: 7
 
