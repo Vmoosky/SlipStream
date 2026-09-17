@@ -7,12 +7,19 @@ import { parseArgs } from 'node:util';
 const ROOT = fileURLToPath(new URL('../', import.meta.url));
 
 export function developmentPlan(root, mode, nodeVersion = process.versions.node) {
-  if (!['setup', 'validate'].includes(mode)) throw new Error('Expected setup or validate');
+  if (!['setup', 'validate', 'precommit'].includes(mode)) {
+    throw new Error('Expected setup, validate, or precommit');
+  }
   const pinned = fs.readFileSync(path.join(root, '.node-version'), 'utf8').trim();
   if (!/^\d+\.\d+\.\d+$/.test(pinned)) throw new Error('Invalid .node-version pin');
   if (nodeVersion !== pinned) {
     throw new Error(`Use Node.js ${pinned} from .node-version; current version is ${nodeVersion}`);
   }
+  if (mode === 'precommit')
+    return [
+      ['run', 'lint'],
+      ['run', 'format:check'],
+    ];
   return mode === 'setup'
     ? [['ci'], ['run', 'build'], ['exec', '--', 'playwright', 'install', 'chromium']]
     : [
@@ -111,7 +118,9 @@ export async function runDevelopment(
 ) {
   const commands = developmentPlan(root, mode, nodeVersion);
   if (!npmCli || !path.isAbsolute(npmCli) || !fs.existsSync(npmCli)) {
-    throw new Error('Invoke this runner with npm run setup or npm run validate');
+    throw new Error(
+      'Invoke this runner with npm run setup, npm run validate, or npm run precommit',
+    );
   }
   if (signal?.aborted) throw new Error('Development command cancelled');
   await runCommand('git', ['--version'], { cwd: root, signal, timeoutMs: 10_000 });
@@ -134,10 +143,12 @@ async function main() {
     options: { help: { type: 'boolean', short: 'h' } },
   });
   if (values.help) {
-    console.log('Usage: npm run setup | npm run validate');
+    console.log('Usage: npm run setup | npm run validate | npm run precommit');
     return;
   }
-  if (positionals.length !== 1) throw new Error('Expected exactly one mode: setup or validate');
+  if (positionals.length !== 1) {
+    throw new Error('Expected exactly one mode: setup, validate, or precommit');
+  }
   const controller = new AbortController();
   const abort = () => controller.abort();
   process.once('SIGINT', abort);

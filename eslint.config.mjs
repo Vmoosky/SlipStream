@@ -126,10 +126,12 @@ export default [
     files: [
       'scripts/check-*.mjs',
       'scripts/develop.mjs',
+      'scripts/install-hooks.mjs',
       'scripts/maintenance.mjs',
       'tests/check-docs.test.mjs',
       'tests/readiness.test.mjs',
       'eslint.config.mjs',
+      'lint-staged.config.mjs',
       'playwright.config.ts',
     ],
     rules: js.configs.recommended.rules,
