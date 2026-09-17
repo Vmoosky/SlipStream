@@ -5867,7 +5867,7 @@ function precommitFixture(context) {
   scripts['format:check'] = 'prettier --check scripts/check-hook-probe.mjs';
   fs.writeFileSync(path.join(root, 'package.json'), JSON.stringify({ private: true, scripts }));
   fs.writeFileSync(path.join(root, '.node-version'), `${process.versions.node}\n`);
-  fs.writeFileSync(path.join(root, '.gitignore'), 'node_modules/\n');
+  fs.writeFileSync(path.join(root, '.gitignore'), '/node_modules\n');
   fs.symlinkSync(path.join(REPO, 'node_modules'), path.join(root, 'node_modules'), 'junction');
   const probe = path.join(root, 'scripts/check-hook-probe.mjs');
   fs.writeFileSync(probe, "console.log('baseline');\n");
@@ -5882,6 +5882,7 @@ function precommitFixture(context) {
   git(['config', 'user.name', 'Hook test']);
   git(['config', 'user.email', 'hooks@example.invalid']);
   git(['add', '.']);
+  assert.equal(git(['ls-files', '--', 'node_modules']), '');
   git(['commit', '--quiet', '-m', 'fixture']);
   const npmCli = [
     process.env.npm_execpath,
