@@ -23,7 +23,7 @@
     "test:dashboard": "npm run test:e2e --",
     "typecheck": "npm run typecheck --workspaces --if-present",
     "lint": "eslint . --max-warnings 0",
-    "format:check": "prettier --check eslint.config.mjs playwright.config.ts scripts/check-*.mjs scripts/develop.mjs scripts/maintenance.mjs tests/check-docs.test.mjs tests/readiness.test.mjs .github/workflows/*.yml .github/dependabot.yml .github/labeler.yml",
+    "format:check": "prettier --check eslint.config.mjs lint-staged.config.mjs playwright.config.ts scripts/check-*.mjs scripts/develop.mjs scripts/install-hooks.mjs scripts/maintenance.mjs tests/check-docs.test.mjs tests/readiness.test.mjs .github/workflows/*.yml .github/dependabot.yml .github/labeler.yml",
     "check:docs": "node scripts/check-docs.mjs",
     "docs:write": "node scripts/check-docs.mjs --write",
     "maintenance:docs": "node scripts/maintenance.mjs",
@@ -43,7 +43,10 @@
     "dashboard:clear": "node scripts/dashboard.mjs --clear",
     "reset:copilot": "node packages/copilot-plugin/dist/hook.js reset",
     "purge:copilot": "node packages/copilot-plugin/dist/hook.js purge",
-    "clean": "node -e \"for (const p of ['copilot-plugin','core','hook-runtime','mcp-server','extension']) require('fs').rmSync('packages/'+p+'/dist',{recursive:true,force:true})\""
+    "clean": "node -e \"for (const p of ['copilot-plugin','core','hook-runtime','mcp-server','extension']) require('fs').rmSync('packages/'+p+'/dist',{recursive:true,force:true})\"",
+    "hooks:install": "node scripts/install-hooks.mjs",
+    "lint:staged": "lint-staged --config lint-staged.config.mjs --hide-unstaged --concurrent false",
+    "precommit": "node scripts/develop.mjs precommit"
   },
   "devDependencies": {
     "@eslint/js": "9.39.5",
@@ -63,6 +66,8 @@
     "unist-util-visit": "5.1.0",
     "vitest": "^4.1.11",
     "yaml": "2.9.0",
-    "yauzl": "3.4.0"
+    "yauzl": "3.4.0",
+    "husky": "9.1.7",
+    "lint-staged": "16.4.0"
   }
 }

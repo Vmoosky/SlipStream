@@ -4,7 +4,7 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawnSync } from 'node:child_process';
 import { parse } from 'yaml';
 import { ESLint } from 'eslint';
 import { resolveConfig, resolveConfigFile } from 'prettier';
@@ -1409,7 +1409,13 @@ function developmentFixture(context) {
 
 test('development runner and label configuration retain LF in Windows-style Git checkouts', (context) => {
   const { root } = fixture(context);
-  const files = ['scripts/develop.mjs', '.github/labeler.yml'];
+  const files = [
+    'scripts/develop.mjs',
+    'scripts/install-hooks.mjs',
+    'lint-staged.config.mjs',
+    '.husky/pre-commit',
+    '.github/labeler.yml',
+  ];
   const checkout = path.join(root, 'windows checkout');
   fs.copyFileSync(path.join(REPO, '.gitattributes'), path.join(root, '.gitattributes'));
   for (const file of files) {
@@ -1440,7 +1446,7 @@ test('development setup rejects invalid modes and Node pins before running comma
   };
   await assert.rejects(
     runDevelopment(options.root, 'unknown', options),
-    /Expected setup or validate/,
+    /Expected setup, validate, or precommit/,
   );
   await assert.rejects(
     runDevelopment(options.root, 'setup', { ...options, nodeVersion: '22.23.2' }),
@@ -5780,4 +5786,274 @@ test('Dependabot version updates stay paused pending owner-verified enforcement'
       { 'dependency-name': '*', 'update-types': ['version-update:semver-major'] },
     ]);
   }
+});
+
+test('development precommit reuses lint and formatting without builds or writes', async (context) => {
+  const options = developmentFixture(context);
+  const calls = [];
+  options.runCommand = async (command, args, settings) => calls.push({ command, args, settings });
+  const result = await runDevelopment(options.root, 'precommit', options);
+  assert.deepEqual(result, { mode: 'precommit', nodeVersion: '24.14.1', commands: 2 });
+  assert.deepEqual(
+    calls.map((call) => [call.command, call.args]),
+    [
+      ['git', ['--version']],
+      [process.execPath, [options.npmCli, '--version']],
+      [process.execPath, [options.npmCli, 'run', 'lint']],
+      [process.execPath, [options.npmCli, 'run', 'format:check']],
+    ],
+  );
+  assert.ok(calls.every((call) => call.settings.cwd === options.root));
+});
+
+test('development precommit stops at the first failed check without retrying', async (context) => {
+  const options = developmentFixture(context);
+  const calls = [];
+  const failure = Object.assign(new Error('lint failed'), { exitCode: 7 });
+  options.runCommand = async (command, args) => {
+    calls.push(args);
+    if (args.includes('lint')) throw failure;
+  };
+  await assert.rejects(runDevelopment(options.root, 'precommit', options), (error) => {
+    assert.equal(error, failure);
+    return true;
+  });
+  assert.deepEqual(calls, [
+    ['--version'],
+    [options.npmCli, '--version'],
+    [options.npmCli, 'run', 'lint'],
+  ]);
+});
+
+function precommitFixture(context) {
+  const { root: parent } = fixture(context);
+  const root = path.join(parent, 'checkout with spaces');
+  const home = path.join(parent, 'home');
+  fs.mkdirSync(home, { recursive: true });
+  const globalConfig = path.join(parent, 'empty.gitconfig');
+  fs.writeFileSync(globalConfig, '');
+  const env = Object.fromEntries(
+    Object.entries(process.env).filter(([name]) => !/^GIT_/i.test(name)),
+  );
+  Object.assign(env, {
+    GIT_CONFIG_GLOBAL: globalConfig,
+    GIT_CONFIG_NOSYSTEM: '1',
+    GIT_TEMPLATE_DIR: home,
+    HOME: home,
+    USERPROFILE: home,
+    XDG_CONFIG_HOME: home,
+    HUSKY: '1',
+    TERM: 'dumb',
+  });
+  for (const file of [
+    '.gitattributes',
+    '.prettierrc.json',
+    '.husky/pre-commit',
+    'eslint.config.mjs',
+    'lint-staged.config.mjs',
+    'scripts/develop.mjs',
+    'scripts/install-hooks.mjs',
+  ]) {
+    fs.mkdirSync(path.dirname(path.join(root, file)), { recursive: true });
+    fs.copyFileSync(path.join(REPO, file), path.join(root, file));
+  }
+  const manifest = JSON.parse(fs.readFileSync(path.join(REPO, 'package.json'), 'utf8'));
+  const scripts = Object.fromEntries(
+    ['hooks:install', 'lint:staged', 'precommit', 'lint'].map((name) => [
+      name,
+      manifest.scripts[name],
+    ]),
+  );
+  scripts['format:check'] = 'prettier --check scripts/check-hook-probe.mjs';
+  fs.writeFileSync(path.join(root, 'package.json'), JSON.stringify({ private: true, scripts }));
+  fs.writeFileSync(path.join(root, '.node-version'), `${process.versions.node}\n`);
+  fs.writeFileSync(path.join(root, '.gitignore'), 'node_modules/\n');
+  fs.symlinkSync(path.join(REPO, 'node_modules'), path.join(root, 'node_modules'), 'junction');
+  const probe = path.join(root, 'scripts/check-hook-probe.mjs');
+  fs.writeFileSync(probe, "console.log('baseline');\n");
+  const git = (args) =>
+    execFileSync('git', ['-C', root, '-c', 'commit.gpgsign=false', ...args], {
+      env,
+      encoding: 'utf8',
+      stdio: 'pipe',
+      timeout: 60_000,
+    }).trim();
+  git(['init', '--quiet']);
+  git(['config', 'user.name', 'Hook test']);
+  git(['config', 'user.email', 'hooks@example.invalid']);
+  git(['add', '.']);
+  git(['commit', '--quiet', '-m', 'fixture']);
+  const npmCli = [
+    process.env.npm_execpath,
+    path.join(path.dirname(process.execPath), 'node_modules/npm/bin/npm-cli.js'),
+    path.join(path.dirname(process.execPath), '../lib/node_modules/npm/bin/npm-cli.js'),
+  ].find((candidate) => candidate && path.isAbsolute(candidate) && fs.existsSync(candidate));
+  assert.ok(npmCli, 'Run through npm test or use a Node installation with bundled npm');
+  const npm = (script, cwd = root) =>
+    spawnSync(process.execPath, [npmCli, 'run', script], {
+      cwd,
+      env,
+      encoding: 'utf8',
+      timeout: 60_000,
+    });
+  const install = () => {
+    const result = npm('hooks:install');
+    assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
+  };
+  return { root, env, git, npm, install, probe };
+}
+
+test('pre-commit installation is explicit and repeatable without changing the index', (context) => {
+  const { root, git, install } = precommitFixture(context);
+  const manifest = JSON.parse(fs.readFileSync(path.join(REPO, 'package.json'), 'utf8'));
+  for (const lifecycle of ['preinstall', 'install', 'postinstall', 'prepare']) {
+    assert.equal(manifest.scripts[lifecycle], undefined);
+  }
+  const tree = git(['write-tree']);
+  const configuration = fs.readFileSync(path.join(root, '.git/config'), 'utf8');
+  assert.equal(configuration.includes('hooksPath'), false);
+  install();
+  assert.equal(git(['config', '--local', '--get', 'core.hooksPath']), '.husky/_');
+  assert.ok(fs.existsSync(path.join(root, '.husky/_/pre-commit')));
+  const installed = fs.readFileSync(path.join(root, '.git/config'), 'utf8');
+  install();
+  assert.equal(fs.readFileSync(path.join(root, '.git/config'), 'utf8'), installed);
+  git(['hook', 'run', 'pre-commit']);
+  assert.equal(git(['write-tree']), tree);
+  assert.equal(git(['status', '--porcelain']), '');
+});
+
+test('pre-commit installation refuses existing configured and native hooks without changing them', async (context) => {
+  for (const kind of ['local', 'inherited', 'empty', 'native']) {
+    await context.test(kind, (subtest) => {
+      const { root, env, git, npm } = precommitFixture(subtest);
+      const native = path.join(root, '.git/hooks/pre-commit');
+      if (kind === 'local') git(['config', '--local', 'core.hooksPath', 'custom hooks']);
+      if (kind === 'empty') git(['config', '--local', 'core.hooksPath', '']);
+      if (kind === 'inherited') {
+        fs.writeFileSync(env.GIT_CONFIG_GLOBAL, '[core]\n\thooksPath = inherited-hooks\n');
+      }
+      if (kind === 'native') {
+        fs.mkdirSync(path.dirname(native), { recursive: true });
+        fs.writeFileSync(native, '#!/bin/sh\nexit 0\n', { mode: 0o755 });
+      }
+      const before = fs.readFileSync(path.join(root, '.git/config'), 'utf8');
+      const globalBefore = fs.readFileSync(env.GIT_CONFIG_GLOBAL, 'utf8');
+      const tree = git(['write-tree']);
+      const result = npm('hooks:install');
+      assert.equal(result.status, 1, `${result.stdout}\n${result.stderr}`);
+      assert.match(
+        result.stderr,
+        kind === 'empty'
+          ? /Existing core\.hooksPath|empty string is not a valid path/
+          : /Existing .*hooks|Existing core\.hooksPath/,
+      );
+      assert.equal(fs.readFileSync(path.join(root, '.git/config'), 'utf8'), before);
+      assert.equal(fs.readFileSync(env.GIT_CONFIG_GLOBAL, 'utf8'), globalBefore);
+      if (kind === 'native') {
+        assert.equal(fs.readFileSync(native, 'utf8'), '#!/bin/sh\nexit 0\n');
+      }
+      assert.equal(git(['write-tree']), tree);
+      assert.equal(fs.existsSync(path.join(root, '.husky/_')), false);
+    });
+  }
+});
+
+test('pre-commit worktrees require primary opt-in before generating their own hook files', (context) => {
+  const { root, env, git, npm, install } = precommitFixture(context);
+  const worktree = path.join(path.dirname(root), 'linked checkout with spaces');
+  git(['worktree', 'add', '--detach', worktree, 'HEAD']);
+  fs.symlinkSync(path.join(REPO, 'node_modules'), path.join(worktree, 'node_modules'), 'junction');
+  const before = fs.readFileSync(path.join(root, '.git/config'), 'utf8');
+  const refused = npm('hooks:install', worktree);
+  assert.equal(refused.status, 1, `${refused.stdout}\n${refused.stderr}`);
+  assert.match(refused.stderr, /primary checkout.*shared by worktrees/);
+  assert.equal(fs.readFileSync(path.join(root, '.git/config'), 'utf8'), before);
+  assert.equal(fs.existsSync(path.join(worktree, '.husky/_')), false);
+  install();
+  const shared = fs.readFileSync(path.join(root, '.git/config'), 'utf8');
+  const installed = npm('hooks:install', worktree);
+  assert.equal(installed.status, 0, `${installed.stdout}\n${installed.stderr}`);
+  assert.ok(fs.existsSync(path.join(worktree, '.husky/_/pre-commit')));
+  assert.equal(fs.readFileSync(path.join(root, '.git/config'), 'utf8'), shared);
+  const probe = path.join(worktree, 'scripts/check-hook-probe.mjs');
+  fs.writeFileSync(probe, 'debugger;\n');
+  execFileSync('git', ['-C', worktree, 'add', '--', 'scripts/check-hook-probe.mjs'], {
+    env,
+    stdio: 'pipe',
+    timeout: 10_000,
+  });
+  const result = spawnSync('git', ['-C', worktree, 'hook', 'run', 'pre-commit'], {
+    env,
+    encoding: 'utf8',
+    timeout: 60_000,
+  });
+  assert.equal(result.status, 1, `${result.stdout}\n${result.stderr}`);
+  assert.match(`${result.stdout}\n${result.stderr}`, /no-debugger/);
+  assert.equal(fs.readFileSync(probe, 'utf8'), 'debugger;\n');
+  assert.equal(git(['status', '--porcelain']), '');
+});
+
+test('pre-commit rejects invalid staged lint and restores a partially staged file', (context) => {
+  const { root, git, install, probe } = precommitFixture(context);
+  install();
+  fs.writeFileSync(probe, 'debugger;\n');
+  git(['add', '--', 'scripts/check-hook-probe.mjs']);
+  const unstaged = "console.log('unstaged valid edit');\n";
+  fs.writeFileSync(probe, unstaged);
+  const tree = git(['write-tree']);
+  const head = git(['rev-parse', 'HEAD']);
+  assert.throws(
+    () => git(['commit', '--quiet', '-m', 'must fail']),
+    (error) => {
+      assert.match(`${error.stdout}\n${error.stderr}`, /no-debugger/);
+      return true;
+    },
+  );
+  assert.equal(git(['write-tree']), tree);
+  assert.equal(git(['rev-parse', 'HEAD']), head);
+  assert.equal(fs.readFileSync(probe, 'utf8'), unstaged);
+  assert.equal(git(['stash', 'list']), '');
+  assert.equal(fs.existsSync(path.join(root, '.git/index.lock')), false);
+});
+
+test('pre-commit rejects formatting errors without rewriting or staging fixes', (context) => {
+  const { git, install, probe } = precommitFixture(context);
+  install();
+  const invalid = 'console.log(  "formatting"  )\n';
+  fs.writeFileSync(probe, invalid);
+  git(['add', '--', 'scripts/check-hook-probe.mjs']);
+  const tree = git(['write-tree']);
+  assert.throws(
+    () => git(['hook', 'run', 'pre-commit']),
+    (error) => {
+      assert.match(`${error.stdout}\n${error.stderr}`, /Code style issues found/);
+      return true;
+    },
+  );
+  assert.equal(git(['write-tree']), tree);
+  assert.equal(fs.readFileSync(probe, 'utf8'), invalid);
+  assert.equal(git(['stash', 'list']), '');
+});
+
+test('pre-commit commits valid staged content without including unstaged edits', (context) => {
+  const { root, git, install, probe } = precommitFixture(context);
+  install();
+  const staged = "console.log('staged valid edit');\n";
+  fs.writeFileSync(probe, staged);
+  git(['add', '--', 'scripts/check-hook-probe.mjs']);
+  const tree = git(['write-tree']);
+  fs.writeFileSync(probe, 'debugger;\n');
+  const other = path.join(root, 'scripts/develop.mjs');
+  const otherContent = `${fs.readFileSync(other, 'utf8')}\ndebugger;\n`;
+  fs.writeFileSync(other, otherContent);
+  const untracked = path.join(root, 'private notes.txt');
+  fs.writeFileSync(untracked, 'untracked notes\n');
+  git(['commit', '--quiet', '-m', 'valid staged change']);
+  assert.equal(git(['rev-parse', 'HEAD^{tree}']), tree);
+  assert.equal(git(['show', 'HEAD:scripts/check-hook-probe.mjs']), staged.trim());
+  assert.equal(fs.readFileSync(probe, 'utf8'), 'debugger;\n');
+  assert.equal(fs.readFileSync(other, 'utf8'), otherContent);
+  assert.equal(fs.readFileSync(untracked, 'utf8'), 'untracked notes\n');
+  assert.equal(git(['stash', 'list']), '');
 });

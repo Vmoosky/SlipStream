@@ -60,6 +60,37 @@ proof applies its known fix in a scratch copy. Do not repair the original fixtur
 or run a separate install there. The policy arm is simulated, not live-provider
 quality, billing, routing, or budget-enforcement evidence.
 
+## Pre-Commit Checks
+
+After setup, opt in to the repository's Git hook explicitly:
+
+```sh
+npm run hooks:install
+```
+
+This command installs Husky's generated hook files under `.husky/_` and sets
+repository-local `core.hooksPath` to `.husky/_`. Neither `npm ci` nor `setup`
+activates hooks. Installation is repeatable and refuses to replace an existing
+hook path or bypass existing default Git hooks. If you already use a hook manager,
+integrate `npm run lint:staged` with it manually instead of replacing it. For linked
+worktrees, opt in from the primary checkout first, then run setup and
+`npm run hooks:install` in each worktree to generate its own ignored hook files.
+
+The tracked [pre-commit hook](.husky/pre-commit) runs `lint:staged`, which invokes
+`precommit` through lint-staged. This reuses the repository's `lint` and
+`format:check` scopes in order, stopping on the first failure without fixing files.
+Builds, typechecking, tests, and packaging stay in `validate` and required CI.
+Git, including commits from an editor, must be able to find the pinned Node version
+and its bundled npm on `PATH`.
+
+Lint-staged temporarily hides unstaged changes to tracked files and restores them
+after the checks, including on failure, using its normal backup stash. Partially
+staged files are checked as staged; unstaged edits are not added to the commit.
+Untracked files remain in place and may still be inspected by repository-wide lint.
+The hook checks commits with staged additions, copies, modifications, or renames;
+empty and deletion-only commits do not trigger lint-staged tasks. Hooks are a local,
+bypassable guard, not a replacement for `npm run validate` or required CI gates.
+
 ## Checks And Evidence
 
 `lint` checks a small correctness baseline across maintained JS/TS and applies
