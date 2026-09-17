@@ -571,11 +571,11 @@ Supported Node.js: >=20. The pinned development runtime is in [.node-version](..
 
 | Workspace | Path | Scripts |
 | --- | --- | --- |
-| @slipstream/core | packages/core | build, typecheck, test, test:watch |
-| @slipstream/hook-runtime | packages/hook-runtime | build, typecheck, test |
-| @slipstream/mcp-server | packages/mcp-server | build, typecheck, start, test |
+| @slipstream/core | packages/core | build, typecheck, test, test:coverage, test:watch |
+| @slipstream/hook-runtime | packages/hook-runtime | build, typecheck, test, test:coverage |
+| @slipstream/mcp-server | packages/mcp-server | build, typecheck, start, test, test:coverage |
 | @slipstream/copilot-plugin | packages/copilot-plugin | build, test |
-| slipstream-vscode | packages/extension | build, watch, typecheck, package, test |
+| slipstream-vscode | packages/extension | build, watch, typecheck, package, test, test:coverage |
 
 | Root npm Script | Command |
 | --- | --- |
@@ -612,6 +612,7 @@ Supported Node.js: >=20. The pinned development runtime is in [.node-version](..
 | hooks:install | node scripts/install-hooks.mjs |
 | lint:staged | lint-staged --config lint-staged.config.mjs --hide-unstaged --concurrent false |
 | precommit | node scripts/develop.mjs precommit |
+| test:coverage | npm run build && npm run test:coverage --workspaces --if-present |
 
-<!-- source-sha256: a9c9e9ffabdb1d539714a45418a9127792530dfbbc92246be4711489040ac5f6 -->
+<!-- source-sha256: 01f328e7c4d3b2c71a5dbaa8b7ba3b0c7d7d10995f00e1892aafe18ccd7e9477 -->
 <!-- slipstream-reference:build:end -->

@@ -2,10 +2,11 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { HookSessionManager, shouldBypass } from '../src/hook.js';
 import { NativeContextStore, nativePolicyRevision, recordNativeEvent, SavingsLedger, validateNativeChatPolicy } from '@slipstream/core';
+import { parsePostToolUseInput, parseProducerPricing, parseUserPromptSubmittedInput } from '../src/protocol.js';
 import { handleVscodeHook, recordVscodeHook } from '../src/vscode.js';
 
 let storage: string;
@@ -45,6 +46,79 @@ function noisyLog(): string {
     'Tests: 1 failed, 200 passed, 201 total',
   ].join('\n');
 }
+
+describe('hook protocol parsers', () => {
+  it.each([undefined, null, false, 1, 'input'])('rejects non-object hook input %j', (input) => {
+    expect(() => parsePostToolUseInput(input)).toThrow('Hook input must be an object.');
+    expect(() => parseUserPromptSubmittedInput(input)).toThrow('Hook input must be an object.');
+  });
+
+  it.each([
+    undefined,
+    null,
+    'output',
+    {},
+    { resultType: 'failure', textResultForLlm: 'failed' },
+    { resultType: 'success', textResultForLlm: 7 },
+  ])('rejects missing or unsuccessful textual results %j', (toolResult) => {
+    expect(() => parsePostToolUseInput({ ...event('output'), toolResult }))
+      .toThrow(/missing toolResult|successful textual tool result/);
+  });
+
+  it.each(['sessionId', 'cwd', 'toolName'] as const)('requires a nonempty string for %s', (field) => {
+    for (const value of [undefined, '', 1]) {
+      const input = { ...event('output'), [field]: value };
+      expect(() => parsePostToolUseInput(input)).toThrow(`Hook input is missing ${field}.`);
+      if (field !== 'toolName') {
+        expect(() => parseUserPromptSubmittedInput(input)).toThrow(`Hook input is missing ${field}.`);
+      }
+    }
+  });
+
+  it('preserves empty successful text, tool arguments and an explicit zero timestamp', () => {
+    const input = { ...event(''), timestamp: 0, toolArgs: { command: 'npm', args: ['test'] } };
+    expect(parsePostToolUseInput(input)).toEqual(input);
+    expect(parseUserPromptSubmittedInput(input)).toEqual({ sessionId: input.sessionId, timestamp: 0, cwd });
+  });
+
+  it.each([undefined, 'invalid'])('uses the current time for a nonnumeric timestamp %j', (timestamp) => {
+    const clock = vi.spyOn(Date, 'now').mockReturnValue(123456789);
+    try {
+      const input = { ...event('output'), timestamp };
+      expect(parsePostToolUseInput(input).timestamp).toBe(123456789);
+      expect(parseUserPromptSubmittedInput(input)).toEqual({ sessionId: input.sessionId, timestamp: 123456789, cwd });
+    } finally {
+      clock.mockRestore();
+    }
+  });
+
+  it('uses explicit legacy pricing defaults only when producer pricing is absent', () => {
+    expect(parseProducerPricing(undefined)).toEqual({
+      pricing: { mode: 'manual', providerId: undefined, modelId: undefined, inputRateOverride: null },
+      usdPerMillionTokens: 3,
+    });
+  });
+
+  it.each([null, false, 3, 'manual'])('rejects non-object producer pricing %j', (pricing) => {
+    expect(() => parseProducerPricing(pricing)).toThrow('Invalid producer pricing');
+  });
+
+  it.each([-1, Infinity, NaN, '3'])('rejects invalid producer token price %j', (usdPerMillionTokens) => {
+    expect(() => parseProducerPricing({ pricing: { mode: 'manual' }, usdPerMillionTokens }))
+      .toThrow('Invalid producer token price');
+  });
+
+  it('preserves a zero producer price without substituting the legacy default', () => {
+    expect(parseProducerPricing({ pricing: { mode: 'manual' }, usdPerMillionTokens: 0 })).toEqual({
+      pricing: { mode: 'manual', providerId: undefined, modelId: undefined, inputRateOverride: null },
+      usdPerMillionTokens: 0,
+    });
+  });
+
+  it('rejects invalid nested pricing rather than accepting its valid fallback price', () => {
+    expect(() => parseProducerPricing({ pricing: { mode: 'catalog' }, usdPerMillionTokens: 3 })).toThrow();
+  });
+});
 
 describe('HookSessionManager', () => {
   it('isolates client prices and resets old envelopes without inheriting daemon environment', () => {

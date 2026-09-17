@@ -13,6 +13,7 @@
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "vitest run",
+    "test:coverage": "vitest run --coverage --outputFile.json=../../test-results/coverage/core/unit.json",
     "test:watch": "vitest"
   },
   "dependencies": {

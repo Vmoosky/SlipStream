@@ -7,6 +7,7 @@ import { execFileSync } from 'node:child_process';
 const ROOT = fileURLToPath(new URL('../', import.meta.url));
 export const UNIT_JOBS = ['linux-node20', 'linux-node22', 'linux-node24', 'windows-node24'];
 export const BROWSER_JOBS = ['linux-node24', 'windows-node24'];
+export const COVERAGE_JOBS = ['linux-node24', 'windows-node24'];
 export const UNIT_REPORTS = [
   'unit-core.json',
   'unit-hook-runtime.json',
@@ -32,7 +33,7 @@ const CONTAINMENT_RULES = [
   },
   {
     category: 'test',
-    pattern: /\b(tests?|browser)\b/i,
+    pattern: /\b(tests?|browser|coverage)\b/i,
     action: 'Reproduce the failing test suite locally.',
   },
   {
@@ -262,6 +263,60 @@ function expect(value) {
   if (!value) throw new Error('Invalid evidence');
 }
 
+function readUnitSuite(root, file) {
+  const report = readJson(root, file);
+  expect(
+    report.success === true &&
+      Number.isInteger(report.numTotalTests) &&
+      report.numTotalTests > 0 &&
+      Number.isInteger(report.numPassedTests) &&
+      report.numPassedTests > 0 &&
+      report.numFailedTests === 0 &&
+      report.numFailedTestSuites === 0,
+  );
+  expect(
+    Number.isInteger(report.numPendingTests) &&
+      report.numPendingTests >= 0 &&
+      report.numPassedTests + report.numPendingTests === report.numTotalTests,
+  );
+  return {
+    file,
+    total: report.numTotalTests,
+    passed: report.numPassedTests,
+    skipped: report.numPendingTests,
+  };
+}
+
+function validateCoverageEvidence(report, unitFile) {
+  const directory = `coverage/${unitFile.slice('unit-'.length, -'.json'.length)}`;
+  expect(report?.file === `${directory}/coverage-summary.json`);
+  expect(
+    report.suite?.file === `${directory}/unit.json` &&
+      Number.isInteger(report.suite.passed) &&
+      report.suite.passed > 0 &&
+      Number.isInteger(report.suite.skipped) &&
+      report.suite.skipped >= 0 &&
+      report.suite.total === report.suite.passed + report.suite.skipped,
+  );
+  for (const metric of ['statements', 'branches', 'functions', 'lines']) {
+    const value = report.totals?.[metric];
+    expect(
+      Number.isSafeInteger(value?.total) &&
+        value.total > 0 &&
+        Number.isSafeInteger(value.covered) &&
+        value.covered > 0 &&
+        value.covered <= value.total &&
+        Number.isSafeInteger(value.skipped) &&
+        value.skipped >= 0 &&
+        value.skipped <= value.total &&
+        Number.isFinite(value.pct) &&
+        value.pct >= 0 &&
+        value.pct <= 100 &&
+        Math.abs(value.pct - (100 * value.covered) / value.total) < 0.011,
+    );
+  }
+}
+
 export function collectUnit(root, options) {
   const metadata = identity(options);
   if (!UNIT_JOBS.includes(options.job)) throw new Error('Unknown unit job');
@@ -270,32 +325,22 @@ export function collectUnit(root, options) {
     'build',
     'types',
     'tests',
+    ...(COVERAGE_JOBS.includes(options.job) ? ['coverage'] : []),
     'lint',
     'format',
   ]);
-  const suites = UNIT_REPORTS.map((file) =>
-    inspect(errors, file, () => {
-      const report = readJson(root, file);
-      expect(
-        report.success === true &&
-          Number.isInteger(report.numTotalTests) &&
-          report.numTotalTests > 0 &&
-          Number.isInteger(report.numPassedTests) &&
-          report.numPassedTests > 0 &&
-          report.numFailedTests === 0 &&
-          report.numFailedTestSuites === 0,
-      );
-      expect(
-        Number.isInteger(report.numPendingTests) &&
-          report.numPendingTests >= 0 &&
-          report.numPassedTests + report.numPendingTests === report.numTotalTests,
-      );
-      return {
+  const suites = UNIT_REPORTS.map((file) => inspect(errors, file, () => readUnitSuite(root, file)));
+  const coverage = (COVERAGE_JOBS.includes(options.job) ? UNIT_REPORTS : []).map((unitFile) =>
+    inspect(errors, unitFile, () => {
+      const directory = `coverage/${unitFile.slice('unit-'.length, -'.json'.length)}`;
+      const file = `${directory}/coverage-summary.json`;
+      const evidence = {
         file,
-        total: report.numTotalTests,
-        passed: report.numPassedTests,
-        skipped: report.numPendingTests,
+        totals: readJson(root, file).total,
+        suite: readUnitSuite(root, `${directory}/unit.json`),
       };
+      validateCoverageEvidence(evidence, unitFile);
+      return evidence;
     }),
   );
   return {
@@ -306,6 +351,7 @@ export function collectUnit(root, options) {
     node: process.version,
     passed: errors.length === 0,
     suites,
+    coverage,
     errors,
   };
 }
@@ -439,6 +485,12 @@ export function verifyRequired(root, options) {
             ),
           ),
         );
+        if (COVERAGE_JOBS.includes(job)) {
+          expect(Array.isArray(report.coverage) && report.coverage.length === UNIT_REPORTS.length);
+          UNIT_REPORTS.forEach((unitFile, index) =>
+            validateCoverageEvidence(report.coverage[index], unitFile),
+          );
+        }
       } else {
         expect(
           report.browser?.expected > 0 &&

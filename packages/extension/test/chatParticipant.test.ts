@@ -503,6 +503,35 @@ describe('automatic owned task policy', () => {
     expect(mocks.settings).toEqual({});
   });
 
+  it.each(['selected', 'dismissed', 'trust-revoked'] as const)('handles a %s resume selection without sending a model request', async (selection) => {
+    enable({ taskBudget: 900 });
+    sendRounds(2);
+    const first = await handler(request(), { history: [] }, stream, source.token);
+    const taskId = first?.metadata?.slipstreamTaskId;
+    const before = parent.ledger.all();
+    mocks.api.chat.createChatParticipant.mockReturnValue({ dispose: vi.fn() });
+    registerChatParticipant({ subscriptions: [] } as unknown as vscode.ExtensionContext, parent);
+    const resume = mocks.api.commands.registerCommand.mock.calls.find(([name]) => name === RESUME_TASK_COMMAND)![1];
+    mocks.api.window.showQuickPick.mockImplementation(async (choices) => {
+      if (selection === 'trust-revoked') mocks.api.workspace.isTrusted = false;
+      return selection === 'dismissed' ? undefined : choices[0];
+    });
+    await resume();
+    expect(mocks.api.window.showQuickPick).toHaveBeenCalledExactlyOnceWith([
+      expect.objectContaining({ label: taskId, description: 'paused | first', task: expect.objectContaining({ taskId }) }),
+    ], expect.objectContaining({ title: 'Resume owned task' }));
+    if (selection === 'selected') {
+      expect(mocks.api.commands.executeCommand).toHaveBeenCalledExactlyOnceWith('workbench.action.chat.open', {
+        mode: 'ask', query: `@slipstream /resume ${taskId} `, isPartialQuery: true,
+      });
+    } else {
+      expect(mocks.api.commands.executeCommand).not.toHaveBeenCalled();
+    }
+    expect(mocks.send).toHaveBeenCalledTimes(1);
+    expect(parent.ledger.all()).toEqual(before);
+    expect(mocks.settings).toEqual({});
+  });
+
   it('preserves recovery backoff and command approvals across resume', async () => {
     enable({ taskBudget: 3000 });
     run(async (options, token) => {

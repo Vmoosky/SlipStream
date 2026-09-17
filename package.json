@@ -46,7 +46,8 @@
     "clean": "node -e \"for (const p of ['copilot-plugin','core','hook-runtime','mcp-server','extension']) require('fs').rmSync('packages/'+p+'/dist',{recursive:true,force:true})\"",
     "hooks:install": "node scripts/install-hooks.mjs",
     "lint:staged": "lint-staged --config lint-staged.config.mjs --hide-unstaged --concurrent false",
-    "precommit": "node scripts/develop.mjs precommit"
+    "precommit": "node scripts/develop.mjs precommit",
+    "test:coverage": "npm run build && npm run test:coverage --workspaces --if-present"
   },
   "devDependencies": {
     "@eslint/js": "9.39.5",
@@ -68,6 +69,7 @@
     "yaml": "2.9.0",
     "yauzl": "3.4.0",
     "husky": "9.1.7",
-    "lint-staged": "16.4.0"
+    "lint-staged": "16.4.0",
+    "@vitest/coverage-v8": "4.1.11"
   }
 }

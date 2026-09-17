@@ -26,6 +26,7 @@ export function developmentPlan(root, mode, nodeVersion = process.versions.node)
         ['run', 'build'],
         ['run', 'typecheck'],
         ['test'],
+        ['run', 'test:coverage'],
         ['run', 'lint'],
         ['run', 'format:check'],
         ['run', 'check:docs', '--', '--report', 'test-results/docs.json'],

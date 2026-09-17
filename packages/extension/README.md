@@ -229,5 +229,5 @@ Generated from the public manifests by `npm run docs:write`. Check with `npm run
 | slipstream.dashboardServer | boolean | true |
 | slipstream.dashboardPort | number | 7331 |
 
-<!-- source-sha256: cc7026d6500aa285283d988d5681fe40418a36ff8498f12609515c6391fb40e3 -->
+<!-- source-sha256: a5bb764fc239bf53f5ce0d85f0d6c4389e4edcf84bdc1b4596b4a487f7978883 -->
 <!-- slipstream-reference:extension:end -->

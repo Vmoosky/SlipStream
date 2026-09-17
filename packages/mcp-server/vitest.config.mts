@@ -12,5 +12,13 @@ export default defineConfig({
     // The server is spawned as a real subprocess; running suites in parallel
     // would contend on the shared storage directory.
     fileParallelism: false,
+    coverage: {
+      provider: 'v8',
+      reportOnFailure: true,
+      include: ['src/**/*.ts'],
+      reporter: ['text-summary', 'json-summary', 'json', 'lcov'],
+      reportsDirectory: '../../test-results/coverage/mcp-server',
+      thresholds: { statements: 33, branches: 48, functions: 18, lines: 32 },
+    },
   },
 });
