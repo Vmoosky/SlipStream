@@ -7,6 +7,8 @@ import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
 import { Ajv } from 'ajv';
 import addFormats from 'ajv-formats';
+import remarkParse from 'remark-parse';
+import { unified } from 'unified';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -16,6 +18,28 @@ const localInstall = manifest._meta['io.modelcontextprotocol.registry/publisher-
 const serverPackage = JSON.parse(fs.readFileSync(path.join(here, '..', 'package.json'), 'utf8'));
 const serverEntry =
   process.env['SLIPSTREAM_TEST_SERVER_ENTRY'] ?? path.join(here, '..', 'dist', 'index.js');
+
+interface McpContract {
+  contractId: string;
+  version: number;
+  modeRequirement: string;
+  modes: Record<'standalone' | 'retrieval-only', string[]>;
+  examples: Array<{
+    id: string;
+    requirement: string;
+    arguments: Record<string, unknown>;
+    expected: { body: string; truncated: boolean } | { error: string };
+  }>;
+}
+
+const spec = fs.readFileSync(path.join(repoRoot, 'specs/mcp/v1/artifact-retrieval.md'), 'utf8');
+const specBlocks = unified().use(remarkParse).parse(spec).children.flatMap((node) =>
+  node.type === 'code' && node.lang === 'json' && node.meta === 'slipstream-mcp-contract'
+    ? [node.value]
+    : [],
+);
+if (specBlocks.length !== 1) throw new Error('Expected exactly one executable MCP contract.');
+const contract = JSON.parse(specBlocks[0]!) as McpContract;
 
 let client: Client;
 let workspace: string;
@@ -245,13 +269,15 @@ describe('slipstream MCP server', () => {
       name: 'retrieve_artifact',
       arguments: {
         id: marker![1],
-        startLine: Number(marker![2]),
-        endLine: Number(marker![3]),
-        maxLines: 5000,
+        startLine: 141,
+        endLine: 160,
+        maxLines: 20,
       },
     });
     expect(isError(retrieved)).toBe(false);
-    expect(firstText(retrieved)).toContain('needle-150');
+    expect(firstText(retrieved).split('\n').slice(1).join('\n')).toBe(
+      Array.from({ length: 20 }, (unused, index) => `needle-${index + 140} filler filler filler`).join('\n'),
+    );
   });
 
   it('supports grep-filtered retrieval', async () => {
@@ -289,4 +315,73 @@ describe('slipstream MCP server', () => {
     expect(text).toMatch(/Retrievals:/);
     expect(text).toContain('run_command');
   });
+});
+
+describe('versioned MCP retrieval contract', () => {
+  let retrievalClient: Client;
+  let artifactId: string;
+
+  beforeAll(async () => {
+    const seeded = await client.callTool({
+      name: 'run_command',
+      arguments: {
+        command: 'node',
+        args: ['-e', 'for (let index = 0; index < 300; index++) console.log("needle-" + index + " filler filler filler")'],
+        cwd: workspace,
+      },
+    });
+    const marker = /\[\[slipstream:([0-9a-f]{12}) L\d+-\d+/.exec(firstText(seeded));
+    expect(marker).not.toBeNull();
+    artifactId = marker![1]!;
+    retrievalClient = new Client({ name: 'slipstream-spec-test', version: '0.0.0' });
+    await retrievalClient.connect(new StdioClientTransport({
+      command: process.execPath,
+      args: manifestArgs('retrieval-only'),
+    }));
+  }, 30_000);
+
+  afterAll(async () => {
+    await retrievalClient?.close();
+  });
+
+  it('binds nonempty executable examples to contract version 1', () => {
+    expect(contract.contractId).toBe('slipstream.mcp.artifact-retrieval');
+    expect(contract.version).toBe(1);
+    expect(contract.examples.length).toBeGreaterThan(0);
+    expect(new Set(contract.examples.map((example) => example.id)).size).toBe(contract.examples.length);
+  });
+
+  for (const mode of ['standalone', 'retrieval-only'] as const) {
+    it(`${mode} ${contract.modeRequirement} advertises the specified tools`, async () => {
+      const activeClient = mode === 'standalone' ? client : retrievalClient;
+      const { tools } = await activeClient.listTools();
+      expect(tools.map((tool) => tool.name).sort()).toEqual([...contract.modes[mode]].sort());
+      const retrieval = tools.find((tool) => tool.name === 'retrieve_artifact');
+      expect(retrieval).toBeDefined();
+      const validate = new Ajv({ strict: false }).compile(retrieval!.inputSchema);
+      for (const example of contract.examples.filter((entry) => 'body' in entry.expected)) {
+        expect(validate({ ...example.arguments, id: artifactId }), example.id).toBe(true);
+      }
+    });
+
+    for (const example of contract.examples) {
+      it(`${mode} ${example.requirement} ${example.id}`, async () => {
+        const activeClient = mode === 'standalone' ? client : retrievalClient;
+        const args = { ...example.arguments };
+        if (args.id === '$artifact') args.id = artifactId;
+        const result = await activeClient.callTool({ name: 'retrieve_artifact', arguments: args });
+        const text = firstText(result);
+        if ('error' in example.expected) {
+          expect(isError(result)).toBe(true);
+          expect(text).toContain(example.expected.error);
+        } else {
+          expect(isError(result)).toBe(false);
+          const [header, ...body] = text.split('\n');
+          expect(header).toMatch(/^--- slipstream: .+ \(\d+ of \d+ lines(?:, truncated)?\) ---$/);
+          expect(header!.includes(', truncated')).toBe(example.expected.truncated);
+          expect(body.join('\n')).toBe(example.expected.body);
+        }
+      });
+    }
+  }
 });

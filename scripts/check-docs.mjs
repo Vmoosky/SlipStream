@@ -8,12 +8,15 @@ import remarkParse from 'remark-parse';
 import { visit } from 'unist-util-visit';
 import GithubSlugger from 'github-slugger';
 import { parse as parseJsonc } from 'jsonc-parser';
+import { parseDocument } from 'yaml';
 import shellQuote from 'shell-quote';
 import { validateCostPolicy } from '../packages/core/dist/index.js';
 import { DOC_CHECKS, documentationContext, isDocumentationFile } from './check-ci.mjs';
 
 const REPO_ROOT = fileURLToPath(new URL('../', import.meta.url));
 const WORKSPACES = ['core', 'hook-runtime', 'mcp-server', 'copilot-plugin', 'extension'];
+const MCP_SPEC = 'specs/mcp/v1/artifact-retrieval.md';
+const SPEC_AGENT = '.github/agents/spec-maintainer.agent.md';
 const OMIT_DIRECTORIES = new Set([
   '.git',
   'node_modules',
@@ -225,11 +228,163 @@ function textOf(node) {
   return node.value ?? (node.children ?? []).map(textOf).join('');
 }
 
+function checkMcpSpec(root, tree) {
+  const check = (condition, message) => {
+    if (!condition) throw new Error(`${MCP_SPEC}: ${message}`);
+  };
+  const object = (value) => value !== null && typeof value === 'object' && !Array.isArray(value);
+  const fields = (value, keys) =>
+    object(value) && Object.keys(value).sort().join(',') === [...keys].sort().join(',');
+  check(tree, 'versioned specification is missing');
+  const blocks = tree.children.filter(
+    (node) =>
+      node.type === 'code' && node.lang === 'json' && node.meta === 'slipstream-mcp-contract',
+  );
+  check(blocks.length === 1, 'expected exactly one executable contract block');
+  const spec = JSON.parse(blocks[0].value);
+  check(
+    fields(spec, ['contractId', 'version', 'modeRequirement', 'modes', 'examples']) &&
+      spec.contractId === 'slipstream.mcp.artifact-retrieval' &&
+      spec.version === 1,
+    'unsupported contract identity, version, or fields',
+  );
+  const requirements = tree.children
+    .filter((node) => node.type === 'heading' && node.depth === 3)
+    .map(textOf)
+    .filter((heading) => heading.startsWith('MCP-'));
+  check(
+    requirements.length > 0 &&
+      requirements.every((requirement) => /^MCP-[A-Z0-9-]+$/.test(requirement)) &&
+      new Set(requirements).size === requirements.length,
+    'requirements need unique MCP-* headings',
+  );
+  check(requirements.includes(spec.modeRequirement), 'mode requirement has no declaration');
+  check(fields(spec.modes, ['standalone', 'retrieval-only']), 'both server modes are required');
+  const server = JSON.parse(fs.readFileSync(withinRoot(root, 'server.json'), 'utf8'));
+  const modes =
+    server._meta['io.modelcontextprotocol.registry/publisher-provided'].localInstall.modes;
+  for (const [mode, tools] of Object.entries(spec.modes)) {
+    check(
+      Array.isArray(tools) &&
+        tools.length > 0 &&
+        tools.every((tool) => typeof tool === 'string' && tool.length > 0) &&
+        new Set(tools).size === tools.length &&
+        Array.isArray(modes[mode]?.tools) &&
+        JSON.stringify([...tools].sort()) === JSON.stringify([...modes[mode].tools].sort()),
+      `${mode} tool inventory is stale or invalid`,
+    );
+  }
+  check(
+    Array.isArray(spec.examples) && spec.examples.length > 0,
+    'executable examples are missing',
+  );
+  const ids = new Set();
+  const covered = new Set([spec.modeRequirement]);
+  let successes = 0;
+  let failures = 0;
+  for (const example of spec.examples) {
+    check(
+      fields(example, ['id', 'requirement', 'arguments', 'expected']) &&
+        typeof example.id === 'string' &&
+        /^[a-z0-9-]{1,80}$/.test(example.id) &&
+        !ids.has(example.id) &&
+        requirements.includes(example.requirement) &&
+        object(example.arguments),
+      'example IDs, requirement references, or arguments are invalid',
+    );
+    ids.add(example.id);
+    covered.add(example.requirement);
+    const expected = example.expected;
+    if (fields(expected, ['body', 'truncated'])) {
+      check(
+        typeof expected.body === 'string' && typeof expected.truncated === 'boolean',
+        `${example.id}: success needs an exact body and truncation flag`,
+      );
+      successes++;
+    } else {
+      check(
+        fields(expected, ['error']) &&
+          typeof expected.error === 'string' &&
+          expected.error.trim().length > 0,
+        `${example.id}: expected result must describe either success or an error`,
+      );
+      failures++;
+    }
+  }
+  check(successes > 0 && failures > 0, 'both successful and rejected examples are required');
+  check(
+    requirements.every((requirement) => covered.has(requirement)),
+    'a requirement has no executable example',
+  );
+}
+
 function headings(tree) {
   const slugs = new Set();
   const slugger = new GithubSlugger();
   visit(tree, 'heading', (node) => slugs.add(slugger.slug(textOf(node))));
   return slugs;
+}
+
+function checkSpecAgent(root) {
+  const check = (condition, message) => {
+    if (!condition) throw new Error(`${SPEC_AGENT}: ${message}`);
+  };
+  const target = withinRoot(root, SPEC_AGENT);
+  check(fs.existsSync(target), 'manual spec maintainer configuration is missing');
+  const source = fs.readFileSync(target, 'utf8');
+  const frontmatter = /^---\r?\n([\s\S]*?)\r?\n---(?:\r?\n|$)/.exec(source);
+  check(frontmatter, 'YAML frontmatter is missing');
+  const document = parseDocument(frontmatter[1]);
+  check(document.errors.length === 0, 'invalid YAML frontmatter');
+  const agent = document.toJS({ maxAliasCount: 0 });
+  const keys = [
+    'name',
+    'description',
+    'target',
+    'user-invocable',
+    'disable-model-invocation',
+    'agents',
+    'tools',
+  ];
+  check(
+    agent &&
+      Object.keys(agent).sort().join(',') === keys.sort().join(',') &&
+      agent.name === 'Spec Maintainer' &&
+      typeof agent.description === 'string' &&
+      agent.description.trim().length > 0 &&
+      agent.target === 'vscode' &&
+      agent['user-invocable'] === true &&
+      agent['disable-model-invocation'] === true &&
+      Array.isArray(agent.agents) &&
+      agent.agents.length === 0,
+    'expected a manual-only VS Code agent without models, hooks, or delegation',
+  );
+  const extension = JSON.parse(
+    fs.readFileSync(withinRoot(root, 'packages/extension/package.json'), 'utf8'),
+  );
+  const names = [
+    'slipstream_readFile',
+    'slipstream_runCommand',
+    'slipstream_retrieveArtifact',
+    'slipstream_getSavings',
+  ];
+  const references = names.map((name) => {
+    const tool = extension.contributes.languageModelTools.find((entry) => entry.name === name);
+    check(
+      tool?.canBeReferencedInPrompt &&
+        typeof tool.toolReferenceName === 'string' &&
+        tool.toolReferenceName.length > 0,
+      `required extension tool ${name} has no prompt reference`,
+    );
+    return `${extension.publisher}.${extension.name}/${tool.toolReferenceName}`;
+  });
+  check(
+    Array.isArray(agent.tools) &&
+      agent.tools.every((tool) => typeof tool === 'string') &&
+      JSON.stringify([...agent.tools].sort()) ===
+        JSON.stringify(['search', 'edit', ...references].sort()),
+    'tool allowlist does not match the Slipstream extension prompt references',
+  );
 }
 
 function checkNpmExamples(root, file, node, manifest) {
@@ -416,6 +571,16 @@ export function checkDocs(root = REPO_ROOT, { write = false, context = null } = 
   const documents = new Map(
     files.map((file) => [file, parser.parse(fs.readFileSync(withinRoot(root, file), 'utf8'))]),
   );
+  try {
+    checkMcpSpec(root, documents.get(MCP_SPEC));
+  } catch (error) {
+    errors.push(error.message);
+  }
+  try {
+    checkSpecAgent(root);
+  } catch (error) {
+    errors.push(error.message);
+  }
   const anchors = new Map([...documents].map(([file, tree]) => [file, headings(tree)]));
   let localLinks = 0;
   let jsonExamples = 0;
