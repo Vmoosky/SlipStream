@@ -36,6 +36,7 @@ jobs:
       status: ${{ steps.review.outputs.status }}
       report-path: ${{ steps.review.outputs.report-path }}
       evidence-path: ${{ steps.review.outputs.evidence-path }}
+      readiness-report-path: ${{ steps.review.outputs.readiness-report-path }}
       trigger-workflow: ${{ steps.review.outputs.trigger-workflow }}
       trigger-run-id: ${{ steps.review.outputs.trigger-run-id }}
       trigger-attempt: ${{ steps.review.outputs.trigger-attempt }}
@@ -102,6 +103,14 @@ jobs:
           path: |
             test-results/improvement/run-*/report.json
             test-results/improvement/run-*/summary.md
+          if-no-files-found: error
+          retention-days: 90
+      - name: Retain readiness improvement report
+        if: ${{ always() && steps.context.outcome == 'success' && steps.review.outputs.readiness-report-path != '' }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: readiness-improvement-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ steps.review.outputs.readiness-report-path }}
           if-no-files-found: error
           retention-days: 90
       - name: Retain verified original evidence

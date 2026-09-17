@@ -101,10 +101,10 @@ Expand these scopes deliberately; avoid unrelated formatting churn.
 The [ESLint policy](eslint.config.mjs) also enforces these workspace dependency
 directions in the existing required CI lint gate:
 
-| Importing Workspace | Allowed Workspace Dependencies |
-| --- | --- |
-| `core` | None |
-| `hook-runtime`, `mcp-server` | `core` |
+| Importing Workspace           | Allowed Workspace Dependencies       |
+| ----------------------------- | ------------------------------------ |
+| `core`                        | None                                 |
+| `hook-runtime`, `mcp-server`  | `core`                               |
 | `copilot-plugin`, `extension` | `core`, `hook-runtime`, `mcp-server` |
 
 Cross-workspace imports must use the public package name, such as
@@ -179,14 +179,16 @@ verified snapshot, evaluator limitations, and outstanding activation steps.
 
 ## Readiness Reports
 
-The existing review and observability producers also use the
+The review, observability, and authenticated improvement producers use the
 [report writer](scripts/check-readiness-reports.mjs) to emit byte-identical,
-normalized JSON at `reports/agent-review.json` and `reports/pr-observability.json`.
-Separate `readiness-agent-review-RUN-ATTEMPT` and
-`readiness-pr-observability-PR-RUN-ATTEMPT` artifacts retain these files for seven
-and 30 days, respectively. Uploads require an emitted report path, not a successful
-decision; failure and unavailable states remain visible. Existing evidence and
-proposal archives, their verification contracts, and runtime safeguards are unchanged.
+normalized JSON at `reports/agent-review.json`, `reports/pr-observability.json`,
+and `reports/improvement.json`. Separate `readiness-agent-review-RUN-ATTEMPT`,
+`readiness-pr-observability-PR-RUN-ATTEMPT`, and `readiness-improvement-RUN-ATTEMPT`
+artifacts request 90, 30, and 90 days of retention, respectively, subject to
+repository policy. Uploads require an emitted report path, not a successful
+decision; failure and unavailable states remain visible. Local improvement
+`--input` comparisons are unverified and do not produce a readiness export.
+Verification contracts and runtime safeguards are unchanged.
 Raw sessions, credentials, runtime archives, and additional source text are not uploaded.
 
 These files are transient evaluation inputs, not committed source or proof that
@@ -367,6 +369,70 @@ The named regression proof still requires review; review and merge history are
 verified separately through the optional reference. Review replacement or removal
 of stale entries as source changes. Insufficient evidence is never implicitly valid.
 
+### Governed Learned Rules
+
+The same registry optionally accepts `learnedRules`; omission means no rules and
+no extra evidence requests. Do not seed synthetic findings or approval records.
+The [governance decision](docs/adr/0001-governed-improvement-loops.md) defines the
+contract and proof boundaries implemented by the
+[shared validator](scripts/check-improvement-rules.mjs).
+
+Each version contains `id`, positive integer `version`, `status` (`proposed`,
+`active`, or `retired`), `files`, `criterion`, `source`, `preventionTest`, and
+`reason`. IDs are lowercase alphanumeric/hyphen, at most 80 characters. Scope is
+a nonempty exact subset of the three generated-document contracts. Criteria are
+nonblank, at most 1,000 UTF-8 bytes, and contain no control characters. The source
+has exactly `kind` (`ci-regression` or `agent-review`) and its real `findingId`.
+`preventionTest` has a repository-relative test `file` and literal test `name`;
+these are metadata, never commands or execution proof. Reasons are nonblank and
+at most 2,000 UTF-8 bytes. The registry is capped at 64 KiB, 16 versions, and four
+active rules, with one active version per ID. Extra fields and linked paths fail
+closed; rules cannot grant tools, change models, or expand budgets or schedules.
+
+Introduce a genuine lesson as `proposed`, then activate it in an ordinary reviewed
+PR. The immutable payload is ID, version, files, criterion, source, and prevention
+test. Changing any payload field requires a new version; keep old versions and
+retire them with a reason. A retired version cannot be reactivated. The readiness
+suite checks the contract and transition behavior offline; promotion verification
+also compares the actual base and final-head registry blobs.
+
+After the activation PR merges and exact merge CI passes, record its optional
+`promotion` in a later ordinary reviewed change: `pullRequest` (positive integer),
+`fixCommit` (full final PR-head SHA), and `afterRunId` (positive decimal CI run ID
+string). The activation commit does not need to name its own SHA or future run.
+Verification requires the proposed-to-active transition, independent non-author
+human approval of the final head before merge, no outstanding changes request,
+and successful first-attempt default-branch CI at that exact merge. The same
+individual payload must be active in the head and merge; unrelated registry
+entries and later bookkeeping do not invalidate its digest.
+
+The improvement report separates source verification, source repair review,
+named regression proof, promotion, and configured state. Active without verified
+promotion is `configured-only`. Missing promotion references are explicit;
+requested but unresolved source or promotion evidence fails the evidence gate.
+An agent-review source is not a named red/green regression. A referenced test,
+green aggregate, or reviewed promotion does not establish semantic resolution.
+
+On an eligible later review, only active rules intersecting the proposal enter
+the existing bounded input. Its digest binds their canonical payloads; optional
+report metadata records the registry byte hash, ruleset hash, and supplied
+ID/version/payload hashes. This proves criteria were supplied, not followed.
+No applicable rules preserves legacy input bytes and finding/disposition
+contracts. No-op runs remain no-ops. Pause live review with its existing opt-in
+variable; roll back a criterion through a reviewed retirement or new version,
+not by editing historical evidence. The collector never writes rule state.
+
+Run the focused offline checks from the repository root:
+
+```sh
+node --test --test-name-pattern='^(improvement|bounded agent review|readiness reports)' tests/readiness.test.mjs
+npm run check:docs
+```
+
+Synthetic tests do not complete a real learning cycle or change a readiness
+score. Independent review, genuine source evidence, later observed reuse, and
+any new assessment remain separate operational steps.
+
 ### Retained Repair Evidence
 
 The workflow requests 90-day retention for its compact report and a separate
@@ -380,6 +446,13 @@ allowlist and synthetic-data restrictions still apply. Retained ZIPs may contain
 only the aggregate/containment JSON or the unit-summary and unit-report JSON;
 unexpected filenames and malformed JSON are rejected. An over-limit collection
 does not export a partial evidence bundle.
+
+Compact `maintenance-evidence`, `readiness-agent-review`, and `ci-required`
+uploads also request 90 days. Proposal and bulk unit/browser artifacts stay at
+seven days, so registered named-test originals still need capture before expiry.
+This does not recover expired review artifacts or add them to regression bundles.
+Actual retention must be checked at rollout; after expiry, promotion and repair
+proof may become unavailable rather than remain permanently verified.
 
 After source artifacts expire or disappear, the collector inspects at most ten
 recent improvement runs. Recovery requires a successful first-attempt schedule,
@@ -408,17 +481,17 @@ The first proposed registry entry links a genuine Linux Node 22 failure to the
 same named test passing on a later revision. It remains pending owner review.
 
 - Before: [CI run 34957634350](https://github.com/Vmoosky/SlipStream/actions/runs/34957634350),
-    revision `01ca1caaef7c573f8b4a0c45b4f17a6ca848a720`, attempt 1, `main` push.
-    The core report recorded 554 passed and one failed test.
+  revision `01ca1caaef7c573f8b4a0c45b4f17a6ca848a720`, attempt 1, `main` push.
+  The core report recorded 554 passed and one failed test.
 - After: [CI run 34972436653](https://github.com/Vmoosky/SlipStream/actions/runs/34972436653),
-    revision `32f906f9b9c5aa954a9a5e929af598aee0e9a42e`, attempt 1, `main` push.
-    The core report recorded 556 passed and no failed tests.
+  revision `32f906f9b9c5aa954a9a5e929af598aee0e9a42e`, attempt 1, `main` push.
+  The core report recorded 556 passed and no failed tests.
 - Named test: `dashboard end to end supports the exact clean-URL browser API contract`
-    in `unit-core.json`, matrix job `linux-node22`.
+  in `unit-core.json`, matrix job `linux-node22`.
 - Repair: [32f906f](https://github.com/Vmoosky/SlipStream/commit/32f906f9b9c5aa954a9a5e929af598aee0e9a42e)
-    added event IDs to disambiguate dashboard entries sharing a timestamp. The
-    separate same-millisecond regression was added by that change, so it is not
-    claimed as a test observed failing in the earlier run.
+  added event IDs to disambiguate dashboard entries sharing a timestamp. The
+  separate same-millisecond regression was added by that change, so it is not
+  claimed as a test observed failing in the earlier run.
 
 On 2026-09-15, the existing verifier accepted the named failing-then-passing test
 after both CI aggregates and both unit archives were bound to GitHub run metadata
@@ -549,8 +622,9 @@ may change. Authored prose, new/deleted files, symlinks, binary content, more th
 Reports and any validated patch go into a fresh `test-results/maintenance/run-*`
 directory. A no-op is valid; blocked or failed generation publishes no patch.
 
-GitHub retains only maintenance reports and the fully verified patch for seven
-days. Reports bind the revision, event, workflow, run ID, and attempt to check
+Maintenance uploads request 90 days for compact reports and seven days for the
+fully verified patch, subject to repository policy. Reports bind the revision,
+event, workflow, run ID, and attempt to check
 outcomes, report digests, and patch hashes. Keep attempts separate. Missing/expired artifacts,
 cancelled runs, or absent review links mean unverified or insufficient evidence,
 not success. Review the patch against its source revision, open an ordinary PR,
@@ -570,17 +644,17 @@ review do not start a model session. It never generates or executes a patch.
 Activation requires the owner's separate authorization and configuration:
 
 - Set `SLIPSTREAM_AGENT_REVIEW_MODEL` to a named model available to the dedicated
-    account. There is no default, `auto` selection, or fallback model.
+  account. There is no default, `auto` selection, or fallback model.
 - Configure the `SLIPSTREAM_AGENT_REVIEW_TOKEN` repository secret with a dedicated
-    fine-grained PAT carrying **Copilot Requests** permission and no repository
-    write permissions. Do not reuse the workflow token or an administrative login.
-    This follows GitHub's [supported CLI authentication](https://docs.github.com/en/copilot/reference/cli-command-reference).
+  fine-grained PAT carrying **Copilot Requests** permission and no repository
+  write permissions. Do not reuse the workflow token or an administrative login.
+  This follows GitHub's [supported CLI authentication](https://docs.github.com/en/copilot/reference/cli-command-reference).
 - Verify provider-side overage blocking for that account, then set
-    `SLIPSTREAM_AGENT_REVIEW_NO_OVERAGE_CONFIRMED=true`. This is an owner attestation,
-    not automatic verification of billing settings. Included allowance must be
-    available; otherwise leave review disabled.
+  `SLIPSTREAM_AGENT_REVIEW_NO_OVERAGE_CONFIRMED=true`. This is an owner attestation,
+  not automatic verification of billing settings. Included allowance must be
+  available; otherwise leave review disabled.
 - Set `SLIPSTREAM_AGENT_REVIEW_ENABLED=true` only after those prerequisites and
-    the existing maintenance protections are satisfied. Set it to `false` to pause.
+  the existing maintenance protections are satisfied. Set it to `false` to pause.
 
 The runtime is the SHA-512-pinned Linux x64 Copilot CLI package `1.0.84-5`.
 Download and integrity checks precede the credential-bearing step; extraction
@@ -610,7 +684,7 @@ human approval as required. Findings remain untrusted advisory data. A
 not approval. Independently verified patch artifacts remain available for human
 inspection, including when the advisory review fails.
 
-Only normalized review JSON joins the existing seven-day evidence artifact;
+Only normalized review JSON joins the compact 90-day evidence artifact;
 archives, credentials, raw sessions, and temporary configuration are not uploaded.
 Normal failures and cancellation clean temporary state; hard host termination
 cannot guarantee cleanup and is not successful evidence. Before publication, a
@@ -671,11 +745,11 @@ illustrative entry contains placeholders, not recorded review evidence:
 
 ```json
 {
-    "findingId": "<locally generated finding ID>",
-    "disposition": "accepted",
-    "reason": "The generated reference needs correction.",
-    "recordedBy": "<reviewer login>",
-    "recordedAt": "<UTC timestamp at or after the report finish>"
+  "findingId": "<locally generated finding ID>",
+  "disposition": "accepted",
+  "reason": "The generated reference needs correction.",
+  "recordedBy": "<reviewer login>",
+  "recordedAt": "<UTC timestamp at or after the report finish>"
 }
 ```
 
@@ -716,15 +790,15 @@ exactly these nine fields; this example is schematic, not valid historical evide
 
 ```json
 {
-     "findingId": "<full finding ID from the exact review>",
-     "reviewRunId": "<original maintenance run ID>",
-     "reviewReportPath": "run-EXAMPLE/agent-review.json",
-     "reviewReportSha256": "<SHA-256 of the original report bytes>",
-     "dispositionsPath": ".github/agent-review-dispositions/example.json",
-     "dispositionsSha256": "<SHA-256 of the reviewed disposition bytes>",
-     "fixCommit": "<full final repair PR head SHA>",
-     "pullRequest": 123,
-     "afterRunId": "<successful merge-commit CI run ID>"
+  "findingId": "<full finding ID from the exact review>",
+  "reviewRunId": "<original maintenance run ID>",
+  "reviewReportPath": "run-EXAMPLE/agent-review.json",
+  "reviewReportSha256": "<SHA-256 of the original report bytes>",
+  "dispositionsPath": ".github/agent-review-dispositions/example.json",
+  "dispositionsSha256": "<SHA-256 of the reviewed disposition bytes>",
+  "fixCommit": "<full final repair PR head SHA>",
+  "pullRequest": 123,
+  "afterRunId": "<successful merge-commit CI run ID>"
 }
 ```
 
@@ -739,24 +813,24 @@ before `.json`, under `.github/agent-review-dispositions/`.
 To record a genuine link:
 
 1. Preserve the exact original review bytes from the successful, first-attempt,
-    scheduled maintenance run on the default branch. Prepare the separate
-    disposition record using the offline commands above. Its review binding must
-    remain unchanged, and the linked finding must have an actual `accepted` entry.
+   scheduled maintenance run on the default branch. Prepare the separate
+   disposition record using the offline commands above. Its review binding must
+   remain unchanged, and the linked finding must have an actual `accepted` entry.
 2. Include that record and a change to the finding's file in the repair PR. A
-    non-author human owner, member, or collaborator must approve the final head
-    before merge, at or after the recorded decision time, with no outstanding
-    request for changes. `fixCommit` identifies that final head, not an earlier
-    intermediate commit. The reviewed disposition and finding-file blobs must
-    survive unchanged in the merge. Added or modified files qualify; deletions,
-    renames, symlinks, and submodules do not.
+   non-author human owner, member, or collaborator must approve the final head
+   before merge, at or after the recorded decision time, with no outstanding
+   request for changes. `fixCommit` identifies that final head, not an earlier
+   intermediate commit. The reviewed disposition and finding-file blobs must
+   survive unchanged in the merge. Added or modified files qualify; deletions,
+   renames, symlinks, and submodules do not.
 3. Wait for successful first-attempt default-branch push CI at the exact PR merge
-    commit. Its authenticated `ci-required` artifact must contain a valid passing
-    `required-validation` report with matching identity. Another green revision,
-    a rerun, or a success claim without matching aggregate evidence does not qualify.
+   commit. Its authenticated `ci-required` artifact must contain a valid passing
+   `required-validation` report with matching identity. Another green revision,
+   a rerun, or a success claim without matching aggregate evidence does not qualify.
 4. Propose the link using the actual identities and byte digests. The offline
-    disposition check supplies `review.reportSha256` and `dispositionsSha256`.
-    A later registry-only PR cannot replace the original reviewed repair or add a
-    missing decision record retroactively.
+   disposition check supplies `review.reportSha256` and `dispositionsSha256`.
+   A later registry-only PR cannot replace the original reviewed repair or add a
+   missing decision record retroactively.
 
 The existing authenticated `npm run improvement:report` workflow command consumes
 these links. Its local `--input` comparison mode cannot verify them. The exported
@@ -770,9 +844,9 @@ bytes, immutable Git tree/blob contents, complete PR inventories, independent
 final-head review, merge ancestry, and successful merge CI. Truncated or oversized
 inventories are insufficient evidence, including 100 or more PR files, commits,
 reviews, or ancestry commits, and trees with more than 2,000 entries. Expired or
-unavailable artifacts also leave the link unresolved. This increment does not
-extend seven-day maintenance retention or recover review artifacts from the
-separate regression-retention bundles.
+unavailable artifacts also leave the link unresolved. Compact maintenance and
+aggregate CI uploads request 90-day retention, but do not recover already expired
+review artifacts from the separate regression-retention bundles.
 
 Reports expose `agentReviewRepairStatus` as `not-requested`, `verified`, or
 `insufficient-evidence`, with per-link `verified-link` or `unresolved` results and

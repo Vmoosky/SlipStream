@@ -117,7 +117,7 @@ jobs:
             test-results/maintenance/run-*/summary.json
             test-results/maintenance/run-*/agent-review.json
           if-no-files-found: error
-          retention-days: 7
+          retention-days: 90
       - name: Retain a fully verified proposal
         if: ${{ !cancelled() && steps.verify.outcome == 'success' && steps.verify.outputs.proposal_path != '' }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
@@ -133,4 +133,4 @@ jobs:
           name: readiness-agent-review-${{ github.run_id }}-${{ github.run_attempt }}
           path: reports/agent-review.json
           if-no-files-found: error
-          retention-days: 7
+          retention-days: 90
