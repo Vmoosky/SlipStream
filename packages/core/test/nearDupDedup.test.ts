@@ -110,6 +110,44 @@ describe('cross-turn near-duplicate matching', () => {
   });
 });
 
+describe('bounded cross-turn index', () => {
+  it.each([false, true])('evicts old seeds without losing surviving matches (nearDup=%s)', (nearDup) => {
+    const index = new CrossTurnDedup({
+      maxIndexedLines: 12, minLines: 3, minChars: 1, minNearLines: 3, nearDup,
+    });
+    const oldest = [...testRun(100, 4), '', 'short'];
+    const retained = [oldest[0]!, ...testRun(200, 5)];
+    const newest = buildLog(300, 6);
+    index.register('oldest', oldest, 'oldest output');
+    index.register('retained', retained, 'retained output');
+    expect(index.find(oldest)[0]?.sourceArtifactId).toBe('oldest');
+
+    index.register('newest', newest, 'newest output');
+    expect(index.find(oldest).some((match) => match.sourceArtifactId === 'oldest')).toBe(false);
+    expect(index.find(retained)).toEqual([
+      expect.objectContaining({ sourceArtifactId: 'retained', exact: true, length: retained.length }),
+    ]);
+    expect(index.find(newest)).toEqual([
+      expect.objectContaining({ sourceArtifactId: 'newest', exact: true, length: newest.length }),
+    ]);
+  });
+
+  it('retains an oversized newest source and ignores replacement content for an existing ID', () => {
+    const index = new CrossTurnDedup({ maxIndexedLines: 4, minLines: 3, minChars: 1 });
+    index.register('oldest', buildLog(100, 4), 'old output');
+    const newest = testRun(200, 8);
+    index.register('newest', newest, 'original output');
+    index.register('newest', testRun(900, 8), 'replacement output');
+
+    expect(index.find(newest)).toEqual([
+      expect.objectContaining({
+        sourceArtifactId: 'newest', sourceLabel: 'original output', exact: true, length: newest.length,
+      }),
+    ]);
+    expect(index.find(buildLog(100, 4))).toEqual([]);
+  });
+});
+
 describe('near-duplicate dedup stays lossless end to end', () => {
   let root: string;
   let engine: CompressionEngine;

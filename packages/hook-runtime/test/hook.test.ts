@@ -4,7 +4,7 @@ import * as path from 'node:path';
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-import { HookSessionManager, shouldBypass } from '../src/hook.js';
+import { defaultStorageDir, HookSessionManager, shouldBypass } from '../src/hook.js';
 import { NativeContextStore, nativePolicyRevision, recordNativeEvent, SavingsLedger, validateNativeChatPolicy } from '@slipstream/core';
 import { parsePostToolUseInput, parseProducerPricing, parseUserPromptSubmittedInput } from '../src/protocol.js';
 import { handleVscodeHook, recordVscodeHook } from '../src/vscode.js';
@@ -23,6 +23,7 @@ afterEach(() => {
   manager.dispose();
   fs.rmSync(storage, { recursive: true, force: true });
   fs.rmSync(cwd, { recursive: true, force: true });
+  vi.unstubAllEnvs();
 });
 
 function event(text: string, toolName = 'powershell', sessionId = 'session-1') {
@@ -165,6 +166,33 @@ describe('HookSessionManager', () => {
     manager.process(event(noisyLog(), 'powershell', 'session-1'));
     const other = manager.process(event(noisyLog(), 'powershell', 'session-2'));
     expect(other.modifiedResult?.textResultForLlm).toContain('repeated from');
+  });
+
+  it('releases only the requested session and can create it again', () => {
+    manager.recordChat({ sessionId: 'first', cwd, timestamp: 100 });
+    manager.recordChat({ sessionId: 'second', cwd, timestamp: 200 });
+    expect(manager.resetAll()).toBe(2);
+
+    manager.release('first');
+    expect(manager.resetAll()).toBe(1);
+    manager.release('first');
+    manager.release('unknown');
+    expect(manager.resetAll()).toBe(1);
+
+    manager.recordChat({ sessionId: 'first', cwd, timestamp: 300 });
+    expect(manager.resetAll()).toBe(2);
+  });
+});
+
+describe('defaultStorageDir', () => {
+  it('trims configured storage and falls back for missing or blank values', () => {
+    vi.stubEnv('SLIPSTREAM_STORAGE_DIR', ` ${storage} `);
+    expect(defaultStorageDir()).toBe(storage);
+
+    for (const value of [undefined, '', '   ']) {
+      vi.stubEnv('SLIPSTREAM_STORAGE_DIR', value);
+      expect(defaultStorageDir()).toBe(path.join(os.homedir(), '.slipstream'));
+    }
   });
 });
 

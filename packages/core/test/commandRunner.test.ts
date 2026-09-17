@@ -2,11 +2,12 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import {
   assertShellSafeArgs,
   CommandRejectedError,
+  renderCommandLine,
   runCommand,
   validateCommand,
 } from '../src/commandRunner.js';
@@ -19,6 +20,7 @@ beforeEach(() => {
 
 afterEach(() => {
   fs.rmSync(workspace, { recursive: true, force: true });
+  vi.unstubAllEnvs();
 });
 
 const base = () => ({ cwd: workspace, workspaceRoots: [workspace] });
@@ -91,6 +93,45 @@ describe('validateCommand', () => {
 });
 
 describe('runCommand', () => {
+  it('renders a command label without executing or interpreting the arguments', () => {
+    expect(renderCommandLine('node', ['script.js', 'value with spaces', 'a|b'])).toBe(
+      'node script.js value with spaces a|b',
+    );
+    expect(renderCommandLine('node', [])).toBe('node');
+  });
+
+  it('rejects an allowlisted program that cannot be resolved on PATH', async () => {
+    vi.stubEnv('PATH', '');
+    await expect(runCommand({ ...base(), command: 'node' })).rejects.toThrow('was not found on PATH');
+  });
+
+  it('reports startup errors when the working directory is a file', async () => {
+    const filename = path.join(workspace, 'not-a-directory');
+    fs.writeFileSync(filename, 'temporary fixture');
+    await expect(runCommand({ ...base(), cwd: filename, command: 'node', args: ['--version'] }))
+      .rejects.toThrow('Failed to start "node"');
+  });
+
+  it('marks discarded output as truncated when the capture budget is zero', async () => {
+    const result = await runCommand({
+      ...base(), command: 'node', args: ['-e', 'console.log("output")'], maxOutputBytes: 0,
+    });
+    expect(result).toMatchObject({ exitCode: 0, stdout: '', stderr: '', truncated: true, timedOut: false });
+  });
+
+  it('cancels an active process without reporting a timeout', async () => {
+    const controller = new AbortController();
+    const pending = runCommand({
+      ...base(), command: 'node', args: ['-e', 'setInterval(() => {}, 1000)'], signal: controller.signal,
+    });
+    controller.abort();
+    const result = await pending;
+    expect(result.timedOut).toBe(false);
+    expect(result.exitCode).not.toBe(0);
+    expect(result.stderr).toContain('cancelled');
+    expect(result.stderr).not.toContain('timeout');
+  }, 20_000);
+
   it('captures stdout and the exit code', async () => {
     const result = await runCommand({
       ...base(),

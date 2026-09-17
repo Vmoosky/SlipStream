@@ -1,7 +1,7 @@
 import * as os from 'node:os';
 import * as path from 'node:path';
 
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { resolveConfig } from '../src/config.js';
 afterEach(() => vi.unstubAllEnvs());
@@ -67,5 +67,93 @@ describe('MCP server config', () => {
   it('supports a retrieval-only tool surface for the Copilot hook plugin', () => {
     expect(resolveConfig(['--retrieval-only']).retrievalOnly).toBe(true);
     expect(resolveConfig([]).retrievalOnly).toBe(false);
+  });
+
+  describe('CLI and environment precedence', () => {
+    beforeEach(() => {
+      for (const key of [
+        'SLIPSTREAM_WORKSPACE_ROOTS',
+        'SLIPSTREAM_HOME',
+        'SLIPSTREAM_ALLOWED_COMMANDS',
+        'SLIPSTREAM_DASHBOARD',
+        'SLIPSTREAM_DASHBOARD_PORT',
+        'SLIPSTREAM_ENABLED',
+      ]) {
+        vi.stubEnv(key, undefined);
+      }
+    });
+
+    it('combines CLI and environment roots while removing blanks and duplicates', () => {
+      const first = path.join(os.tmpdir(), 'slipstream-first-workspace');
+      const second = path.join(os.tmpdir(), 'slipstream-second-workspace');
+      vi.stubEnv('SLIPSTREAM_WORKSPACE_ROOTS', [' ', ` ${first} `, second, ''].join(path.delimiter));
+
+      expect(resolveConfig(['--root', first, '--root', first]).workspaceRoots).toEqual([
+        path.resolve(first),
+        path.resolve(second),
+      ]);
+    });
+
+    it('uses the working directory when roots are blank and a CLI value is missing', () => {
+      vi.stubEnv('SLIPSTREAM_WORKSPACE_ROOTS', [' ', ''].join(path.delimiter));
+      expect(resolveConfig(['--root']).workspaceRoots).toEqual([path.resolve(process.cwd())]);
+    });
+
+    it('prefers CLI storage over the environment and falls back to the user directory', () => {
+      const configured = path.join(os.tmpdir(), 'slipstream-configured-storage');
+      vi.stubEnv('SLIPSTREAM_HOME', configured);
+      expect(resolveConfig(['--storage', 'relative-artifacts']).storageDir).toBe(
+        path.resolve('relative-artifacts'),
+      );
+      expect(resolveConfig([]).storageDir).toBe(configured);
+
+      vi.stubEnv('SLIPSTREAM_HOME', undefined);
+      expect(resolveConfig([]).storageDir).toBe(path.join(os.homedir(), '.slipstream'));
+    });
+
+    it('trims command allowlists without retaining empty entries', () => {
+      vi.stubEnv('SLIPSTREAM_ALLOWED_COMMANDS', ' node, git ,, dotnet, ');
+      expect(resolveConfig([]).allowedCommands).toEqual(['node', 'git', 'dotnet']);
+    });
+
+    it.each(['', ' , , '])('leaves an empty command allowlist unspecified: %j', (value) => {
+      vi.stubEnv('SLIPSTREAM_ALLOWED_COMMANDS', value);
+      expect(resolveConfig([]).allowedCommands).toBeUndefined();
+    });
+
+    it('reads dashboard enablement and the preferred port from the environment', () => {
+      vi.stubEnv('SLIPSTREAM_DASHBOARD', '1');
+      vi.stubEnv('SLIPSTREAM_DASHBOARD_PORT', '8081');
+      expect(resolveConfig([])).toMatchObject({ dashboard: true, dashboardPort: 8081 });
+    });
+
+    it('does not consume the next option after a portless dashboard flag', () => {
+      expect(resolveConfig(['--dashboard', '--retrieval-only'])).toMatchObject({
+        dashboard: true,
+        dashboardPort: 7331,
+        retrievalOnly: true,
+      });
+    });
+
+    it.each(['0', '8080'])('prefers the explicit dashboard port %s over the environment', (port) => {
+      vi.stubEnv('SLIPSTREAM_DASHBOARD_PORT', '8081');
+      expect(resolveConfig(['--dashboard', port, '--retrieval-only'])).toMatchObject({
+        dashboard: true,
+        dashboardPort: Number(port),
+        retrievalOnly: true,
+      });
+    });
+
+    it.each(['not-a-port', 'Infinity'])('uses the default for a non-finite port: %s', (port) => {
+      vi.stubEnv('SLIPSTREAM_DASHBOARD_PORT', port);
+      expect(resolveConfig(['--dashboard'])).toMatchObject({ dashboard: true, dashboardPort: 7331 });
+    });
+
+    it('disables compression only when explicitly configured as zero', () => {
+      vi.stubEnv('SLIPSTREAM_ENABLED', '0');
+      expect(resolveConfig([]).enabled).toBe(false);
+      vi.stubEnv('SLIPSTREAM_ENABLED', 'false');
+      expect(resolveConfig([]).enabled).toBe(true);
+    });
   });
 });

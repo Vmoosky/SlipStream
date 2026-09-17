@@ -1870,6 +1870,24 @@ test('missing or failed unit evidence cannot pass despite successful command sta
   assert.equal(collectUnit(root, { ...META, job: UNIT_JOBS[0], steps: unitSteps }).passed, false);
 });
 
+test('coverage roots use canonical filesystem paths for every workspace', async () => {
+  const { loadConfigFromFile } = await import('vite');
+  for (const workspace of ['core', 'hook-runtime', 'mcp-server', 'extension']) {
+    const root = path.join(REPO, 'packages', workspace);
+    const configPath = path.join(root, 'vitest.config.mts');
+    const filenames = new Set([configPath]);
+    if (process.platform === 'win32') {
+      filenames.add(configPath.replace(/^[A-Za-z]:/, (drive) => drive.toLowerCase()));
+      filenames.add(configPath.replace(/^[A-Za-z]:/, (drive) => drive.toUpperCase()));
+    }
+    for (const filename of filenames) {
+      const loaded = await loadConfigFromFile({ command: 'serve', mode: 'test' }, filename);
+      assert.ok(loaded, filename);
+      assert.equal(loaded.config.root, fs.realpathSync.native(root), filename);
+    }
+  }
+});
+
 test('coverage includes unimported source and enforces thresholds with a nonzero exit', (context) => {
   fs.mkdirSync(path.join(REPO, 'test-results'), { recursive: true });
   const root = fs.mkdtempSync(path.join(REPO, 'test-results/coverage-gate-'));

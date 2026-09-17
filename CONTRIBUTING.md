@@ -135,10 +135,15 @@ imports it. Each workspace writes its own `coverage-summary.json`,
 `test-results/coverage/<workspace>/`. Ordinary `unit-*.json` reports are not
 overwritten. Reports are generated evidence, not committed source.
 
-The initial floors below are rounded down from the measured Windows Node 24.14.1
-baseline. They apply to the complete source set within each workspace, not just
-the files touched by a test. Threshold failures exit nonzero; thresholds do not
-automatically decrease or update themselves.
+Each Vitest configuration resolves its root through `fs.realpathSync.native`.
+Keep this canonicalization: on Windows, different drive-letter casing can cause
+V8 coverage to credit the wrong source locations even when test results match.
+The readiness tests verify the actual configurations across drive-letter casings.
+
+The fixed floors below apply to the complete source set within each workspace,
+not just the files touched by a test. Threshold failures exit nonzero; thresholds
+do not automatically decrease or update themselves. The floors are unchanged
+after correcting the path-sensitive local coverage measurements.
 
 | Workspace | Statements | Branches | Functions | Lines |
 | --- | ---: | ---: | ---: | ---: |
