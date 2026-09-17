@@ -1186,7 +1186,17 @@ test('PR observability workflow writes metadata only from trusted default-branch
   );
   const checkout = job.steps.find((step) => step.uses?.startsWith('actions/checkout@'));
   assert.deepEqual(checkout.with, { ref: '${{ github.sha }}', 'persist-credentials': false });
-  assert.ok(job.steps.some((step) => step.run === 'npm ci --ignore-scripts'));
+  const installIndex = job.steps.findIndex((step) => step.run === 'npm ci --ignore-scripts');
+  const buildIndex = job.steps.findIndex(
+    (step) => step.run === 'npm run build --workspace @slipstream/core',
+  );
+  const guardsIndex = job.steps.findIndex(
+    (step) =>
+      step.run === "node --test --test-name-pattern='^PR observability' tests/readiness.test.mjs",
+  );
+  assert.ok(installIndex >= 0 && buildIndex > installIndex && guardsIndex > buildIndex);
+  assert.equal(job.steps[buildIndex].if, undefined);
+  assert.equal(job.steps[buildIndex].env, undefined);
   for (const step of job.steps) {
     if (step.uses) assert.match(step.uses, /@[a-f0-9]{40}$/);
     assert.equal(step['continue-on-error'], undefined);

@@ -1,3 +1,4 @@
+import * as childProcess from 'node:child_process';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -12,6 +13,8 @@ import {
   validateCommand,
 } from '../src/commandRunner.js';
 
+vi.mock('node:child_process', { spy: true });
+
 let workspace: string;
 
 beforeEach(() => {
@@ -21,6 +24,8 @@ beforeEach(() => {
 afterEach(() => {
   fs.rmSync(workspace, { recursive: true, force: true });
   vi.unstubAllEnvs();
+  vi.restoreAllMocks();
+  vi.mocked(childProcess.spawn).mockClear();
 });
 
 const base = () => ({ cwd: workspace, workspaceRoots: [workspace] });
@@ -110,6 +115,36 @@ describe('runCommand', () => {
     fs.writeFileSync(filename, 'temporary fixture');
     await expect(runCommand({ ...base(), cwd: filename, command: 'node', args: ['--version'] }))
       .rejects.toThrow('Failed to start "node"');
+  });
+
+  it.each([new Error('spawn ENOTDIR'), 'spawn ENOTDIR'])(
+    'reports synchronous startup errors as command rejections (%#)',
+    async (startupError) => {
+      const spawnMock = vi.mocked(childProcess.spawn).mockImplementationOnce(() => {
+        throw startupError;
+      });
+      await expect(runCommand({ ...base(), command: 'node', args: ['--version'] }))
+        .rejects.toMatchObject({
+          name: 'CommandRejectedError',
+          message: 'Failed to start "node": spawn ENOTDIR',
+        });
+      expect(spawnMock).toHaveBeenCalledOnce();
+    },
+  );
+
+  it('reports asynchronous startup errors and removes the abort listener', async () => {
+    const { ChildProcess } = await vi.importActual<typeof childProcess>('node:child_process');
+    const child = new ChildProcess();
+    vi.mocked(childProcess.spawn).mockReturnValueOnce(child);
+    const controller = new AbortController();
+    const removeListener = vi.spyOn(controller.signal, 'removeEventListener');
+    const pending = runCommand({ ...base(), command: 'node', signal: controller.signal });
+    child.emit('error', new Error('spawn EACCES'));
+    await expect(pending).rejects.toMatchObject({
+      name: 'CommandRejectedError',
+      message: 'Failed to start "node": spawn EACCES',
+    });
+    expect(removeListener).toHaveBeenCalledWith('abort', expect.any(Function));
   });
 
   it('marks discarded output as truncated when the capture budget is zero', async () => {
