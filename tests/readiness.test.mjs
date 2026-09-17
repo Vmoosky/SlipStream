@@ -3906,6 +3906,13 @@ test('improvement workflow is opt-in, default-branch-only, read-only and artifac
   const checkout = job.steps.find((step) => step.uses?.startsWith('actions/checkout@'));
   assert.equal(checkout.with.ref, '${{ github.sha }}');
   assert.equal(checkout.with['persist-credentials'], false);
+  const installIndex = job.steps.findIndex((step) => step.id === 'install');
+  const buildIndex = job.steps.findIndex((step) => step.id === 'build');
+  const testsIndex = job.steps.findIndex((step) => step.id === 'tests');
+  assert.ok(installIndex >= 0 && buildIndex > installIndex && testsIndex > buildIndex);
+  assert.equal(job.steps[buildIndex].run, 'npm run build --workspace @slipstream/core');
+  assert.equal(job.steps[buildIndex].if, undefined);
+  assert.equal(job.steps[buildIndex].env, undefined);
   assert.ok(job.steps.every((step) => !step.uses || /@[a-f0-9]{40}$/.test(step.uses)));
   assert.ok(job.steps.every((step) => step['continue-on-error'] === undefined));
   const retained = job.steps.find((step) => step.uses?.startsWith('actions/upload-artifact@'));

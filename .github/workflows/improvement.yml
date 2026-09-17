@@ -86,6 +86,9 @@ jobs:
       - id: install
         timeout-minutes: 3
         run: npm ci
+      - id: build
+        timeout-minutes: 2
+        run: npm run build --workspace @slipstream/core
       - id: tests
         timeout-minutes: 2
         run: node --test --test-name-pattern='^improvement' tests/readiness.test.mjs
