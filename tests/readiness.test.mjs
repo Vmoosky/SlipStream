@@ -87,6 +87,7 @@ import {
   PR_OBSERVABILITY_MARKER,
   prObservabilityIdentity,
 } from '../scripts/check-pr-observability.mjs';
+import { checkDocs } from '../scripts/check-docs.mjs';
 
 const REPO = fileURLToPath(new URL('../', import.meta.url));
 const META = {
@@ -4382,6 +4383,21 @@ function maintenanceRepository(context) {
     ]);
     return git(['rev-parse', 'HEAD']);
   };
+  const contractFiles = [
+    'scripts/check-docs.mjs',
+    'specs/mcp/v1/artifact-retrieval.md',
+    '.github/agents/spec-maintainer.agent.md',
+    'docs/mcp.md',
+  ];
+  for (const file of contractFiles) {
+    const target = path.join(root, file);
+    fs.mkdirSync(path.dirname(target), { recursive: true });
+    fs.copyFileSync(path.join(REPO, file), target);
+  }
+  const baseline = checkDocs(root, { write: true });
+  assert.equal(baseline.passed, true, JSON.stringify(baseline));
+  git(['add', '--', ...new Set([...contractFiles, ...baseline.written])]);
+  if (git(['diff', '--cached', '--name-only'])) commit();
   return { root, git, sentinel, commit };
 }
 
