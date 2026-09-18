@@ -4949,6 +4949,43 @@ test('security workflow isolates write permission and never builds untrusted PR 
   }
 });
 
+test('in-tree branch policy mirrors the enforced main ruleset and required jobs', () => {
+  const policy = parse(fs.readFileSync(path.join(REPO, '.github/branch-protection.yml'), 'utf8'));
+  assert.deepEqual(policy, {
+    schemaVersion: 1,
+    provider: 'github',
+    repository: 'Vmoosky/SlipStream',
+    target: 'refs/heads/main',
+    enforcement: 'active',
+    history: {
+      allowDeletion: false,
+      allowNonFastForward: false,
+    },
+    pullRequest: {
+      requiredApprovals: 1,
+      dismissStaleReviewsOnPush: true,
+      requireLastPushApproval: true,
+      requireCodeOwnerReview: false,
+      requireReviewThreadResolution: false,
+      requireApprovalForUnattributedChanges: true,
+      allowedMergeMethods: ['merge', 'squash', 'rebase'],
+    },
+    requiredStatusChecks: {
+      strict: true,
+      requiredOnBranchCreation: true,
+      checks: ['ci-required', 'security-required'],
+    },
+    bypassActors: [],
+  });
+  assert.ok(fs.existsSync(path.join(REPO, '.github/CODEOWNERS')));
+  const ci = parse(fs.readFileSync(path.join(REPO, '.github/workflows/ci.yml'), 'utf8'));
+  const security = parse(
+    fs.readFileSync(path.join(REPO, '.github/workflows/security.yml'), 'utf8'),
+  );
+  assert.ok(Object.hasOwn(ci.jobs, 'ci-required'));
+  assert.ok(Object.hasOwn(security.jobs, 'security-required'));
+});
+
 test('required CI has no path bypass, unpinned actions, or success-by-skipping paths', () => {
   const workflow = parse(fs.readFileSync(path.join(REPO, '.github/workflows/ci.yml'), 'utf8'));
   const manifest = JSON.parse(fs.readFileSync(path.join(REPO, 'package.json'), 'utf8'));
