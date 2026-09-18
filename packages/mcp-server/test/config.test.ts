@@ -1,5 +1,7 @@
+import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import { parseEnv } from 'node:util';
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -81,6 +83,30 @@ describe('MCP server config', () => {
       ]) {
         vi.stubEnv(key, undefined);
       }
+    });
+
+    it('loads a bounded local-development preset from the committed environment template', () => {
+      const template = parseEnv(
+        fs.readFileSync(new URL('../../../.env.example', import.meta.url), 'utf8'),
+      );
+      expect(Object.keys(template).sort()).toEqual([
+        'SLIPSTREAM_ALLOWED_COMMANDS',
+        'SLIPSTREAM_DASHBOARD',
+        'SLIPSTREAM_DASHBOARD_PORT',
+        'SLIPSTREAM_HOME',
+        'SLIPSTREAM_SESSION_LABEL',
+        'SLIPSTREAM_WORKSPACE_ROOTS',
+      ]);
+      for (const [key, value] of Object.entries(template)) vi.stubEnv(key, value);
+
+      expect(resolveConfig([])).toMatchObject({
+        storageDir: '.slipstream/dev',
+        workspaceRoots: [path.resolve('.')],
+        allowedCommands: ['node', 'npm', 'git'],
+        sessionLabel: 'MCP: local development',
+        dashboard: false,
+        dashboardPort: 0,
+      });
     });
 
     it('combines CLI and environment roots while removing blanks and duplicates', () => {
