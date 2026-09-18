@@ -6174,6 +6174,7 @@ test('PR agent review workflow is automatic, bounded, and retains evidence', () 
   assert.equal(review['timeout-minutes'], 5);
   assert.equal(review['working-directory'], undefined);
   assert.equal(review.env.COPILOT_GITHUB_TOKEN, '${{ github.token }}');
+  assert.equal(review.env.S2STOKENS, 'true');
   const finalize = job.steps.find(
     (step) => step.run === 'node scripts/check-pr-agent-review.mjs --finalize',
   );
@@ -6258,6 +6259,7 @@ test('repository health agent is recurring, read-only, bounded, and retains evid
   assert.match(review.run, /--max-autopilot-continues=1/);
   assert.match(review.run, /--max-ai-credits=30/);
   assert.equal(job.env.COPILOT_GITHUB_TOKEN, '${{ github.token }}');
+  assert.equal(job.env.S2STOKENS, 'true');
   const upload = job.steps.find((step) => step.uses?.startsWith('actions/upload-artifact@'));
   assert.equal(upload.if, '${{ always() }}');
   assert.equal(upload.with['retention-days'], 90);

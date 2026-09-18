@@ -23,6 +23,7 @@ jobs:
       copilot-requests: write
     env:
       COPILOT_GITHUB_TOKEN: ${{ github.token }}
+      S2STOKENS: 'true'
       COPILOT_AUTO_UPDATE: 'false'
       COPILOT_ALLOW_ALL: 'false'
       COPILOT_OTEL_ENABLED: 'false'
