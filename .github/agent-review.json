@@ -1,0 +1,9 @@
+{
+  "schemaVersion": 1,
+  "sourceWorkflow": ".github/workflows/maintenance.yml",
+  "evidenceWorkflow": ".github/workflows/agentic-improvement.yml",
+  "reportName": "agent-review.json",
+  "requiredEvent": "schedule",
+  "humanApprovalRequired": true,
+  "automaticPublication": false
+}

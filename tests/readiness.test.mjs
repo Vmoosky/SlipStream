@@ -96,6 +96,7 @@ import {
   PR_OBSERVABILITY_MARKER,
   prObservabilityIdentity,
 } from '../scripts/check-pr-observability.mjs';
+import { verifyAgenticImprovementEvidence } from '../scripts/check-agentic-improvement.mjs';
 
 const REPO = fileURLToPath(new URL('../', import.meta.url));
 const META = {
@@ -116,6 +117,109 @@ const unitSteps = Object.fromEntries(
 const browserSteps = Object.fromEntries(
   ['setup', 'chromium', 'validate'].map((name) => [name, { outcome: 'success' }]),
 );
+
+test('agentic improvement evidence binds scheduled maintenance to one review artifact', (context) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'slipstream-agentic-evidence-'));
+  context.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  fs.mkdirSync(path.join(root, '.github'), { recursive: true });
+  fs.writeFileSync(
+    path.join(root, '.github/agent-review.json'),
+    JSON.stringify({
+      schemaVersion: 1,
+      sourceWorkflow: '.github/workflows/maintenance.yml',
+      evidenceWorkflow: '.github/workflows/agentic-improvement.yml',
+      reportName: 'agent-review.json',
+      requiredEvent: 'schedule',
+      humanApprovalRequired: true,
+      automaticPublication: false,
+    }),
+  );
+  const reportDirectory = path.join(
+    root,
+    'test-results/agentic-review-source/test-results/maintenance/run-review',
+  );
+  fs.mkdirSync(reportDirectory, { recursive: true });
+  fs.writeFileSync(
+    path.join(reportDirectory, 'agent-review.json'),
+    JSON.stringify({
+      schemaVersion: 1,
+      kind: 'bounded-agent-review',
+      status: 'reviewed',
+      eventName: 'schedule',
+      attempt: '1',
+      revision: 'd'.repeat(40),
+      runId: '456',
+      workflow: 'Vmoosky/SlipStream/.github/workflows/maintenance.yml@refs/heads/main',
+      humanApprovalRequired: true,
+      automaticPublication: false,
+      cleanup: true,
+      invocations: 1,
+      wrapperRetries: 0,
+      errors: [],
+      policy: { enabled: true, provider: 'github-copilot-cli', model: 'gpt-6-astra' },
+    }),
+  );
+  const event = {
+    action: 'completed',
+    repository: { full_name: 'Vmoosky/SlipStream', default_branch: 'main' },
+    workflow_run: {
+      name: 'Maintenance',
+      path: '.github/workflows/maintenance.yml',
+      event: 'schedule',
+      status: 'completed',
+      conclusion: 'success',
+      head_branch: 'main',
+      run_attempt: 1,
+      id: 456,
+      head_sha: 'd'.repeat(40),
+      repository: { full_name: 'Vmoosky/SlipStream' },
+      head_repository: { full_name: 'Vmoosky/SlipStream' },
+    },
+  };
+  const env = {
+    GITHUB_ACTIONS: 'true',
+    GITHUB_EVENT_NAME: 'workflow_run',
+    GITHUB_REF: 'refs/heads/main',
+    GITHUB_REPOSITORY: 'Vmoosky/SlipStream',
+    GITHUB_SHA: 'e'.repeat(40),
+    GITHUB_RUN_ID: '789',
+    GITHUB_RUN_ATTEMPT: '1',
+    GITHUB_WORKFLOW_REF:
+      'Vmoosky/SlipStream/.github/workflows/agentic-improvement.yml@refs/heads/main',
+  };
+  const verified = verifyAgenticImprovementEvidence({ root, event, env });
+  assert.deepEqual(verified, {
+    schemaVersion: 1,
+    kind: 'agentic-improvement-evidence',
+    status: 'verified',
+    repository: 'Vmoosky/SlipStream',
+    branch: 'main',
+    source: {
+      workflow: '.github/workflows/maintenance.yml',
+      runId: '456',
+      attempt: 1,
+      revision: 'd'.repeat(40),
+      conclusion: 'success',
+      reportSha256: verified.source.reportSha256,
+    },
+    collector: {
+      workflow: env.GITHUB_WORKFLOW_REF,
+      runId: '789',
+      attempt: '1',
+      revision: 'e'.repeat(40),
+    },
+    humanApprovalRequired: true,
+    automaticPublication: false,
+  });
+  assert.match(verified.source.reportSha256, /^[a-f0-9]{64}$/);
+  assert.throws(() =>
+    verifyAgenticImprovementEvidence({
+      root,
+      event: { ...event, workflow_run: { ...event.workflow_run, conclusion: 'failure' } },
+      env,
+    }),
+  );
+});
 
 function fixture(context) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'slipstream-ci-'));
