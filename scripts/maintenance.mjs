@@ -766,6 +766,7 @@ export function collectMaintenanceEvidence(root, { revision, env, event, steps, 
     vulnerabilities,
     proof,
     proposalPath: errors.length === 0 ? proposalPath : null,
+    agentReview: { enabled: env.SLIPSTREAM_AGENT_REVIEW_ENABLED === 'true' },
     errors,
   };
 }

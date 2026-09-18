@@ -305,6 +305,57 @@ forms. Report discovery does not change that flag, replace independent approval,
 or establish a successful review, repair, or score increase. No review artifact
 exists until an eligible real run produces one.
 
+### Prepare Authenticated Assessment Evidence
+
+Use the existing [report script](scripts/check-readiness-reports.mjs) to automate
+the provenance checks and prepare a new detached checkout. Select a full commit
+SHA already available locally and explicit producer run IDs and attempts. All
+selected reports must bind their collector or review revision to that same SHA,
+not the observed PR head. The repository must match `origin`, and the branch must
+match GitHub's current default branch.
+
+With `$revision` and `$runId` set to those reviewed values in PowerShell:
+
+```powershell
+node scripts/check-readiness-reports.mjs --prepare --repository Vmoosky/SlipStream --revision $revision --report "pr-observability:${runId}:1" --out test-results/readiness-review
+```
+
+Repeat `--report KIND:RUN_ID:ATTEMPT` for different kinds at the same revision.
+Supported kinds are `pr-observability`, `bounded-agent-review`, and
+`continuous-improvement-review`; `--branch` defaults to `main`. `--help` explains
+the arguments without authentication or network access. Authentication uses an
+existing `GITHUB_TOKEN`, `GH_TOKEN`, or the selected `gh` login, respecting
+`GH_CONFIG_DIR`. Never put a credential in an argument or committed file.
+
+The command makes only read-only GitHub requests. It verifies repository and
+workflow identities, the completed run and exact attempt, artifact name, size,
+SHA-256, retention age and expiry, bounded ZIP contents, and report provenance.
+It rechecks run and artifact metadata after download. Expired, rerun, forked,
+ambiguous, mismatched, and local-unverified evidence is rejected. Failure and
+unavailable outcomes remain unchanged; authentication is not proof of success.
+
+The output path must be new and under `test-results/`, with no linked ancestors.
+Git hooks are disabled for checkout creation. Original report bytes are written
+exclusively under the new checkout's `reports/` and must not be ignored by Git;
+the provenance receipt is
+`test-results/readiness-evidence.json` inside that checkout. The primary checkout,
+existing reports, and credentials are not changed. No fetch, dependency install,
+workflow dispatch, evaluation, model request, or publication is performed. A
+nonzero exit or absent `prepared` receipt means preparation did not finish;
+inspect any newly created checkout rather than treating partial output as ready.
+
+Evaluate the reported checkout separately while the selected evidence remains
+current. Keep the original statuses and receipt with the assessment. Discovery
+of reports still does not repair the static guarded-review detector or establish
+closed-loop operation.
+
+The maintenance evidence bridge records a genuine empty proposal as
+`not-applicable` with reason `no-proposal`. A nonempty proposal without review
+requires a successful, source-matched maintenance summary explicitly recording
+review disabled; old summaries without that policy evidence fail closed. Missing
+an expected review remains a failure. Bridge verification and download failures
+retain a sanitized failure report and a failing check, not a success claim.
+
 ## PR Observability
 
 The [observability workflow](.github/workflows/pr-observability.yml) is opt-in via
