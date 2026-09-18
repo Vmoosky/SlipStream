@@ -28,19 +28,22 @@ jobs:
       - name: Check out trusted default-branch review code
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
-          ref: ${{ github.event.pull_request.base.sha }}
+          ref: ${{ github.workflow_sha }}
           persist-credentials: false
       - name: Set up Node.js
         uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
         with:
           node-version-file: .node-version
       - name: Prepare the bounded untrusted PR diff
+        id: prepare
+        continue-on-error: true
         timeout-minutes: 2
         env:
           GITHUB_TOKEN: ${{ github.token }}
         run: node scripts/check-pr-agent-review.mjs --prepare
       - name: Evaluate the bounded diff once without tools
         id: review
+        if: ${{ steps.prepare.outcome == 'success' }}
         continue-on-error: true
         timeout-minutes: 5
         shell: bash
@@ -95,7 +98,7 @@ jobs:
             < test-results/pr-agent-review/run/input.json \
             > test-results/pr-agent-review/run/response.json
       - name: Validate and publish the bound review findings
-        if: ${{ always() && steps.review.outcome != 'skipped' }}
+        if: ${{ always() && steps.prepare.outcome == 'success' && steps.review.outcome != 'skipped' }}
         timeout-minutes: 1
         env:
           GITHUB_TOKEN: ${{ github.token }}

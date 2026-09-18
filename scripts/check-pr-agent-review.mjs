@@ -37,7 +37,7 @@ export function prAgentReviewContext(env, event) {
       env.GITHUB_EVENT_NAME === 'pull_request_target' &&
       env.GITHUB_REPOSITORY === pull?.base?.repo?.full_name &&
       env.GITHUB_REF === `refs/heads/${pull?.base?.ref}` &&
-      env.GITHUB_SHA === pull?.base?.sha &&
+      /^[a-f0-9]{40}$/.test(env.GITHUB_SHA ?? '') &&
       env.GITHUB_WORKFLOW_REF ===
         `${env.GITHUB_REPOSITORY}/.github/workflows/pr-agent-review.yml@refs/heads/${pull?.base?.ref}` &&
       Number.isSafeInteger(pull?.number) &&
@@ -93,8 +93,9 @@ export async function collectPrAgentReview(context, client) {
   requireReview(
     pull.number === context.number &&
       pull.base?.repo?.full_name === context.repository &&
-      pull.base?.sha === context.base &&
       pull.head?.sha === context.head &&
+      /^[a-f0-9]{40}$/.test(pull.base?.sha ?? '') &&
+      pull.base.sha !== pull.head.sha &&
       Number.isSafeInteger(pull.changed_files) &&
       pull.changed_files > 0 &&
       pull.changed_files <= 100,
@@ -105,7 +106,7 @@ export async function collectPrAgentReview(context, client) {
       files.length === pull.changed_files &&
       files.every((file) => typeof file.patch === 'string'),
   );
-  return preparePrAgentReview({ ...context, files });
+  return preparePrAgentReview({ ...context, base: pull.base.sha, files });
 }
 
 export function prAgentReviewFindingIds(prepared, response) {
@@ -198,7 +199,7 @@ export async function preparePrAgentReviewRun({
   if (env.GITHUB_ACTIONS === 'true' && env.GITHUB_PATH) {
     fs.appendFileSync(env.GITHUB_PATH, `${path.dirname(executable)}\n`);
   }
-  return { ...context, inputSha256: prepared.inputSha256, executable };
+  return { ...context, base: prepared.base, inputSha256: prepared.inputSha256, executable };
 }
 
 export async function finalizePrAgentReviewRun({
@@ -220,7 +221,7 @@ export async function finalizePrAgentReviewRun({
   requireReview(
     prepared.repository === context.repository &&
       prepared.number === context.number &&
-      prepared.base === context.base &&
+      /^[a-f0-9]{40}$/.test(prepared.base) &&
       prepared.head === context.head,
   );
   const responseBytes = readBounded(
@@ -240,7 +241,7 @@ export async function finalizePrAgentReviewRun({
     status: 'reviewed',
     repository: context.repository,
     number: context.number,
-    base: context.base,
+    base: prepared.base,
     head: context.head,
     inputSha256: prepared.inputSha256,
     responseSha256: sha256(responseBytes),
@@ -385,12 +386,12 @@ async function main() {
   }
   const event = JSON.parse(fs.readFileSync(process.env.GITHUB_EVENT_PATH, 'utf8'));
   const root = fileURLToPath(new URL('../', import.meta.url));
-  if (args[0] === '--prepare') {
-    const prepared = await preparePrAgentReviewRun({ root, event });
-    console.log(JSON.stringify({ status: 'prepared', head: prepared.head }));
-    return;
-  }
   try {
+    if (args[0] === '--prepare') {
+      const prepared = await preparePrAgentReviewRun({ root, event });
+      console.log(JSON.stringify({ status: 'prepared', head: prepared.head }));
+      return;
+    }
     const report = await finalizePrAgentReviewRun({ root, event });
     console.log(JSON.stringify({ status: report.status, decision: report.decision ?? null }));
     process.exitCode = report.decision === 'no-objection' ? 0 : 1;
