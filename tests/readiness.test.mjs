@@ -51,6 +51,7 @@ import {
 } from '../scripts/check-agent-review.mjs';
 import {
   PR_AGENT_REVIEW_MARKER,
+  collectPrAgentReview,
   createPrAgentReviewClient,
   prAgentReviewContext,
   retainPrAgentReviewFailure,
@@ -6083,7 +6084,7 @@ test('PR agent review requires trusted base workflow identity and restricts API 
     head: 'b'.repeat(40),
     draft: false,
   });
-  assert.throws(() => prAgentReviewContext({ ...env, GITHUB_SHA: 'b'.repeat(40) }, event));
+  assert.throws(() => prAgentReviewContext({ ...env, GITHUB_SHA: 'invalid' }, event));
   const requests = [];
   const client = createPrAgentReviewClient(repository, 'token', async (url, options) => {
     requests.push({ url, options });
@@ -6099,6 +6100,36 @@ test('PR agent review requires trusted base workflow identity and restricts API 
     client.request('/issues/37/comments', { method: 'POST', body: { body: 'unowned' } }),
   );
   await assert.rejects(client.request('/contents/package.json'));
+});
+
+test('PR agent review refreshes a stale event base from the authenticated API', async () => {
+  const repository = 'Vmoosky/SlipStream';
+  const head = 'b'.repeat(40);
+  const currentBase = 'c'.repeat(40);
+  const context = {
+    repository,
+    number: 1,
+    base: 'a'.repeat(40),
+    head,
+    draft: false,
+  };
+  const client = {
+    async request(resource) {
+      if (resource === '/pulls/1') {
+        return {
+          number: 1,
+          base: { sha: currentBase, repo: { full_name: repository } },
+          head: { sha: head },
+          changed_files: 1,
+        };
+      }
+      assert.equal(resource, '/pulls/1/files?per_page=100');
+      return [{ filename: 'README.md', status: 'modified', patch: '@@ -1 +1 @@' }];
+    },
+  };
+  const prepared = await collectPrAgentReview(context, client);
+  assert.equal(prepared.base, currentBase);
+  assert.equal(prepared.head, head);
 });
 
 test('PR agent review workflow is automatic, bounded, and retains evidence', () => {
@@ -6120,9 +6151,15 @@ test('PR agent review workflow is automatic, bounded, and retains evidence', () 
   });
   assert.equal(job['timeout-minutes'], 10);
   const checkout = job.steps.find((step) => step.uses?.startsWith('actions/checkout@'));
-  assert.equal(checkout.with.ref, '${{ github.event.pull_request.base.sha }}');
+  assert.equal(checkout.with.ref, '${{ github.workflow_sha }}');
   assert.equal(checkout.with['persist-credentials'], false);
+  const prepare = job.steps.find(
+    (step) => step.run === 'node scripts/check-pr-agent-review.mjs --prepare',
+  );
+  assert.equal(prepare.id, 'prepare');
+  assert.equal(prepare['continue-on-error'], true);
   const review = job.steps.find((step) => step.id === 'review');
+  assert.equal(review.if, "${{ steps.prepare.outcome == 'success' }}");
   assert.equal(review['continue-on-error'], true);
   assert.match(review.run, /(?:^|\n)\s*copilot \\/);
   assert.doesNotMatch(review.run, /\$/);
@@ -6137,15 +6174,16 @@ test('PR agent review workflow is automatic, bounded, and retains evidence', () 
   assert.equal(review['timeout-minutes'], 5);
   assert.equal(review['working-directory'], undefined);
   assert.equal(review.env.COPILOT_GITHUB_TOKEN, '${{ github.token }}');
-  const prepare = job.steps.find(
-    (step) => step.run === 'node scripts/check-pr-agent-review.mjs --prepare',
-  );
+  assert.equal(review.env.S2STOKENS, 'true');
   const finalize = job.steps.find(
     (step) => step.run === 'node scripts/check-pr-agent-review.mjs --finalize',
   );
   assert.ok(prepare);
   assert.ok(finalize);
-  assert.equal(finalize.if, "${{ always() && steps.review.outcome != 'skipped' }}");
+  assert.equal(
+    finalize.if,
+    "${{ always() && steps.prepare.outcome == 'success' && steps.review.outcome != 'skipped' }}",
+  );
   assert.equal(Object.hasOwn(prepare.env, 'SLIPSTREAM_AGENT_REVIEW_TOKEN'), false);
   assert.deepEqual(Object.keys(finalize.env), ['GITHUB_TOKEN']);
   const upload = job.steps.find((step) => step.uses?.startsWith('actions/upload-artifact@'));
@@ -6221,6 +6259,7 @@ test('repository health agent is recurring, read-only, bounded, and retains evid
   assert.match(review.run, /--max-autopilot-continues=1/);
   assert.match(review.run, /--max-ai-credits=30/);
   assert.equal(job.env.COPILOT_GITHUB_TOKEN, '${{ github.token }}');
+  assert.equal(job.env.S2STOKENS, 'true');
   const upload = job.steps.find((step) => step.uses?.startsWith('actions/upload-artifact@'));
   assert.equal(upload.if, '${{ always() }}');
   assert.equal(upload.with['retention-days'], 90);
