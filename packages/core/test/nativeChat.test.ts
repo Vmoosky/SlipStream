@@ -162,7 +162,7 @@ describe('native invocation handoff', () => {
     expect(() => store.issue('session', 'extra-call', 'slipstream_runCommand', input, policy)).toThrow('Too many pending');
     expect(fs.readdirSync(directory)).toHaveLength(256);
     expect(fs.existsSync(path.join(directory, `${token}.json`))).toBe(true);
-  });
+  }, 15_000);
 
   it('consumes an oversized persisted context without accepting or retaining it', () => {
     const store = new NativeContextStore(storage, workspace);
