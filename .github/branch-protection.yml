@@ -1,0 +1,30 @@
+schemaVersion: 1
+provider: github
+repository: Vmoosky/SlipStream
+target: refs/heads/main
+enforcement: active
+
+history:
+  allowDeletion: false
+  allowNonFastForward: false
+
+pullRequest:
+  requiredApprovals: 1
+  dismissStaleReviewsOnPush: true
+  requireLastPushApproval: true
+  requireCodeOwnerReview: false
+  requireReviewThreadResolution: false
+  requireApprovalForUnattributedChanges: true
+  allowedMergeMethods:
+    - merge
+    - squash
+    - rebase
+
+requiredStatusChecks:
+  strict: true
+  requiredOnBranchCreation: true
+  checks:
+    - ci-required
+    - security-required
+
+bypassActors: []

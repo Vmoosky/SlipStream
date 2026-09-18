@@ -9,6 +9,7 @@ scripts/maintenance.mjs text eol=lf
 tests/check-docs.test.mjs text eol=lf
 tests/readiness.test.mjs text eol=lf
 .github/workflows/*.yml text eol=lf
+.github/branch-protection.yml text eol=lf
 .claude/settings.json text eol=lf
 .github/hooks/*.json text eol=lf
 .github/dependabot.yml text eol=lf
