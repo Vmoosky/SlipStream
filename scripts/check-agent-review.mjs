@@ -11,12 +11,12 @@ import { selectImprovementRules } from './check-improvement-rules.mjs';
 
 export const AGENT_REVIEW_RUNTIME = Object.freeze({
   package: '@github/copilot-linux-x64',
-  version: '1.0.84-5',
-  archive: 'github-copilot-linux-x64-1.0.84-5.tgz',
-  url: 'https://registry.npmjs.org/@github/copilot-linux-x64/-/copilot-linux-x64-1.0.84-5.tgz',
+  version: '1.0.86',
+  archive: 'github-copilot-linux-x64-1.0.86.tgz',
+  url: 'https://registry.npmjs.org/@github/copilot-linux-x64/-/copilot-linux-x64-1.0.86.tgz',
   archiveBytes: 160 * 1024 * 1024,
   sha512:
-    'W3cMWP+GFdupYT4u3K9ZU63B86mt/to9T/lwy/7A5w2XGDssRRFemrYojQwhu8WPVLyZ7WmtbLCltfCe5kUoQg==',
+    'ROyWMEP8nKFoa+7l2majzfgA5jaqid0qEYTClf9oooS+8S6CIhKYlW1VO6Lt3lDicoCI1S2RWbR7vJ6ZQy/TFw==',
 });
 
 export const AGENT_REVIEW_LIMITS = Object.freeze({

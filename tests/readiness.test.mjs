@@ -6806,7 +6806,7 @@ test('bounded agent review CLI is offline by default and rejects unsafe runtime 
         fetchArchive: async (url, options) => {
           assert.equal(
             url,
-            'https://registry.npmjs.org/@github/copilot-linux-x64/-/copilot-linux-x64-1.0.84-5.tgz',
+            'https://registry.npmjs.org/@github/copilot-linux-x64/-/copilot-linux-x64-1.0.86.tgz',
           );
           assert.equal(options.redirect, 'error');
           assert.equal(options.headers, undefined);

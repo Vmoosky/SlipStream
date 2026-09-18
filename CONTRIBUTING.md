@@ -826,7 +826,7 @@ Activation requires the owner's separate authorization and configuration:
 - Set `SLIPSTREAM_AGENT_REVIEW_ENABLED=true` only after those prerequisites and
   the existing maintenance protections are satisfied. Set it to `false` to pause.
 
-The runtime is the SHA-512-pinned Linux x64 Copilot CLI package `1.0.84-5`.
+The runtime is the SHA-512-pinned Linux x64 Copilot CLI package `1.0.86`.
 Download and integrity checks precede the credential-bearing step; extraction
 uses a verified private copy and a credential-free child environment. No package
 installation hooks or automatic updates run. The review process receives only
