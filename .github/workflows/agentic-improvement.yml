@@ -28,17 +28,25 @@ jobs:
       contents: read
       actions: read
     steps:
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - id: checkout
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
           ref: ${{ github.sha }}
           persist-credentials: false
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+      - id: runtime
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version-file: .node-version
+      - id: source
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
         with:
           name: maintenance-evidence-${{ github.event.workflow_run.id }}-1
           path: test-results/agentic-review-source
           run-id: ${{ github.event.workflow_run.id }}
           github-token: ${{ github.token }}
-      - name: Verify the bounded agent review evidence
+      - id: verify
+        name: Verify the bounded agent review evidence
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' && steps.runtime.outcome == 'success' }}
         env:
           GITHUB_ACTIONS: 'true'
           GITHUB_EVENT_PATH: ${{ github.event_path }}
@@ -49,8 +57,10 @@ jobs:
           GITHUB_RUN_ID: ${{ github.run_id }}
           GITHUB_RUN_ATTEMPT: ${{ github.run_attempt }}
           GITHUB_WORKFLOW_REF: ${{ github.workflow_ref }}
+          SLIPSTREAM_AGENTIC_SOURCE_OUTCOME: ${{ steps.source.outcome }}
         run: node scripts/check-agentic-improvement.mjs
-      - name: Retain the verified agentic evidence
+      - name: Retain the evidence outcome, including verification failures
+        if: ${{ always() && steps.verify.outcome != 'skipped' }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: agentic-improvement-${{ github.event.workflow_run.id }}-${{ github.run_attempt }}

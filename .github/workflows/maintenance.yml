@@ -76,6 +76,7 @@ jobs:
         env:
           CI_STEPS: ${{ toJSON(steps) }}
           MAINTENANCE_REPORT: ${{ steps.docs.outputs.report_path }}
+          SLIPSTREAM_AGENT_REVIEW_ENABLED: ${{ vars.SLIPSTREAM_AGENT_REVIEW_ENABLED }}
         run: node scripts/maintenance.mjs --verify
       - id: review_runtime
         name: Download and verify the pinned review runtime without credentials

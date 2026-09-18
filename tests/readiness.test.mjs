@@ -17,7 +17,11 @@ import {
 } from '../scripts/check-agent-session.mjs';
 
 import { developmentPlan, runDevelopmentCommand, runDevelopment } from '../scripts/develop.mjs';
-import { writeReadinessReport } from '../scripts/check-readiness-reports.mjs';
+import {
+  collectReadinessArtifacts,
+  prepareReadinessCheckout,
+  writeReadinessReport,
+} from '../scripts/check-readiness-reports.mjs';
 import {
   IMPROVEMENT_RULE_LIMITS,
   improvementRuleHash,
@@ -96,7 +100,10 @@ import {
   PR_OBSERVABILITY_MARKER,
   prObservabilityIdentity,
 } from '../scripts/check-pr-observability.mjs';
-import { verifyAgenticImprovementEvidence } from '../scripts/check-agentic-improvement.mjs';
+import {
+  runAgenticImprovementEvidence,
+  verifyAgenticImprovementEvidence,
+} from '../scripts/check-agentic-improvement.mjs';
 
 const REPO = fileURLToPath(new URL('../', import.meta.url));
 const META = {
@@ -219,6 +226,142 @@ test('agentic improvement evidence binds scheduled maintenance to one review art
       env,
     }),
   );
+  fs.rmSync(path.join(reportDirectory, 'agent-review.json'));
+  fs.writeFileSync(
+    path.join(reportDirectory, 'summary.json'),
+    JSON.stringify({
+      schemaVersion: 1,
+      kind: 'maintenance-validation',
+      revision: 'd'.repeat(40),
+      runId: '456',
+      attempt: '1',
+      eventName: 'schedule',
+      workflow: 'Vmoosky/SlipStream/.github/workflows/maintenance.yml@refs/heads/main',
+      passed: true,
+      steps: Object.fromEntries(
+        ['context', 'install', 'build', 'tests', 'audit', 'docs', 'proof'].map((name) => [
+          name,
+          'success',
+        ]),
+      ),
+      documentation: {
+        outcome: 'no-op',
+        proposal: {
+          files: [],
+          changedLines: 0,
+          patchBytes: 0,
+          patchSha256: createHash('sha256').update(Buffer.alloc(0)).digest('hex'),
+        },
+      },
+      proposalPath: null,
+      errors: [],
+    }),
+  );
+  const noReview = verifyAgenticImprovementEvidence({ root, event, env });
+  assert.equal(noReview.status, 'not-applicable');
+  assert.equal(noReview.reason, 'no-proposal');
+  const summaryPath = path.join(reportDirectory, 'summary.json');
+  const summary = JSON.parse(fs.readFileSync(summaryPath, 'utf8'));
+  for (const invalid of [
+    { ...summary, revision: 'a'.repeat(40) },
+    { ...summary, runId: '123' },
+    { ...summary, attempt: '2' },
+    { ...summary, passed: false },
+    { ...summary, errors: ['failed'] },
+    { ...summary, steps: { ...summary.steps, proof: 'failure' } },
+    { ...summary, proposalPath: 'unexpected.patch' },
+    {
+      ...summary,
+      documentation: {
+        ...summary.documentation,
+        proposal: { ...summary.documentation.proposal, patchBytes: 1 },
+      },
+    },
+  ]) {
+    fs.writeFileSync(summaryPath, JSON.stringify(invalid));
+    assert.throws(() => verifyAgenticImprovementEvidence({ root, event, env }));
+  }
+  const disabled = {
+    ...summary,
+    agentReview: { enabled: false },
+    documentation: {
+      outcome: 'proposed',
+      proposal: {
+        files: [{ path: 'docs/architecture.md' }],
+        changedLines: 2,
+        patchBytes: 100,
+        patchSha256: 'f'.repeat(64),
+      },
+    },
+    proposalPath: 'test-results/maintenance/run-review/proposal.patch',
+  };
+  fs.writeFileSync(summaryPath, JSON.stringify(disabled));
+  assert.equal(verifyAgenticImprovementEvidence({ root, event, env }).reason, 'review-disabled');
+  for (const enabled of [true, undefined, 'false']) {
+    fs.writeFileSync(summaryPath, JSON.stringify({ ...disabled, agentReview: { enabled } }));
+    assert.throws(() => verifyAgenticImprovementEvidence({ root, event, env }));
+  }
+  fs.writeFileSync(summaryPath, JSON.stringify(summary));
+  const eventPath = path.join(root, 'event.json');
+  fs.writeFileSync(eventPath, JSON.stringify(event));
+  const retained = runAgenticImprovementEvidence({
+    root,
+    env: {
+      ...env,
+      GITHUB_EVENT_PATH: eventPath,
+      GITHUB_STEP_SUMMARY: path.join(root, 'step-summary.md'),
+      SLIPSTREAM_AGENTIC_SOURCE_OUTCOME: 'success',
+    },
+  });
+  assert.equal(retained.status, 'not-applicable');
+  assert.deepEqual(
+    JSON.parse(fs.readFileSync(path.join(root, 'test-results/agentic-improvement/report.json'))),
+    retained,
+  );
+  assert.match(fs.readFileSync(path.join(root, 'step-summary.md'), 'utf8'), /no-proposal/);
+});
+
+test('agentic improvement retains download and malformed evidence failures without raw errors', (context) => {
+  for (const outcome of ['failure', 'success']) {
+    const { root, write } = fixture(context);
+    write('event.json', { secret: 'PRIVATE-EVENT-CONTENT' });
+    const report = runAgenticImprovementEvidence({
+      root,
+      env: {
+        GITHUB_EVENT_PATH: path.join(root, 'event.json'),
+        SLIPSTREAM_AGENTIC_SOURCE_OUTCOME: outcome,
+      },
+    });
+    assert.equal(report.status, 'failed');
+    assert.equal(report.automaticPublication, false);
+    const bytes = fs.readFileSync(path.join(root, 'test-results/agentic-improvement/report.json'));
+    assert.deepEqual(JSON.parse(bytes), report);
+    assert.doesNotMatch(bytes.toString(), /PRIVATE-EVENT-CONTENT|ENOENT/);
+    assert.throws(() => runAgenticImprovementEvidence({ root, env: {} }), /EEXIST/);
+  }
+});
+
+test('agentic improvement workflow retains failures with read-only trusted execution', () => {
+  const workflow = parse(
+    fs.readFileSync(path.join(REPO, '.github/workflows/agentic-improvement.yml'), 'utf8'),
+  );
+  const job = workflow.jobs.verify;
+  assert.deepEqual(job.permissions, { contents: 'read', actions: 'read' });
+  const steps = Object.fromEntries(
+    job.steps.filter((step) => step.id).map((step) => [step.id, step]),
+  );
+  assert.equal(steps.checkout.with.ref, '${{ github.sha }}');
+  assert.equal(steps.checkout.with['persist-credentials'], false);
+  assert.equal(steps.runtime.with['node-version-file'], '.node-version');
+  assert.equal(steps.source.with['run-id'], '${{ github.event.workflow_run.id }}');
+  assert.match(steps.verify.if, /!cancelled\(\)/);
+  assert.equal(steps.verify.env.SLIPSTREAM_AGENTIC_SOURCE_OUTCOME, '${{ steps.source.outcome }}');
+  const upload = job.steps.find((step) => step.uses?.startsWith('actions/upload-artifact@'));
+  assert.equal(upload.if, "${{ always() && steps.verify.outcome != 'skipped' }}");
+  assert.equal(upload.with['retention-days'], 90);
+  assert.ok(
+    job.steps.filter((step) => step.uses).every((step) => /@[a-f0-9]{40}$/.test(step.uses)),
+  );
 });
 
 function fixture(context) {
@@ -310,6 +453,335 @@ function artifacts(context) {
     },
   };
 }
+
+function readinessEvidenceFixture(context, kind = 'pr-observability') {
+  const { root } = fixture(context);
+  const git = (args, options = {}) =>
+    execFileSync('git', ['-c', `core.hooksPath=${os.devNull}`, ...args], {
+      cwd: root,
+      encoding: 'utf8',
+      stdio: ['pipe', 'pipe', 'pipe'],
+      ...options,
+    });
+  git(['init', '-b', 'main']);
+  git(['remote', 'add', 'origin', 'https://github.com/fixture/slipstream.git']);
+  const source = {
+    'pr-observability': [
+      'pr-observability.yml',
+      'readiness-pr-observability-9-123-1',
+      'pr-observability.json',
+      'workflow_dispatch',
+    ],
+    'bounded-agent-review': [
+      'maintenance.yml',
+      'readiness-agent-review-123-1',
+      'agent-review.json',
+      'schedule',
+    ],
+    'continuous-improvement-review': [
+      'improvement.yml',
+      'readiness-improvement-123-1',
+      'improvement.json',
+      'schedule',
+    ],
+  }[kind];
+  fs.mkdirSync(path.join(root, '.github/workflows'), { recursive: true });
+  fs.writeFileSync(path.join(root, '.github/workflows', source[0]), 'name: Fixture\n');
+  fs.writeFileSync(path.join(root, '.gitignore'), 'test-results/\n');
+  git(['add', '.github/workflows', '.gitignore']);
+  git([
+    '-c',
+    'user.name=Fixture',
+    '-c',
+    'user.email=fixture@example.invalid',
+    'commit',
+    '-m',
+    'Fixture',
+  ]);
+  const revision = git(['rev-parse', 'HEAD']).trim();
+  const repository = 'fixture/slipstream';
+  const workflow = `.github/workflows/${source[0]}`;
+  const producer = {
+    revision,
+    runId: '123',
+    attempt: '1',
+    eventName: source[3],
+    workflow: `${repository}/${workflow}@refs/heads/main`,
+  };
+  const report = {
+    schemaVersion: 1,
+    kind,
+    repository,
+    branch: 'main',
+    number: 9,
+    source: 'github-actions',
+    status: 'insufficient-evidence',
+    publication: 'failed',
+    errors: ['Fixture failure'],
+    ...(kind === 'bounded-agent-review' ? producer : { collector: producer }),
+  };
+  const bytes = Buffer.from(`${JSON.stringify(report, null, 2)}\r\n`);
+  fs.writeFileSync(path.join(root, source[2]), bytes);
+  const tree = git(['mktree'], { input: '' }).trim();
+  const archive = git(['archive', '--format=zip', `--add-file=${source[2]}`, tree], {
+    encoding: null,
+  });
+  const run = {
+    id: 123,
+    workflow_id: 7,
+    run_attempt: 1,
+    status: 'completed',
+    conclusion: 'failure',
+    event: source[3],
+    path: workflow,
+    head_sha: revision,
+    head_branch: 'main',
+    repository: { id: 10, full_name: repository },
+    head_repository: { id: 10, full_name: repository },
+    created_at: '2026-09-18T09:00:00Z',
+  };
+  const artifact = {
+    id: 88,
+    name: source[1],
+    expired: false,
+    digest: `sha256:${createHash('sha256').update(archive).digest('hex')}`,
+    size_in_bytes: archive.length,
+    created_at: '2026-09-18T09:01:00Z',
+    expires_at: '2026-09-25T09:01:00Z',
+    workflow_run: { id: 123, head_sha: revision, repository_id: 10, head_repository_id: 10 },
+  };
+  const state = { run, artifact, archive, bytes, report, filename: source[2], root, git };
+  const requests = [];
+  const client = {
+    async json(resource) {
+      requests.push(resource);
+      if (resource === '') return { id: 10, full_name: repository, default_branch: 'main' };
+      if (resource === '/actions/runs/123') return state.run;
+      if (resource === '/actions/workflows/7') return { id: 7, path: workflow };
+      if (resource === '/actions/runs/123/artifacts?per_page=100')
+        return { total_count: 1, artifacts: [state.artifact] };
+      if (resource === '/actions/artifacts/88') return state.artifact;
+      throw new Error(`Unexpected fixture request: ${resource}`);
+    },
+    async archive() {
+      return state.archive;
+    },
+  };
+  state.options = {
+    repository,
+    branch: 'main',
+    revision,
+    selections: [{ kind, runId: '123', attempt: '1' }],
+    client,
+    now: Date.parse('2026-09-18T10:00:00Z'),
+    destination: 'test-results/prepared-readiness',
+  };
+  state.requests = requests;
+  state.replaceReport = (value) => {
+    state.bytes = Buffer.isBuffer(value) ? value : Buffer.from(JSON.stringify(value));
+    fs.writeFileSync(path.join(root, source[2]), state.bytes);
+    state.archive = git(['archive', '--format=zip', `--add-file=${source[2]}`, tree], {
+      encoding: null,
+    });
+    state.artifact = {
+      ...state.artifact,
+      size_in_bytes: state.archive.length,
+      digest: `sha256:${createHash('sha256').update(state.archive).digest('hex')}`,
+    };
+  };
+  return state;
+}
+
+test('readiness preparation authenticates all supported report types without changing failed statuses or bytes', async (context) => {
+  for (const kind of [
+    'pr-observability',
+    'bounded-agent-review',
+    'continuous-improvement-review',
+  ]) {
+    const state = readinessEvidenceFixture(context, kind);
+    const reports = await collectReadinessArtifacts(state.options);
+    assert.equal(reports.length, 1);
+    assert.deepEqual(reports[0].bytes, state.bytes);
+    assert.equal(
+      reports[0].evidence.status,
+      kind === 'pr-observability' ? 'failed' : 'insufficient-evidence',
+    );
+    assert.equal(reports[0].evidence.artifact.digest, state.artifact.digest);
+    assert.equal(state.requests.filter((resource) => resource === '/actions/runs/123').length, 2);
+    assert.equal(state.requests.at(-1), '/actions/artifacts/88');
+  }
+});
+
+test('readiness preparation rejects stale producers, expired artifacts, altered archives and duplicate selection', async (context) => {
+  const state = readinessEvidenceFixture(context);
+  const originalRun = structuredClone(state.run);
+  const originalArtifact = structuredClone(state.artifact);
+  for (const invalid of [
+    { ...originalRun, head_sha: 'f'.repeat(40) },
+    { ...originalRun, run_attempt: 2 },
+    { ...originalRun, status: 'in_progress' },
+    { ...originalRun, head_branch: 'feature' },
+    { ...originalRun, event: 'pull_request' },
+    { ...originalRun, head_repository: { id: 11, full_name: 'other/slipstream' } },
+    { ...originalRun, path: '.github/workflows/unrelated.yml' },
+  ]) {
+    state.run = invalid;
+    await assert.rejects(collectReadinessArtifacts(state.options), /Readiness evidence/);
+  }
+  state.run = originalRun;
+  for (const invalid of [
+    { ...originalArtifact, expired: true },
+    { ...originalArtifact, expires_at: '2026-09-18T09:59:59Z' },
+    { ...originalArtifact, digest: `sha256:${'0'.repeat(64)}` },
+    { ...originalArtifact, size_in_bytes: originalArtifact.size_in_bytes + 1 },
+    { ...originalArtifact, workflow_run: { ...originalArtifact.workflow_run, id: 124 } },
+    { ...originalArtifact, name: 'readiness-pr-observability-9-123-2' },
+  ]) {
+    state.artifact = invalid;
+    await assert.rejects(collectReadinessArtifacts(state.options), /Readiness evidence/);
+  }
+  state.artifact = originalArtifact;
+  state.archive = Buffer.from('altered archive');
+  await assert.rejects(collectReadinessArtifacts(state.options), /Readiness evidence/);
+  await assert.rejects(
+    collectReadinessArtifacts({
+      ...state.options,
+      selections: [...state.options.selections, ...state.options.selections],
+    }),
+    /Readiness evidence/,
+  );
+});
+
+test('readiness preparation creates only a new source-matched checkout and preserves the dirty source', async (context) => {
+  const state = readinessEvidenceFixture(context);
+  fs.writeFileSync(
+    path.join(state.root, '.git/hooks/post-checkout'),
+    '#!/bin/sh\nprintf called > hook-was-run\n',
+    { mode: 0o755 },
+  );
+  fs.writeFileSync(path.join(state.root, 'local-work.txt'), 'Preserve local edits');
+  const before = state.git(['status', '--porcelain']);
+  const prepared = await prepareReadinessCheckout(state.root, state.options);
+  assert.equal(prepared.status, 'prepared');
+  assert.equal(prepared.operationSuccessVerified, false);
+  assert.equal(state.git(['status', '--porcelain']), before);
+  assert.equal(state.git(['rev-parse', 'HEAD']).trim(), state.options.revision);
+  assert.deepEqual(
+    fs.readFileSync(path.join(prepared.checkout, 'reports', state.filename)),
+    state.bytes,
+  );
+  assert.equal(fs.existsSync(path.join(state.root, 'reports')), false);
+  assert.equal(fs.existsSync(path.join(prepared.checkout, 'node_modules')), false);
+  assert.equal(fs.existsSync(path.join(prepared.checkout, 'hook-was-run')), false);
+  assert.throws(() => state.git(['-C', prepared.checkout, 'symbolic-ref', '-q', 'HEAD']));
+  assert.equal(
+    JSON.parse(
+      fs.readFileSync(path.join(prepared.checkout, 'test-results/readiness-evidence.json')),
+    ).reports[0].status,
+    'failed',
+  );
+  await assert.rejects(prepareReadinessCheckout(state.root, state.options), /Readiness evidence/);
+  await assert.rejects(
+    prepareReadinessCheckout(state.root, { ...state.options, destination: '.' }),
+    /Readiness evidence/,
+  );
+  await assert.rejects(
+    prepareReadinessCheckout(state.root, { ...state.options, destination: '../outside' }),
+    /Readiness evidence/,
+  );
+  state.artifact.expired = true;
+  await assert.rejects(
+    prepareReadinessCheckout(state.root, {
+      ...state.options,
+      destination: 'test-results/rejected',
+    }),
+    /Readiness evidence/,
+  );
+  assert.equal(fs.existsSync(path.join(state.root, 'test-results/rejected')), false);
+});
+
+test('readiness preparation binds report identities and rejects unverified local content', async (context) => {
+  const state = readinessEvidenceFixture(context, 'continuous-improvement-review');
+  for (const report of [
+    { ...state.report, source: 'local-unverified' },
+    { ...state.report, collector: { ...state.report.collector, revision: '0'.repeat(40) } },
+    { ...state.report, collector: { ...state.report.collector, attempt: '2' } },
+    { ...state.report, collector: { ...state.report.collector, runId: '124' } },
+    { ...state.report, repository: 'other/slipstream' },
+    { ...state.report, kind: 'bounded-agent-review' },
+  ]) {
+    state.replaceReport(report);
+    await assert.rejects(collectReadinessArtifacts(state.options), /Readiness evidence/);
+  }
+  state.replaceReport(Buffer.alloc(1024 * 1024 + 1, 32));
+  await assert.rejects(collectReadinessArtifacts(state.options), /Readiness evidence/);
+  state.replaceReport(state.report);
+  state.archive = state.git(['archive', '--format=zip', `--add-file=${state.filename}`, 'HEAD'], {
+    encoding: null,
+  });
+  state.artifact.size_in_bytes = state.archive.length;
+  state.artifact.digest = `sha256:${createHash('sha256').update(state.archive).digest('hex')}`;
+  await assert.rejects(collectReadinessArtifacts(state.options), /Artifact ZIP/);
+});
+
+test('readiness preparation revalidates downloaded metadata and refuses linked or ignored output paths', async (context) => {
+  const state = readinessEvidenceFixture(context);
+  const json = state.options.client.json;
+  state.options.client.json = async (resource) =>
+    resource === '/actions/artifacts/88' ? { ...state.artifact, expired: true } : json(resource);
+  await assert.rejects(prepareReadinessCheckout(state.root, state.options), /Readiness evidence/);
+  assert.equal(fs.existsSync(path.join(state.root, state.options.destination)), false);
+  state.options.client.json = json;
+  const { root: outside } = fixture(context);
+  const outsideContents = fs.readdirSync(outside);
+  fs.mkdirSync(path.join(state.root, 'test-results'));
+  fs.symlinkSync(
+    outside,
+    path.join(state.root, 'test-results/linked'),
+    process.platform === 'win32' ? 'junction' : 'dir',
+  );
+  await assert.rejects(
+    prepareReadinessCheckout(state.root, {
+      ...state.options,
+      destination: 'test-results/linked/checkout',
+    }),
+    /Readiness evidence/,
+  );
+  assert.deepEqual(fs.readdirSync(outside), outsideContents);
+  await assert.rejects(
+    collectReadinessArtifacts({ ...state.options, branch: 'feature' }),
+    /Readiness evidence/,
+  );
+  fs.writeFileSync(path.join(state.root, '.git/info/exclude'), 'reports/\n');
+  await assert.rejects(
+    prepareReadinessCheckout(state.root, {
+      ...state.options,
+      destination: 'test-results/ignored-evidence',
+    }),
+    /Readiness evidence/,
+  );
+  assert.equal(
+    fs.existsSync(
+      path.join(state.root, 'test-results/ignored-evidence/test-results/readiness-evidence.json'),
+    ),
+    false,
+  );
+});
+
+test('readiness preparation CLI explains explicit selection and never echoes invalid inputs', () => {
+  const script = path.join(REPO, 'scripts/check-readiness-reports.mjs');
+  const help = spawnSync(process.execPath, [script, '--help'], { encoding: 'utf8' });
+  assert.equal(help.status, 0, help.stderr);
+  assert.match(help.stdout, /KIND:RUN_ID:ATTEMPT/);
+  const invalid = spawnSync(
+    process.execPath,
+    [script, '--prepare', '--repository', 'PRIVATE-INVALID-INPUT'],
+    { encoding: 'utf8' },
+  );
+  assert.equal(invalid.status, 1);
+  assert.match(invalid.stderr, /No evaluation was started/);
+  assert.doesNotMatch(invalid.stderr, /PRIVATE-INVALID-INPUT/);
+});
 
 test('readiness reports retain exact producer bytes, identities and unsuccessful statuses', (context) => {
   const { root } = fixture(context);
@@ -2654,11 +3126,15 @@ test('improvement downloads authenticate only to GitHub and verify the archive d
       assert.equal(options.method, 'GET');
       assert.equal(options.redirect, 'manual');
       assert.equal(options.headers.Authorization, 'Bearer synthetic-token');
-      assert.ok(url.startsWith('https://api.github.com/repos/Vmoosky/SlipStream/'));
+      assert.ok(
+        url === 'https://api.github.com/repos/Vmoosky/SlipStream' ||
+          url.startsWith('https://api.github.com/repos/Vmoosky/SlipStream/'),
+      );
       return new Response('{}');
     },
   );
   for (const resource of [
+    '',
     '/pulls/7',
     '/pulls/7/reviews?per_page=100',
     '/pulls/7/commits?per_page=100',
@@ -2669,8 +3145,11 @@ test('improvement downloads authenticate only to GitHub and verify the archive d
     `/compare/${'a'.repeat(40)}...${'d'.repeat(40)}?per_page=100`,
   ])
     await metadata.json(resource);
-  assert.equal(resources.length, 8);
+  assert.equal(resources.length, 9);
+  assert.equal(resources[0], 'https://api.github.com/repos/Vmoosky/SlipStream');
   for (const resource of [
+    '?other=true',
+    '/../other',
     '/issues/7',
     '/pulls/7/comments',
     '/pulls/7?other=true',
@@ -2682,7 +3161,7 @@ test('improvement downloads authenticate only to GitHub and verify the archive d
     '/compare/HEAD...main',
   ])
     await assert.rejects(metadata.json(resource));
-  assert.equal(resources.length, 8);
+  assert.equal(resources.length, 9);
 });
 
 function improvementHistory(context) {
@@ -6508,6 +6987,14 @@ test('bounded agent review rejects malformed, unbound, oversized and executable 
 test('maintenance aggregation needs actual success from every independent check', (context) => {
   const { root, write, options } = maintenanceEvidence(context);
   const successful = collectMaintenanceEvidence(root, options);
+  assert.deepEqual(successful.agentReview, { enabled: false });
+  assert.deepEqual(
+    collectMaintenanceEvidence(root, {
+      ...options,
+      env: { ...options.env, SLIPSTREAM_AGENT_REVIEW_ENABLED: 'true' },
+    }).agentReview,
+    { enabled: true },
+  );
   assert.equal(successful.passed, true);
   assert.equal(Object.keys(successful.evidenceSha256).length, 3);
   for (const digest of Object.values(successful.evidenceSha256))
