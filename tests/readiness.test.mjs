@@ -6200,11 +6200,11 @@ test('repository health agent is recurring, read-only, bounded, and retains evid
   );
   assert.deepEqual(workflow.on.schedule, [{ cron: '0 9 * * 1' }]);
   assert.equal(workflow.on.workflow_dispatch, null);
-  assert.deepEqual(workflow.permissions, { contents: 'read' });
+  assert.deepEqual(workflow.permissions, { contents: 'read', 'copilot-requests': 'write' });
   const job = workflow.jobs.inspect;
   assert.equal(job.if, "${{ vars.SLIPSTREAM_REPOSITORY_HEALTH_AGENT_ENABLED == 'true' }}");
   assert.equal(job['timeout-minutes'], 10);
-  assert.deepEqual(job.permissions, { contents: 'read' });
+  assert.deepEqual(job.permissions, { contents: 'read', 'copilot-requests': 'write' });
   const checkout = job.steps.find((step) => step.uses?.startsWith('actions/checkout@'));
   assert.equal(checkout.with.ref, '${{ github.event.repository.default_branch }}');
   assert.equal(checkout.with['persist-credentials'], false);
@@ -6220,7 +6220,7 @@ test('repository health agent is recurring, read-only, bounded, and retains evid
   assert.match(review.run, /--deny-tool=url/);
   assert.match(review.run, /--max-autopilot-continues=1/);
   assert.match(review.run, /--max-ai-credits=30/);
-  assert.ok(Object.hasOwn(job.env, 'COPILOT_GITHUB_TOKEN'));
+  assert.equal(job.env.COPILOT_GITHUB_TOKEN, '${{ github.token }}');
   const upload = job.steps.find((step) => step.uses?.startsWith('actions/upload-artifact@'));
   assert.equal(upload.if, '${{ always() }}');
   assert.equal(upload.with['retention-days'], 90);
