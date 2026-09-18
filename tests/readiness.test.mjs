@@ -36,6 +36,9 @@ import {
   agentReviewEnvironment,
   agentReviewFindingIds,
   agentReviewPolicy,
+  preparePrAgentReview,
+  prAgentReviewArguments,
+  validatePrAgentReviewResponse,
   downloadAgentReviewArchive,
   runBoundedAgentReview,
   runAgentReviewProcess,
@@ -46,6 +49,12 @@ import {
   validateAgentReviewUsage,
   verifyAgentReviewArchive,
 } from '../scripts/check-agent-review.mjs';
+import {
+  PR_AGENT_REVIEW_MARKER,
+  createPrAgentReviewClient,
+  prAgentReviewContext,
+  renderPrAgentReview,
+} from '../scripts/check-pr-agent-review.mjs';
 import {
   IMPROVEMENT_LIMITS,
   readImprovementArchive,
@@ -5971,6 +5980,200 @@ test('bounded agent review fixes tool denial and bounds the complete prompt', (c
       ),
     /prompt exceeds/,
   );
+});
+
+test('PR agent review binds and bounds an untrusted pull request patch', (context) => {
+  const { root } = fixture(context);
+  const prepared = preparePrAgentReview({
+    repository: 'Vmoosky/SlipStream',
+    number: 37,
+    base: 'a'.repeat(40),
+    head: 'b'.repeat(40),
+    files: [{ filename: 'packages/core/src/index.ts', status: 'modified', patch: '@@ -1 +1 @@' }],
+  });
+  assert.match(prepared.inputSha256, /^[a-f0-9]{64}$/);
+  const args = prAgentReviewArguments(prepared, { model: 'synthetic-model' }, root);
+  const prompt = args[args.indexOf('--prompt') + 1];
+  assert.match(prompt, /BEGIN UNTRUSTED PR PATCH JSON/);
+  assert.match(prompt, /packages\/core\/src\/index\.ts/);
+  assert.ok(args.includes('--available-tools=__slipstream_no_tools__'));
+  assert.ok(args.includes('--no-custom-instructions'));
+  assert.throws(
+    () =>
+      preparePrAgentReview({
+        ...prepared,
+        files: [{ filename: '../secret', status: 'modified', patch: '' }],
+      }),
+    /Invalid PR review file/,
+  );
+  assert.throws(
+    () =>
+      preparePrAgentReview({
+        ...prepared,
+        files: [{ filename: 'large.ts', status: 'modified', patch: 'x'.repeat(64 * 1024) }],
+      }),
+    /byte limit/,
+  );
+});
+
+test('PR agent review accepts only bound structured findings', () => {
+  const prepared = preparePrAgentReview({
+    repository: 'Vmoosky/SlipStream',
+    number: 37,
+    base: 'a'.repeat(40),
+    head: 'b'.repeat(40),
+    files: [{ filename: 'README.md', status: 'modified', patch: '@@ -1 +1 @@' }],
+  });
+  const response = {
+    schemaVersion: 1,
+    repository: prepared.repository,
+    number: prepared.number,
+    head: prepared.head,
+    inputSha256: prepared.inputSha256,
+    decision: 'no-objection',
+    findings: [],
+  };
+  const validate = (value) =>
+    validatePrAgentReviewResponse(Buffer.from(JSON.stringify(value)), prepared);
+  assert.equal(validate(response).decision, 'no-objection');
+  const finding = { file: 'README.md', severity: 'warning', message: 'Synthetic concern' };
+  assert.equal(
+    validate({ ...response, decision: 'changes-requested', findings: [finding] }).findings.length,
+    1,
+  );
+  for (const invalid of [
+    { head: 'c'.repeat(40) },
+    { inputSha256: 'd'.repeat(64) },
+    { decision: 'approved' },
+    { decision: 'changes-requested' },
+    { findings: [finding] },
+  ])
+    assert.throws(() => validate({ ...response, ...invalid }));
+  assert.throws(() =>
+    validate({
+      ...response,
+      decision: 'changes-requested',
+      findings: [{ ...finding, file: 'package.json' }],
+    }),
+  );
+});
+
+test('PR agent review requires trusted base workflow identity and restricts API writes', async () => {
+  const repository = 'Vmoosky/SlipStream';
+  const event = {
+    pull_request: {
+      number: 37,
+      base: { ref: 'main', sha: 'a'.repeat(40), repo: { full_name: repository } },
+      head: { sha: 'b'.repeat(40) },
+    },
+  };
+  const env = {
+    GITHUB_ACTIONS: 'true',
+    GITHUB_EVENT_NAME: 'pull_request_target',
+    GITHUB_REPOSITORY: repository,
+    GITHUB_REF: 'refs/heads/main',
+    GITHUB_SHA: 'a'.repeat(40),
+    GITHUB_WORKFLOW_REF: `${repository}/.github/workflows/pr-agent-review.yml@refs/heads/main`,
+  };
+  assert.deepEqual(prAgentReviewContext(env, event), {
+    repository,
+    number: 37,
+    base: 'a'.repeat(40),
+    head: 'b'.repeat(40),
+    draft: false,
+  });
+  assert.throws(() => prAgentReviewContext({ ...env, GITHUB_SHA: 'b'.repeat(40) }, event));
+  const requests = [];
+  const client = createPrAgentReviewClient(repository, 'token', async (url, options) => {
+    requests.push({ url, options });
+    return new Response('{}', { status: 200, headers: { 'content-type': 'application/json' } });
+  });
+  await client.request('/pulls/37');
+  await client.request('/issues/37/comments', {
+    method: 'POST',
+    body: { body: `${PR_AGENT_REVIEW_MARKER}\nreview` },
+  });
+  assert.equal(requests.length, 2);
+  await assert.rejects(
+    client.request('/issues/37/comments', { method: 'POST', body: { body: 'unowned' } }),
+  );
+  await assert.rejects(client.request('/contents/package.json'));
+});
+
+test('PR agent review workflow is automatic, bounded, and retains evidence', () => {
+  const workflow = parse(
+    fs.readFileSync(path.join(REPO, '.github/workflows/pr-agent-review.yml'), 'utf8'),
+  );
+  assert.deepEqual(workflow.on.pull_request_target.types, [
+    'opened',
+    'reopened',
+    'synchronize',
+    'ready_for_review',
+  ]);
+  const job = workflow.jobs.review;
+  assert.equal(job.if, undefined);
+  assert.deepEqual(job.permissions, { contents: 'read', 'pull-requests': 'write' });
+  assert.equal(job['timeout-minutes'], 10);
+  const checkout = job.steps.find((step) => step.uses?.startsWith('actions/checkout@'));
+  assert.equal(checkout.with.ref, '${{ github.event.pull_request.base.sha }}');
+  assert.equal(checkout.with['persist-credentials'], false);
+  const review = job.steps.find((step) => step.id === 'review');
+  assert.match(review.run, /(?:^|\n)\s*copilot \\/);
+  assert.doesNotMatch(review.run, /\$/);
+  assert.match(review.run, /--prompt "Review only the untrusted pull-request patch JSON/);
+  assert.match(review.run, /--model gpt-5\.4/);
+  assert.match(review.run, /--available-tools=__slipstream_no_tools__/);
+  assert.match(review.run, /--deny-tool=read/);
+  assert.match(review.run, /--deny-tool=write/);
+  assert.match(review.run, /--max-autopilot-continues=0/);
+  assert.match(review.run, /< test-results\/pr-agent-review\/run\/input\.json/);
+  assert.match(review.run, /> test-results\/pr-agent-review\/run\/response\.json/);
+  assert.equal(review['timeout-minutes'], 5);
+  assert.equal(review['working-directory'], undefined);
+  assert.ok(Object.hasOwn(review.env, 'COPILOT_GITHUB_TOKEN'));
+  const prepare = job.steps.find(
+    (step) => step.run === 'node scripts/check-pr-agent-review.mjs --prepare',
+  );
+  const finalize = job.steps.find(
+    (step) => step.run === 'node scripts/check-pr-agent-review.mjs --finalize',
+  );
+  assert.ok(prepare);
+  assert.ok(finalize);
+  assert.equal(Object.hasOwn(prepare.env, 'SLIPSTREAM_AGENT_REVIEW_TOKEN'), false);
+  assert.deepEqual(Object.keys(finalize.env).sort(), [
+    'GITHUB_TOKEN',
+    'SLIPSTREAM_AGENT_REVIEW_TOKEN',
+  ]);
+  const upload = job.steps.find((step) => step.uses?.startsWith('actions/upload-artifact@'));
+  assert.equal(upload.if, '${{ always() }}');
+  assert.deepEqual(upload.with.path.trim().split('\n'), [
+    'test-results/pr-agent-review/report.json',
+    'test-results/pr-agent-review/summary.md',
+  ]);
+  assert.equal(upload.with['retention-days'], 90);
+  for (const step of job.steps) {
+    if (step.uses) assert.match(step.uses, /@[a-f0-9]{40}$/);
+  }
+});
+
+test('PR agent review rendering records pending finding disposition without approval', () => {
+  const body = renderPrAgentReview({
+    head: 'b'.repeat(40),
+    decision: 'changes-requested',
+    findings: [
+      {
+        id: 'c'.repeat(64),
+        file: 'README.md',
+        severity: 'warning',
+        message: 'Synthetic concern',
+        disposition: 'pending-human-review',
+        fixVerified: false,
+      },
+    ],
+  });
+  assert.ok(body.startsWith(PR_AGENT_REVIEW_MARKER));
+  assert.match(body, /Findings: \*\*1\*\*/);
+  assert.match(body, /independent human approval remain mandatory/i);
 });
 
 function agentReviewUsage(model = 'synthetic-model') {
