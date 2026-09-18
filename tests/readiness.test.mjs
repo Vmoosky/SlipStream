@@ -4986,6 +4986,26 @@ test('in-tree branch policy mirrors the enforced main ruleset and required jobs'
   assert.ok(Object.hasOwn(security.jobs, 'security-required'));
 });
 
+test('CODEOWNERS routes governance and maintained repository surfaces', () => {
+  const rules = fs
+    .readFileSync(path.join(REPO, '.github/CODEOWNERS'), 'utf8')
+    .split(/\r?\n/u)
+    .map((line) => line.trim())
+    .filter((line) => line && !line.startsWith('#'));
+  assert.deepEqual(rules, [
+    '* @Vmoosky @VMoose',
+    '/.github/ @Vmoosky',
+    '/scripts/ @Vmoosky',
+    '/packages/ @Vmoosky @VMoose',
+    '/tests/ @Vmoosky @VMoose',
+    '/e2e/ @Vmoosky @VMoose',
+    '/docs/ @Vmoosky @VMoose',
+  ]);
+  for (const directory of ['.github', 'scripts', 'packages', 'tests', 'e2e', 'docs']) {
+    assert.ok(fs.statSync(path.join(REPO, directory)).isDirectory());
+  }
+});
+
 test('required CI has no path bypass, unpinned actions, or success-by-skipping paths', () => {
   const workflow = parse(fs.readFileSync(path.join(REPO, '.github/workflows/ci.yml'), 'utf8'));
   const manifest = JSON.parse(fs.readFileSync(path.join(REPO, 'package.json'), 'utf8'));
@@ -6210,8 +6230,8 @@ test('PR agent review workflow is automatic, bounded, and retains evidence', () 
   assert.match(review.run, /> test-results\/pr-agent-review\/run\/response\.json/);
   assert.equal(review['timeout-minutes'], 5);
   assert.equal(review['working-directory'], undefined);
-  assert.equal(review.env.COPILOT_GITHUB_TOKEN, '${{ github.token }}');
-  assert.equal(review.env.S2STOKENS, 'true');
+  assert.equal(review.env.COPILOT_GITHUB_TOKEN, '${{ secrets.SLIPSTREAM_AGENT_REVIEW_TOKEN }}');
+  assert.equal(Object.hasOwn(review.env, 'S2STOKENS'), false);
   const finalize = job.steps.find(
     (step) => step.run === 'node scripts/check-pr-agent-review.mjs --finalize',
   );
@@ -6223,6 +6243,9 @@ test('PR agent review workflow is automatic, bounded, and retains evidence', () 
   );
   assert.equal(Object.hasOwn(prepare.env, 'SLIPSTREAM_AGENT_REVIEW_TOKEN'), false);
   assert.deepEqual(Object.keys(finalize.env), ['GITHUB_TOKEN']);
+  for (const holder of [workflow, job, ...job.steps.filter((step) => step !== review)]) {
+    assert.equal(JSON.stringify(holder.env ?? {}).includes('secrets.'), false);
+  }
   const upload = job.steps.find((step) => step.uses?.startsWith('actions/upload-artifact@'));
   assert.equal(upload.if, '${{ always() }}');
   assert.deepEqual(upload.with.path.trim().split('\n'), [
