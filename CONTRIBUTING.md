@@ -74,6 +74,30 @@ proof applies its known fix in a scratch copy. Do not repair the original fixtur
 or run a separate install there. The policy arm is simulated, not live-provider
 quality, billing, routing, or budget-enforcement evidence.
 
+## Local MCP Environment
+
+For standalone MCP development, [.env.example](.env.example) provides a
+credential-free preset using the server's existing environment settings. After
+setup, use this command in an MCP client with the repository root as its working
+directory:
+
+```sh
+node --env-file=.env.example packages/mcp-server/dist/index.js
+```
+
+The preset stores development artifacts and history under the ignored
+`.slipstream/dev` directory, bounds workspace roots to the current checkout, and
+limits commands to `node`, `npm`, and `git`. The dashboard is off; adding
+`--dashboard` enables it on a free loopback port instead of the normal dashboard
+port. The server uses stdin/stdout for MCP, not an interactive terminal interface.
+
+Loading is opt-in: setup, validation, extension, and plugin commands do not read
+this file automatically. Node gives inherited environment variables precedence
+over the file, so check inherited `SLIPSTREAM_HOME` and `SLIPSTREAM_WORKSPACE_ROOTS`
+before relying on the preset's local paths. For personal settings, use an ignored
+`.env.local` file and pass `--env-file=.env.local` instead. Keep credentials and
+machine-specific paths out of the committed template.
+
 ## Development Container
 
 With Docker running in Linux-container mode and the VS Code Dev Containers
