@@ -92,7 +92,6 @@ import {
   collectPrObservability,
   publishPrObservability,
   pullRequestSnapshot,
-  observabilityLifecycle,
   renderPrObservability,
   PR_OBSERVABILITY_MARKER,
   prObservabilityIdentity,
