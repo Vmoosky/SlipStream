@@ -48,8 +48,7 @@ jobs:
         timeout-minutes: 5
         shell: bash
         env:
-          COPILOT_GITHUB_TOKEN: ${{ github.token }}
-          S2STOKENS: 'true'
+          COPILOT_GITHUB_TOKEN: ${{ secrets.SLIPSTREAM_AGENT_REVIEW_TOKEN }}
           COPILOT_AUTO_UPDATE: 'false'
           COPILOT_ALLOW_ALL: 'false'
           COPILOT_OTEL_ENABLED: 'false'
