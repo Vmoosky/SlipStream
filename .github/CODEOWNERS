@@ -1,1 +1,8 @@
 * @Vmoosky @VMoose
+
+/.github/ @Vmoosky
+/scripts/ @Vmoosky
+/packages/ @Vmoosky @VMoose
+/tests/ @Vmoosky @VMoose
+/e2e/ @Vmoosky @VMoose
+/docs/ @Vmoosky @VMoose

@@ -4986,6 +4986,26 @@ test('in-tree branch policy mirrors the enforced main ruleset and required jobs'
   assert.ok(Object.hasOwn(security.jobs, 'security-required'));
 });
 
+test('CODEOWNERS routes governance and maintained repository surfaces', () => {
+  const rules = fs
+    .readFileSync(path.join(REPO, '.github/CODEOWNERS'), 'utf8')
+    .split(/\r?\n/u)
+    .map((line) => line.trim())
+    .filter((line) => line && !line.startsWith('#'));
+  assert.deepEqual(rules, [
+    '* @Vmoosky @VMoose',
+    '/.github/ @Vmoosky',
+    '/scripts/ @Vmoosky',
+    '/packages/ @Vmoosky @VMoose',
+    '/tests/ @Vmoosky @VMoose',
+    '/e2e/ @Vmoosky @VMoose',
+    '/docs/ @Vmoosky @VMoose',
+  ]);
+  for (const directory of ['.github', 'scripts', 'packages', 'tests', 'e2e', 'docs']) {
+    assert.ok(fs.statSync(path.join(REPO, directory)).isDirectory());
+  }
+});
+
 test('required CI has no path bypass, unpinned actions, or success-by-skipping paths', () => {
   const workflow = parse(fs.readFileSync(path.join(REPO, '.github/workflows/ci.yml'), 'utf8'));
   const manifest = JSON.parse(fs.readFileSync(path.join(REPO, 'package.json'), 'utf8'));
