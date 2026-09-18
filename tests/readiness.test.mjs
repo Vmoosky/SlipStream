@@ -6156,6 +6156,41 @@ test('PR agent review workflow is automatic, bounded, and retains evidence', () 
   }
 });
 
+test('repository health agent is recurring, read-only, bounded, and retains evidence', () => {
+  const workflow = parse(
+    fs.readFileSync(path.join(REPO, '.github/workflows/repository-health-agent.yml'), 'utf8'),
+  );
+  assert.deepEqual(workflow.on.schedule, [{ cron: '0 9 * * 1' }]);
+  assert.equal(workflow.on.workflow_dispatch, null);
+  assert.deepEqual(workflow.permissions, { contents: 'read' });
+  const job = workflow.jobs.inspect;
+  assert.equal(job.if, "${{ vars.SLIPSTREAM_REPOSITORY_HEALTH_AGENT_ENABLED == 'true' }}");
+  assert.equal(job['timeout-minutes'], 10);
+  assert.deepEqual(job.permissions, { contents: 'read' });
+  const checkout = job.steps.find((step) => step.uses?.startsWith('actions/checkout@'));
+  assert.equal(checkout.with.ref, '${{ github.event.repository.default_branch }}');
+  assert.equal(checkout.with['persist-credentials'], false);
+  const review = job.steps.find((step) => step.run?.startsWith('copilot --prompt'));
+  assert.ok(review);
+  assert.match(review.run, /--model gpt-5\.4/);
+  assert.match(review.run, /--available-tools=read,grep,glob/);
+  assert.match(review.run, /--allow-tool=read/);
+  assert.match(review.run, /--allow-tool=grep/);
+  assert.match(review.run, /--allow-tool=glob/);
+  assert.match(review.run, /--deny-tool=write/);
+  assert.match(review.run, /--deny-tool=shell/);
+  assert.match(review.run, /--deny-tool=url/);
+  assert.match(review.run, /--max-autopilot-continues=1/);
+  assert.match(review.run, /--max-ai-credits=30/);
+  assert.ok(Object.hasOwn(job.env, 'COPILOT_GITHUB_TOKEN'));
+  const upload = job.steps.find((step) => step.uses?.startsWith('actions/upload-artifact@'));
+  assert.equal(upload.if, '${{ always() }}');
+  assert.equal(upload.with['retention-days'], 90);
+  for (const step of job.steps) {
+    if (step.uses) assert.match(step.uses, /@[a-f0-9]{40}$/);
+  }
+});
+
 test('PR agent review rendering records pending finding disposition without approval', () => {
   const body = renderPrAgentReview({
     head: 'b'.repeat(40),
