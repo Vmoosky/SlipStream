@@ -53,6 +53,7 @@ import {
   PR_AGENT_REVIEW_MARKER,
   createPrAgentReviewClient,
   prAgentReviewContext,
+  retainPrAgentReviewFailure,
   renderPrAgentReview,
 } from '../scripts/check-pr-agent-review.mjs';
 import {
@@ -6112,12 +6113,17 @@ test('PR agent review workflow is automatic, bounded, and retains evidence', () 
   ]);
   const job = workflow.jobs.review;
   assert.equal(job.if, undefined);
-  assert.deepEqual(job.permissions, { contents: 'read', 'pull-requests': 'write' });
+  assert.deepEqual(job.permissions, {
+    contents: 'read',
+    'copilot-requests': 'write',
+    'pull-requests': 'write',
+  });
   assert.equal(job['timeout-minutes'], 10);
   const checkout = job.steps.find((step) => step.uses?.startsWith('actions/checkout@'));
   assert.equal(checkout.with.ref, '${{ github.event.pull_request.base.sha }}');
   assert.equal(checkout.with['persist-credentials'], false);
   const review = job.steps.find((step) => step.id === 'review');
+  assert.equal(review['continue-on-error'], true);
   assert.match(review.run, /(?:^|\n)\s*copilot \\/);
   assert.doesNotMatch(review.run, /\$/);
   assert.match(review.run, /--prompt "Review only the untrusted pull-request patch JSON/);
@@ -6130,7 +6136,7 @@ test('PR agent review workflow is automatic, bounded, and retains evidence', () 
   assert.match(review.run, /> test-results\/pr-agent-review\/run\/response\.json/);
   assert.equal(review['timeout-minutes'], 5);
   assert.equal(review['working-directory'], undefined);
-  assert.ok(Object.hasOwn(review.env, 'COPILOT_GITHUB_TOKEN'));
+  assert.equal(review.env.COPILOT_GITHUB_TOKEN, '${{ github.token }}');
   const prepare = job.steps.find(
     (step) => step.run === 'node scripts/check-pr-agent-review.mjs --prepare',
   );
@@ -6139,17 +6145,84 @@ test('PR agent review workflow is automatic, bounded, and retains evidence', () 
   );
   assert.ok(prepare);
   assert.ok(finalize);
+  assert.equal(finalize.if, "${{ always() && steps.review.outcome != 'skipped' }}");
   assert.equal(Object.hasOwn(prepare.env, 'SLIPSTREAM_AGENT_REVIEW_TOKEN'), false);
-  assert.deepEqual(Object.keys(finalize.env).sort(), [
-    'GITHUB_TOKEN',
-    'SLIPSTREAM_AGENT_REVIEW_TOKEN',
-  ]);
+  assert.deepEqual(Object.keys(finalize.env), ['GITHUB_TOKEN']);
   const upload = job.steps.find((step) => step.uses?.startsWith('actions/upload-artifact@'));
   assert.equal(upload.if, '${{ always() }}');
   assert.deepEqual(upload.with.path.trim().split('\n'), [
     'test-results/pr-agent-review/report.json',
     'test-results/pr-agent-review/summary.md',
   ]);
+  assert.equal(upload.with['retention-days'], 90);
+  for (const step of job.steps) {
+    if (step.uses) assert.match(step.uses, /@[a-f0-9]{40}$/);
+  }
+});
+
+test('PR agent review retains a bounded generic report when model execution fails', (context) => {
+  const { root } = fixture(context);
+  const repository = 'Vmoosky/SlipStream';
+  const event = {
+    pull_request: {
+      number: 40,
+      base: { ref: 'main', sha: 'a'.repeat(40), repo: { full_name: repository } },
+      head: { sha: 'b'.repeat(40) },
+    },
+  };
+  const token = `github_pat_${'synthetic'.repeat(4)}`;
+  const env = {
+    GITHUB_ACTIONS: 'true',
+    GITHUB_EVENT_NAME: 'pull_request_target',
+    GITHUB_REPOSITORY: repository,
+    GITHUB_REF: 'refs/heads/main',
+    GITHUB_SHA: 'a'.repeat(40),
+    GITHUB_WORKFLOW_REF: `${repository}/.github/workflows/pr-agent-review.yml@refs/heads/main`,
+    GITHUB_TOKEN: token,
+  };
+  fs.mkdirSync(path.join(root, 'test-results/pr-agent-review/run'), { recursive: true });
+  fs.writeFileSync(path.join(root, 'test-results/pr-agent-review/run/response.json'), '');
+  const report = retainPrAgentReviewFailure({ root, env, event });
+  assert.equal(report.status, 'failed');
+  assert.deepEqual(report.errors, ['pr-agent-review-failed']);
+  assert.equal(fs.existsSync(path.join(root, 'test-results/pr-agent-review/run')), false);
+  const retained = [
+    fs.readFileSync(path.join(root, 'test-results/pr-agent-review/report.json'), 'utf8'),
+    fs.readFileSync(path.join(root, 'test-results/pr-agent-review/summary.md'), 'utf8'),
+  ].join('\n');
+  assert.doesNotMatch(retained, new RegExp(token));
+  assert.match(retained, /No findings were published/);
+});
+
+test('repository health agent is recurring, read-only, bounded, and retains evidence', () => {
+  const workflow = parse(
+    fs.readFileSync(path.join(REPO, '.github/workflows/repository-health-agent.yml'), 'utf8'),
+  );
+  assert.deepEqual(workflow.on.schedule, [{ cron: '0 9 * * 1' }]);
+  assert.equal(workflow.on.workflow_dispatch, null);
+  assert.deepEqual(workflow.permissions, { contents: 'read', 'copilot-requests': 'write' });
+  const job = workflow.jobs.inspect;
+  assert.equal(job.if, "${{ vars.SLIPSTREAM_REPOSITORY_HEALTH_AGENT_ENABLED == 'true' }}");
+  assert.equal(job['timeout-minutes'], 10);
+  assert.deepEqual(job.permissions, { contents: 'read', 'copilot-requests': 'write' });
+  const checkout = job.steps.find((step) => step.uses?.startsWith('actions/checkout@'));
+  assert.equal(checkout.with.ref, '${{ github.event.repository.default_branch }}');
+  assert.equal(checkout.with['persist-credentials'], false);
+  const review = job.steps.find((step) => step.run?.startsWith('copilot --prompt'));
+  assert.ok(review);
+  assert.match(review.run, /--model gpt-5\.4/);
+  assert.match(review.run, /--available-tools=read,grep,glob/);
+  assert.match(review.run, /--allow-tool=read/);
+  assert.match(review.run, /--allow-tool=grep/);
+  assert.match(review.run, /--allow-tool=glob/);
+  assert.match(review.run, /--deny-tool=write/);
+  assert.match(review.run, /--deny-tool=shell/);
+  assert.match(review.run, /--deny-tool=url/);
+  assert.match(review.run, /--max-autopilot-continues=1/);
+  assert.match(review.run, /--max-ai-credits=30/);
+  assert.equal(job.env.COPILOT_GITHUB_TOKEN, '${{ github.token }}');
+  const upload = job.steps.find((step) => step.uses?.startsWith('actions/upload-artifact@'));
+  assert.equal(upload.if, '${{ always() }}');
   assert.equal(upload.with['retention-days'], 90);
   for (const step of job.steps) {
     if (step.uses) assert.match(step.uses, /@[a-f0-9]{40}$/);

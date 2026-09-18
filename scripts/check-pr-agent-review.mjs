@@ -270,6 +270,37 @@ export async function finalizePrAgentReviewRun({
   return report;
 }
 
+export function retainPrAgentReviewFailure({ root, env = process.env, event } = {}) {
+  const context = prAgentReviewContext(env, event);
+  const report = {
+    schemaVersion: 1,
+    kind: 'pr-agent-review',
+    status: 'failed',
+    ...context,
+    runtime: AGENT_REVIEW_RUNTIME,
+    limits: AGENT_REVIEW_LIMITS,
+    invocations: 1,
+    retries: 0,
+    publication: 'not-applied',
+    humanApprovalRequired: true,
+    automaticFix: false,
+    errors: ['pr-agent-review-failed'],
+  };
+  const summary = [
+    PR_AGENT_REVIEW_MARKER,
+    '## Bounded Agent Review',
+    '',
+    `Review of commit \`${context.head.slice(0, 12)}\` failed before a validated response was produced.`,
+    'No findings were published. Required checks and independent human approval remain mandatory.',
+  ].join('\n');
+  const reportDirectory = path.join(root, path.dirname(REPORT_PATH));
+  fs.mkdirSync(reportDirectory, { recursive: true });
+  fs.writeFileSync(path.join(root, REPORT_PATH), `${JSON.stringify(report, null, 2)}\n`);
+  fs.writeFileSync(path.join(root, SUMMARY_PATH), `${summary}\n`);
+  fs.rmSync(path.join(root, RUN_PATH), { recursive: true, force: true });
+  return report;
+}
+
 export async function runPrAgentReview({ env = process.env, event, fetcher = fetch } = {}) {
   const startedAt = new Date().toISOString();
   const report = {
@@ -359,9 +390,14 @@ async function main() {
     console.log(JSON.stringify({ status: 'prepared', head: prepared.head }));
     return;
   }
-  const report = await finalizePrAgentReviewRun({ root, event });
-  console.log(JSON.stringify({ status: report.status, decision: report.decision ?? null }));
-  process.exitCode = report.decision === 'no-objection' ? 0 : 1;
+  try {
+    const report = await finalizePrAgentReviewRun({ root, event });
+    console.log(JSON.stringify({ status: report.status, decision: report.decision ?? null }));
+    process.exitCode = report.decision === 'no-objection' ? 0 : 1;
+  } catch (error) {
+    retainPrAgentReviewFailure({ root, event });
+    throw error;
+  }
 }
 
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
