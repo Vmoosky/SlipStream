@@ -583,12 +583,12 @@ Supported Node.js: >=20. The pinned development runtime is in [.node-version](..
 | validate | node scripts/develop.mjs validate |
 | build | npm run build --workspaces --if-present |
 | test | npm run test:scripts && npm run test --workspaces --if-present |
-| test:scripts | node --test tests/dashboard-cli.test.mjs tests/benchmark-report.test.mjs tests/copilot-plugin-install.test.mjs tests/outcome-proof.test.mjs tests/check-docs.test.mjs tests/readiness.test.mjs |
+| test:scripts | node --test tests/dashboard-cli.test.mjs tests/benchmark-report.test.mjs tests/claude-hooks.test.mjs tests/copilot-plugin-install.test.mjs tests/outcome-proof.test.mjs tests/check-docs.test.mjs tests/readiness.test.mjs |
 | test:e2e | playwright test |
 | test:dashboard | npm run test:e2e -- |
 | typecheck | npm run typecheck --workspaces --if-present |
 | lint | eslint . --max-warnings 0 |
-| format:check | prettier --check eslint.config.mjs lint-staged.config.mjs playwright.config.ts scripts/check-*.mjs scripts/develop.mjs scripts/install-hooks.mjs scripts/maintenance.mjs scripts/retire-improvement-rule.mjs tests/check-docs.test.mjs tests/readiness.test.mjs .claude/settings.json .github/hooks/*.json .github/workflows/*.yml .github/branch-protection.yml .github/dependabot.yml .github/labeler.yml .vscode/mcp.json |
+| format:check | prettier --check eslint.config.mjs lint-staged.config.mjs playwright.config.ts scripts/check-*.mjs scripts/develop.mjs scripts/install-hooks.mjs scripts/maintenance.mjs scripts/retire-improvement-rule.mjs tests/check-docs.test.mjs tests/claude-hooks.test.mjs tests/readiness.test.mjs .claude/hooks/*.mjs .claude/settings.json .github/hooks/*.json .github/workflows/*.yml .github/branch-protection.yml .github/dependabot.yml .github/labeler.yml .vscode/mcp.json |
 | check:docs | node scripts/check-docs.mjs |
 | docs:write | node scripts/check-docs.mjs --write |
 | maintenance:docs | node scripts/maintenance.mjs |
@@ -617,5 +617,5 @@ Supported Node.js: >=20. The pinned development runtime is in [.node-version](..
 | precommit | node scripts/develop.mjs precommit |
 | test:coverage | npm run build && npm run test:coverage --workspaces --if-present |
 
-<!-- source-sha256: d3c0f858ba5d4b598f77d24829c09896ef6a44428ccd2ffac6db39ad10d062bd -->
+<!-- source-sha256: 9fa633412204f1a6115e719405381eff8e230a8376983786412664de754a89a0 -->
 <!-- slipstream-reference:build:end -->
