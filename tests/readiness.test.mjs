@@ -1931,6 +1931,7 @@ test('Claude permission guards retain approvals and cover explicit path and forc
     for (const pattern of [
       'git push --force*',
       'git push * --force*',
+      'git push --mirror*',
       'git push -f*',
       'git push * -f*',
       'git push * +*',

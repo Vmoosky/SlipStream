@@ -97,7 +97,7 @@ repository root.
 
 For Bash and PowerShell, deny rules cover direct `git push` commands with
 `--force` (including `--force-with-lease`) before or after the remote, `-f` before
-or after the remote, and explicit forced refspecs such as
+or after the remote, `--mirror`, and explicit forced refspecs such as
 `git push origin +HEAD:main`. Ordinary commits and pushes still require approval.
 Read, Edit, and Write are all specified because their denial effects differ
 between Claude Code versions.
