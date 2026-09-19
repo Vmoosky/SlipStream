@@ -25,6 +25,7 @@ export const AGENT_REVIEW_LIMITS = Object.freeze({
   timeoutMs: 300_000,
   softAiCredits: 30,
   inputBytes: 96 * 1024,
+  eventsBytes: 512 * 1024,
   outputBytes: 64 * 1024,
   usageBytes: 64 * 1024,
   findings: 10,
@@ -249,7 +250,7 @@ export function validatePrAgentReviewResponse(bytes, prepared) {
   let response;
   try {
     const text = new TextDecoder('utf-8', { fatal: true }).decode(bytes).trim();
-    const fenced = /^```json\r?\n([\s\S]*)\r?\n```$/.exec(text);
+    const fenced = /^```(?:json)?\r?\n([\s\S]*)\r?\n```$/i.exec(text);
     response = JSON.parse(fenced ? fenced[1] : text);
   } catch {
     throw invalidPrAgentReviewResponse('json');
