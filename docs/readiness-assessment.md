@@ -19,8 +19,9 @@ that text output can hard-wrap JSON. The PR now supplies the complete prompt on
 standard input, captures machine-readable JSONL, extracts exactly one successful
 no-tools assistant response, and deletes the raw event stream before secret-free
 finalization. For pull requests targeting `main`, `pull_request_target` executes
-the trusted workflow version from that base branch, so success remains unverified
-until a subsequent pull request completes against the post-fix `main` branch.
+the trusted workflow version from that base branch. PR 51 then exercised the
+post-fix implementation: run `35450094897` completed successfully for head
+`7f896d4c9a5c28f4257fed079ca2abeee422285c`.
 
 A runtime success claim therefore requires a fresh pull request against the
 post-fix default branch and all of the following bound evidence:
@@ -34,8 +35,11 @@ post-fix default branch and all of the following bound evidence:
 - the owned advisory PR comment for that head, while required CI, security, and
   independent human approval remain separate controls.
 
-Until that evidence exists, the reviewer is configured but not operationally
-verified. The evaluator's static limitation should not be bypassed with dummy
+Run `35450094897` supplied that evidence: its retained report is bound to PR 51's
+repository, base, head, and input digest; records one invocation, zero retries,
+and resolved model `gpt-5.6-luna`; reports `no-objection`; and records publication
+as applied while preserving mandatory human approval and disabling automatic
+fixes. The evaluator's static limitation should not be bypassed with dummy
 configuration or inferred from filenames.
 
 The remainder of this document preserves the original 2026-09-14 reassessment
