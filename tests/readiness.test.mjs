@@ -6113,6 +6113,13 @@ test('PR agent review accepts only bound structured findings', () => {
   const validate = (value) =>
     validatePrAgentReviewResponse(Buffer.from(JSON.stringify(value)), prepared);
   assert.equal(validate(response).decision, 'no-objection');
+  assert.equal(
+    validatePrAgentReviewResponse(
+      Buffer.from(`\`\`\`json\n${JSON.stringify(response)}\n\`\`\``),
+      prepared,
+    ).decision,
+    'no-objection',
+  );
   const finding = { file: 'README.md', severity: 'warning', message: 'Synthetic concern' };
   assert.equal(
     validate({ ...response, decision: 'changes-requested', findings: [finding] }).findings.length,
@@ -6120,6 +6127,14 @@ test('PR agent review accepts only bound structured findings', () => {
   );
   assert.throws(
     () => validatePrAgentReviewResponse(Buffer.from('not-json'), prepared),
+    (error) => error.responseClass === 'json',
+  );
+  assert.throws(
+    () =>
+      validatePrAgentReviewResponse(
+        Buffer.from(`Result:\n\`\`\`json\n${JSON.stringify(response)}\n\`\`\``),
+        prepared,
+      ),
     (error) => error.responseClass === 'json',
   );
   assert.throws(
