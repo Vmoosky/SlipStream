@@ -390,7 +390,9 @@ export function validateAgentReviewUsage(bytes, requestedModel) {
     !/^[a-z0-9][a-z0-9.-]{0,79}$/.test(resolvedModel ?? '') ||
     resolvedModel === 'auto' ||
     (requestedModel === 'auto' && usage.currentModel !== resolvedModel) ||
-    (requestedModel !== 'auto' && usage.currentModel !== undefined && usage.currentModel !== resolvedModel) ||
+    (requestedModel !== 'auto' &&
+      usage.currentModel !== undefined &&
+      usage.currentModel !== resolvedModel) ||
     (requestedModel !== 'auto' && resolvedModel !== requestedModel) ||
     usage.codeChanges?.linesAdded !== 0 ||
     usage.codeChanges?.linesRemoved !== 0 ||
@@ -725,8 +727,7 @@ function dispositionSource(bytes) {
     typeof report.policy?.model !== 'string' ||
     !/^[a-z0-9][a-z0-9.-]{0,79}$/.test(report.policy.model) ||
     !['automatic', 'explicit'].includes(report.policy.modelSelection) ||
-    report.policy.modelSelection !==
-      (report.policy.model === 'auto' ? 'automatic' : 'explicit') ||
+    report.policy.modelSelection !== (report.policy.model === 'auto' ? 'automatic' : 'explicit') ||
     report.usage?.source !== 'copilot-cli-usage-file' ||
     report.usage?.requestedModel !== report.policy.model ||
     typeof report.usage?.model !== 'string' ||
