@@ -4981,7 +4981,7 @@ test('in-tree branch policy mirrors the enforced main ruleset and required jobs'
     requiredStatusChecks: {
       strict: true,
       requiredOnBranchCreation: true,
-      checks: ['ci-required', 'security-required'],
+      checks: ['ci-required', 'security-required', 'review'],
     },
     bypassActors: [],
   });
@@ -4992,6 +4992,10 @@ test('in-tree branch policy mirrors the enforced main ruleset and required jobs'
   );
   assert.ok(Object.hasOwn(ci.jobs, 'ci-required'));
   assert.ok(Object.hasOwn(security.jobs, 'security-required'));
+  const review = parse(
+    fs.readFileSync(path.join(REPO, '.github/workflows/pr-agent-review.yml'), 'utf8'),
+  );
+  assert.ok(Object.hasOwn(review.jobs, 'review'));
 });
 
 test('CODEOWNERS routes governance and maintained repository surfaces', () => {

@@ -26,5 +26,6 @@ requiredStatusChecks:
   checks:
     - ci-required
     - security-required
+    - review
 
 bypassActors: []
