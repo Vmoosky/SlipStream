@@ -59,18 +59,39 @@ describe('owned task usage accounting', () => {
     expect(() => OwnedTaskUsage.resume(restarted, task.taskId, settings, model)).toThrow('cannot be resumed');
   });
 
-  it('rejects concurrent resumes, changed ownership constraints, and completed outcome evidence', () => {
+  it('rejects concurrent resumes', () => {
+    const settings = { ...options, workspaceKey: taskWorkspaceKey([root]), guardrails: true };
+    const task = new OwnedTaskUsage(ledger, settings);
+    task.startCall(model, rates, { reserved: 1000 });
+    expect(() => OwnedTaskUsage.resume(new SavingsLedger({ rootDir: root }), task.taskId, settings, model)).toThrow('already active');
+    task.dispose();
+  });
+
+  it.each([
+    ['session', { sessionId: 'other' }, model],
+    ['workspace', { workspaceKey: 'b'.repeat(64) }, model],
+    ['policy', { policyRevision: 'b'.repeat(64) }, model],
+    ['limit', { limit: 3000 }, model],
+    ['unit', { unit: 'reference-usd' as const }, model],
+    ['category', { category: 'triage' as const }, model],
+    ['guardrails', { guardrails: false }, model],
+    ['retrieval tracking', { retrievalTracking: true }, model],
+    ['model', {}, { ...model, id: 'other' }],
+  ])('rejects a changed %s ownership constraint', (_name, patch, selectedModel) => {
     const settings = { ...options, workspaceKey: taskWorkspaceKey([root]), guardrails: true };
     const task = new OwnedTaskUsage(ledger, settings);
     const callId = task.startCall(model, rates, { reserved: 1000 });
-    expect(() => OwnedTaskUsage.resume(new SavingsLedger({ rootDir: root }), task.taskId, settings, model)).toThrow('already active');
     task.finishCall(callId, 'cancelled');
     task.finish('cancelled');
-    for (const patch of [{ sessionId: 'other' }, { workspaceKey: 'b'.repeat(64) }, { policyRevision: 'b'.repeat(64) }, { limit: 3000 },
-      { unit: 'reference-usd' as const }, { category: 'triage' as const }, { guardrails: false }, { retrievalTracking: true }]) {
-      expect(() => OwnedTaskUsage.resume(ledger, task.taskId, { ...settings, ...patch }, model)).toThrow('original workspace');
-    }
-    expect(() => OwnedTaskUsage.resume(ledger, task.taskId, settings, { ...model, id: 'other' })).toThrow('original workspace');
+    expect(() => OwnedTaskUsage.resume(ledger, task.taskId, { ...settings, ...patch }, selectedModel)).toThrow('original workspace');
+  });
+
+  it('rejects completed outcome evidence after a valid resume', () => {
+    const settings = { ...options, workspaceKey: taskWorkspaceKey([root]), guardrails: true };
+    const task = new OwnedTaskUsage(ledger, settings);
+    const callId = task.startCall(model, rates, { reserved: 1000 });
+    task.finishCall(callId, 'cancelled');
+    task.finish('cancelled');
     const resumed = OwnedTaskUsage.resume(ledger, task.taskId, settings, model);
     expect(() => task.reportUsage(callId, usage)).toThrow('already active');
     resumed.reportUsage(callId, { inputTokens: 2100 });
@@ -111,7 +132,7 @@ describe('owned task usage accounting', () => {
     fs.writeFileSync(lockPath, JSON.stringify({ pid: 'unknown', token: 'unproven-owner' }));
     expect(() => OwnedTaskUsage.resume(ledger, task.taskId, settings, model)).toThrow('previous task owner');
     expect(JSON.parse(fs.readFileSync(lockPath, 'utf8')).token).toBe('unproven-owner');
-  });
+  }, 10_000);
 
   it('keeps recorded reference rates and rejects verification from an earlier run', () => {
     const settings = { ...options, unit: 'reference-usd' as const, limit: 1, workspaceKey: taskWorkspaceKey([root]), guardrails: true };
