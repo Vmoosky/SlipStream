@@ -58,6 +58,8 @@ test('dangerous-command hook denies destructive shell commands through its confi
   const { project } = fixture(context);
   for (const command of [
     'rm -rf build',
+    'rm -r -f build',
+    'rm --recursive --force build',
     'Remove-Item -Recurse -Force build',
     'git clean -fd',
     'git reset --hard HEAD',

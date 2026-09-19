@@ -18,7 +18,7 @@ if (typeof command === 'string' && isDangerousCommand(command)) {
 
 function isDangerousCommand(command) {
   return [
-    /\brm\s+(?:\S+\s+)*-[^\s]*r[^\s]*f\b/i,
+    /\brm\b(?=[^\r\n;|&]*(?:--recursive\b|-[^\s]*r[^\s]*\b))(?=[^\r\n;|&]*(?:--force\b|-[^\s]*f[^\s]*\b))/i,
     /\bRemove-Item\b(?=[^\r\n;|&]*-(?:Recurse|r)\b)(?=[^\r\n;|&]*-(?:Force|f)\b)/i,
     /\bgit\s+clean\b(?=[^\r\n;|&]*-[^\s]*f)/i,
     /\bgit\s+reset\s+--hard\b/i,
