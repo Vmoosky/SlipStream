@@ -78,6 +78,23 @@ commands with synthetic hook input, never the destructive commands being checked
 Command-pattern blocking is not a sandbox or a complete shell parser; keep
 normal approvals and server-side protections enabled.
 
+### Shared agent memory
+
+[MEMORY.md](MEMORY.md) holds concise, version-controlled project knowledge and an
+optional current handoff for later sessions. The
+[Copilot workspace instructions](.github/copilot-instructions.md) and
+[Claude Code instructions](CLAUDE.md) direct agents to read it at session start.
+Other clients may need it opened explicitly; this is not a custom memory service
+or a guarantee that every client automatically loads it.
+
+Keep memory at most 100 lines, cite verified sources and dates, and recheck notes
+against the current revision before acting. Record only reusable findings and a
+bounded handoff, not secrets, private data, raw transcripts, or generated reports.
+Update it only during authorized editing work, never as a side effect of read-only
+review or validation. Local notes persist in that checkout; sharing them requires
+the normal reviewed commit/push workflow, not automatic publication. Historical
+results in memory do not satisfy current validation or approval requirements.
+
 ### Claude Code project commands
 
 Start Claude Code in the Slipstream checkout to use these explicitly invoked
@@ -1054,6 +1071,18 @@ authenticate GitHub artifacts, establish the truth of claimed timestamps, or
 recompute omitted raw response/usage evidence. Keep the original report and the
 separate decision record for later authenticated verification; no live ledger,
 resolution claim, scheduler, or automatic publication is created by this feature.
+
+To aggregate reviewed disposition records without claiming unavailable evidence,
+run the keep-rate evaluator with report/record pairs:
+
+```sh
+npm run agent:keep-rate -- test-results/maintenance/run-EXAMPLE/agent-review.json test-results/agent-review-dispositions.json
+```
+
+Its `keepRate` is `accepted / (accepted + rejected)`. Deferred and untriaged
+findings are excluded, and `keepRate` is `null` until at least one finding is
+accepted or rejected. The output remains local-consistency-only; it is not a
+production quality, repair-success, or approval metric.
 
 ### Verified Finding-To-Fix Links
 
