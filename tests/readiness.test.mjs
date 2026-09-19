@@ -6118,6 +6118,14 @@ test('PR agent review accepts only bound structured findings', () => {
     validate({ ...response, decision: 'changes-requested', findings: [finding] }).findings.length,
     1,
   );
+  assert.throws(
+    () => validatePrAgentReviewResponse(Buffer.from('not-json'), prepared),
+    (error) => error.responseClass === 'json',
+  );
+  assert.throws(
+    () => validate({ ...response, head: 'c'.repeat(40) }),
+    (error) => error.responseClass === 'binding',
+  );
   for (const invalid of [
     { head: 'c'.repeat(40) },
     { inputSha256: 'd'.repeat(64) },
@@ -6305,9 +6313,9 @@ test('PR agent review retains a bounded generic report when model execution fail
   };
   fs.mkdirSync(path.join(root, 'test-results/pr-agent-review/run'), { recursive: true });
   fs.writeFileSync(path.join(root, 'test-results/pr-agent-review/run/response.json'), '');
-  const report = retainPrAgentReviewFailure({ root, env, event, failurePhase: 'response' });
+  const report = retainPrAgentReviewFailure({ root, env, event, failurePhase: 'response-json' });
   assert.equal(report.status, 'failed');
-  assert.deepEqual(report.errors, ['pr-agent-review-response-failed']);
+  assert.deepEqual(report.errors, ['pr-agent-review-response-json-failed']);
   assert.equal(fs.existsSync(path.join(root, 'test-results/pr-agent-review/run')), false);
   const retained = [
     fs.readFileSync(path.join(root, 'test-results/pr-agent-review/report.json'), 'utf8'),
@@ -6365,7 +6373,8 @@ test('PR agent review classifies invalid final responses without retaining detai
   await assert.rejects(
     () => finalizePrAgentReviewRun({ root, env, event }),
     (error) =>
-      error.message === 'PR agent review finalization failed' && error.reviewPhase === 'response',
+      error.message === 'PR agent review finalization failed' &&
+      error.reviewPhase === 'response-json',
   );
 });
 
