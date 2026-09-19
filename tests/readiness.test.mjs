@@ -15,6 +15,7 @@ import {
   checkAgentSession,
   readHookInput,
 } from '../scripts/check-agent-session.mjs';
+import { calculateKeepRate } from '../scripts/agent/eval/keep-rate.mjs';
 
 import { developmentPlan, runDevelopmentCommand, runDevelopment } from '../scripts/develop.mjs';
 import {
@@ -3501,6 +3502,31 @@ function agentReviewRepairHistory(context) {
     },
   };
 }
+
+test('agent keep rate reports only resolved, locally validated finding dispositions', (context) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'slipstream-keep-rate-'));
+  context.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const review = agentReviewDispositionReport();
+  review.findingIds = agentReviewFindingIds(review);
+  const reportBytes = Buffer.from(`${JSON.stringify(review, null, 2)}\n`);
+  const dispositions = prepareAgentReviewDispositions(reportBytes);
+  dispositions.entries.push({
+    findingId: review.findingIds[0],
+    disposition: 'accepted',
+    reason: 'Synthetic acceptance for aggregation coverage',
+    recordedBy: 'synthetic-reviewer',
+    recordedAt: '2026-09-16T00:00:02.000Z',
+  });
+  fs.writeFileSync(path.join(root, 'review.json'), reportBytes);
+  fs.writeFileSync(path.join(root, 'dispositions.json'), JSON.stringify(dispositions));
+
+  const result = calculateKeepRate([['review.json', 'dispositions.json']], root);
+  assert.equal(result.counts.reports, 1);
+  assert.equal(result.counts.accepted, 1);
+  assert.equal(result.counts.untriaged, review.findingIds.length - 1);
+  assert.equal(result.resolvedFindings, 1);
+  assert.equal(result.keepRate, 1);
+});
 
 function improvementRulePromotionHistory(context) {
   const fixture = agentReviewRepairHistory(context);
