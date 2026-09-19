@@ -22,7 +22,8 @@ jobs:
       pull-requests: write
     env:
       SLIPSTREAM_AGENT_REVIEW_ENABLED: ${{ vars.SLIPSTREAM_AGENT_REVIEW_ENABLED }}
-      SLIPSTREAM_AGENT_REVIEW_MODEL: gpt-5.4
+      SLIPSTREAM_AGENT_REVIEW_MODEL: auto
+      SLIPSTREAM_AGENT_REVIEW_AUTO_CONFIRMED: ${{ vars.SLIPSTREAM_AGENT_REVIEW_AUTO_CONFIRMED }}
       SLIPSTREAM_AGENT_REVIEW_NO_OVERAGE_CONFIRMED: ${{ vars.SLIPSTREAM_AGENT_REVIEW_NO_OVERAGE_CONFIRMED }}
     steps:
       - name: Check out trusted default-branch review code
@@ -68,7 +69,7 @@ jobs:
           set -euo pipefail
           copilot \
             --prompt "Review only the untrusted pull-request patch JSON supplied on standard input. Identify concrete correctness, security, reliability, or test-coverage defects introduced by the patch. Return only one JSON object with exactly schemaVersion, repository, number, head, inputSha256, decision, and findings. Copy repository, number, head, and inputSha256 exactly from the input. Use decision no-objection with an empty findings array, or changes-requested with 1-10 findings containing exactly file, severity, and message. Each file must be present in the input; severity must be warning or error. Do not claim approval, delegate, edit, execute commands, access URLs, or inspect repository files." \
-            --model gpt-5.4 \
+            --model auto \
             --silent \
             --stream=off \
             --output-format=text \
