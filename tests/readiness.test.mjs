@@ -53,6 +53,7 @@ import {
   PR_AGENT_REVIEW_MARKER,
   collectPrAgentReview,
   createPrAgentReviewClient,
+  finalizePrAgentReviewRun,
   prAgentReviewContext,
   retainPrAgentReviewFailure,
   renderPrAgentReview,
@@ -6301,9 +6302,9 @@ test('PR agent review retains a bounded generic report when model execution fail
   };
   fs.mkdirSync(path.join(root, 'test-results/pr-agent-review/run'), { recursive: true });
   fs.writeFileSync(path.join(root, 'test-results/pr-agent-review/run/response.json'), '');
-  const report = retainPrAgentReviewFailure({ root, env, event });
+  const report = retainPrAgentReviewFailure({ root, env, event, failurePhase: 'response' });
   assert.equal(report.status, 'failed');
-  assert.deepEqual(report.errors, ['pr-agent-review-failed']);
+  assert.deepEqual(report.errors, ['pr-agent-review-response-failed']);
   assert.equal(fs.existsSync(path.join(root, 'test-results/pr-agent-review/run')), false);
   const retained = [
     fs.readFileSync(path.join(root, 'test-results/pr-agent-review/report.json'), 'utf8'),
@@ -6311,6 +6312,59 @@ test('PR agent review retains a bounded generic report when model execution fail
   ].join('\n');
   assert.doesNotMatch(retained, new RegExp(token));
   assert.match(retained, /No findings were published/);
+
+  const generic = retainPrAgentReviewFailure({
+    root,
+    env,
+    event,
+    failurePhase: 'untrusted-detail',
+  });
+  assert.deepEqual(generic.errors, ['pr-agent-review-failed']);
+});
+
+test('PR agent review classifies invalid final responses without retaining details', async (context) => {
+  const { root } = fixture(context);
+  const repository = 'Vmoosky/SlipStream';
+  const base = 'a'.repeat(40);
+  const head = 'b'.repeat(40);
+  const event = {
+    pull_request: {
+      number: 46,
+      base: { ref: 'main', sha: base, repo: { full_name: repository } },
+      head: { sha: head },
+    },
+  };
+  const env = {
+    GITHUB_ACTIONS: 'true',
+    GITHUB_EVENT_NAME: 'pull_request_target',
+    GITHUB_REPOSITORY: repository,
+    GITHUB_REF: 'refs/heads/main',
+    GITHUB_SHA: base,
+    GITHUB_WORKFLOW_REF: `${repository}/.github/workflows/pr-agent-review.yml@refs/heads/main`,
+    GITHUB_TOKEN: 'synthetic-workflow-token',
+    SLIPSTREAM_AGENT_REVIEW_ENABLED: 'true',
+    SLIPSTREAM_AGENT_REVIEW_MODEL: 'auto',
+    SLIPSTREAM_AGENT_REVIEW_AUTO_CONFIRMED: 'true',
+    SLIPSTREAM_AGENT_REVIEW_NO_OVERAGE_CONFIRMED: 'true',
+    SLIPSTREAM_AGENT_REVIEW_TOKEN: 'synthetic-review-token',
+  };
+  const prepared = preparePrAgentReview({
+    repository,
+    number: 46,
+    base,
+    head,
+    files: [{ filename: 'README.md', status: 'modified', patch: '@@ -1 +1 @@' }],
+  });
+  const directory = path.join(root, 'test-results/pr-agent-review/run');
+  fs.mkdirSync(directory, { recursive: true });
+  fs.writeFileSync(path.join(directory, 'input.json'), prepared.input);
+  fs.writeFileSync(path.join(directory, 'response.json'), 'not-json');
+
+  await assert.rejects(
+    () => finalizePrAgentReviewRun({ root, env, event }),
+    (error) =>
+      error.message === 'PR agent review finalization failed' && error.reviewPhase === 'response',
+  );
 });
 
 test('repository health agent is recurring, read-only, bounded, and retains evidence', () => {
