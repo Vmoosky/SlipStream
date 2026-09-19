@@ -25,8 +25,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "node",
-            "args": ["${CLAUDE_PROJECT_DIR}/.claude/hooks/block-dangerous-command.mjs"],
+            "command": "node \"${CLAUDE_PROJECT_DIR}/.claude/hooks/block-dangerous-command.mjs\"",
             "timeout": 5
           }
         ]
@@ -38,8 +37,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "node",
-            "args": ["${CLAUDE_PROJECT_DIR}/.claude/hooks/format-edited-file.mjs"],
+            "command": "node \"${CLAUDE_PROJECT_DIR}/.claude/hooks/format-edited-file.mjs\"",
             "timeout": 30
           }
         ]

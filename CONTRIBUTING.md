@@ -68,6 +68,16 @@ locked manifest, and repository-scoped working directory without writing files o
 logging hook input. These controls do not grant publication, merge, secret, or
 user-store access, and they do not replace `npm run validate` or human review.
 
+Both Claude command hooks put the complete invocation in `command`, quoting the
+script path under `CLAUDE_PROJECT_DIR` so checkouts with spaces work. This uses
+the default Bash hook shell, including Git Bash on Windows; Node must be on its
+`PATH`. It does not require separate executable-argument fields or a model call
+to test the hook wiring. The pre-tool hook has a five-second deadline and the
+post-tool hook a thirty-second deadline. Regression tests run the configured
+commands with synthetic hook input, never the destructive commands being checked.
+Command-pattern blocking is not a sandbox or a complete shell parser; keep
+normal approvals and server-side protections enabled.
+
 ### Claude Code project commands
 
 Start Claude Code in the Slipstream checkout to use these explicitly invoked

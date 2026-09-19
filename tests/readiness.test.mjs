@@ -1879,7 +1879,33 @@ test('Claude project commands are manual and reuse existing repository workflows
 test('agent harness configurations are bounded, non-publishing, and workspace-scoped', async () => {
   const claude = JSON.parse(fs.readFileSync(path.join(REPO, '.claude/settings.json'), 'utf8'));
   assert.equal(claude.$schema, 'https://json.schemastore.org/claude-code-settings.json');
-  assert.deepEqual(Object.keys(claude).sort(), ['$schema', 'permissions']);
+  assert.deepEqual(Object.keys(claude).sort(), ['$schema', 'hooks', 'permissions']);
+  assert.deepEqual(claude.hooks, {
+    PreToolUse: [
+      {
+        matcher: 'Bash|PowerShell',
+        hooks: [
+          {
+            type: 'command',
+            command: 'node "${CLAUDE_PROJECT_DIR}/.claude/hooks/block-dangerous-command.mjs"',
+            timeout: 5,
+          },
+        ],
+      },
+    ],
+    PostToolUse: [
+      {
+        matcher: 'Edit|Write',
+        hooks: [
+          {
+            type: 'command',
+            command: 'node "${CLAUDE_PROJECT_DIR}/.claude/hooks/format-edited-file.mjs"',
+            timeout: 30,
+          },
+        ],
+      },
+    ],
+  });
   assert.equal(claude.permissions.allow, undefined);
   for (const tool of ['Bash', 'PowerShell']) {
     assert.ok(claude.permissions.ask.includes(`${tool}(git commit *)`));
@@ -2261,6 +2287,9 @@ test('development runner and hook configuration retain LF in Windows-style Git c
     '.husky/pre-commit',
     '.github/labeler.yml',
     '.pre-commit-config.yaml',
+    '.claude/hooks/block-dangerous-command.mjs',
+    '.claude/hooks/format-edited-file.mjs',
+    'tests/claude-hooks.test.mjs',
   ];
   const checkout = path.join(root, 'windows checkout');
   fs.copyFileSync(path.join(REPO, '.gitattributes'), path.join(root, '.gitattributes'));
