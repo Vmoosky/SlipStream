@@ -8,7 +8,9 @@ Slipstream already compares CI symptoms, verifies registered named regressions,
 and links accepted advisory findings to independently reviewed repairs. Those
 results do not by themselves feed a reusable lesson into later reviews. The
 bounded reviewer must retain its no-tools, no-publication, first-attempt weekly
-schedule and explicit model/billing authorization.
+schedule and explicit model/billing authorization. Automatic model selection
+requires separate owner confirmation, and retained usage evidence must bind it
+to one concrete resolved model.
 
 ## Decision
 
