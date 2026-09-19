@@ -3,16 +3,11 @@ import process from 'node:process';
 const input = await readInput();
 const command = input?.tool_input?.command;
 
-if (typeof command === 'string' && isDangerousCommand(command)) {
-  process.stdout.write(
-    JSON.stringify({
-      hookSpecificOutput: {
-        hookEventName: 'PreToolUse',
-        permissionDecision: 'deny',
-        permissionDecisionReason:
-          'Blocked destructive shell command. Use a targeted, reversible operation instead.',
-      },
-    }),
+if (!input || (typeof command === 'string' && isDangerousCommand(command))) {
+  denyCommand(
+    input
+      ? 'Blocked destructive shell command. Use a targeted, reversible operation instead.'
+      : 'Blocked command because the hook input was invalid.',
   );
 }
 
@@ -38,4 +33,16 @@ async function readInput() {
   } catch {
     return undefined;
   }
+}
+
+function denyCommand(permissionDecisionReason) {
+  process.stdout.write(
+    JSON.stringify({
+      hookSpecificOutput: {
+        hookEventName: 'PreToolUse',
+        permissionDecision: 'deny',
+        permissionDecisionReason,
+      },
+    }),
+  );
 }

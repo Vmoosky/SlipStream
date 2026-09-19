@@ -36,18 +36,20 @@ function fixture(context) {
   return { directory, project };
 }
 
-function runHook(event, toolInput, project, inputDirectory = project) {
+function runHook(event, toolInput, project, inputDirectory = project, rawInput) {
   const hook = settings.hooks[event][0].hooks[0];
   return spawnSync(bash, ['--noprofile', '--norc', '-c', hook.command], {
     cwd: project,
     env: { ...process.env, CLAUDE_PROJECT_DIR: project },
     encoding: 'utf8',
-    input: JSON.stringify({
-      hook_event_name: event,
-      tool_name: event === 'PreToolUse' ? 'Bash' : 'Write',
-      cwd: inputDirectory,
-      tool_input: toolInput,
-    }),
+    input:
+      rawInput ??
+      JSON.stringify({
+        hook_event_name: event,
+        tool_name: event === 'PreToolUse' ? 'Bash' : 'Write',
+        cwd: inputDirectory,
+        tool_input: toolInput,
+      }),
     timeout: 35_000,
     maxBuffer: 1024 * 1024,
     windowsHide: true,
@@ -78,6 +80,14 @@ test('dangerous-command hook leaves safe shell commands to normal permissions', 
 
   assert.equal(result.status, 0, `${result.error ?? ''}\n${result.stderr}`);
   assert.equal(result.stdout, '');
+});
+
+test('dangerous-command hook denies malformed input', (context) => {
+  const { project } = fixture(context);
+  const result = runHook('PreToolUse', undefined, project, project, '{');
+
+  assert.equal(result.status, 0, `${result.error ?? ''}\n${result.stderr}`);
+  assert.equal(JSON.parse(result.stdout).hookSpecificOutput.permissionDecision, 'deny');
 });
 
 test('configured formatting hook formats an edited file in a project path with spaces', (context) => {
