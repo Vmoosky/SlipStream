@@ -69,22 +69,22 @@ packages/mcp-server      stdio MCP server
 construct a `CompressionEngine` and feed it text, which is why their savings
 numbers are directly comparable (`engine.ts:186-190`).
 
-| Module | Responsibility |
-| --- | --- |
-| `engine.ts` | Orchestration. Owns the pipeline, the pay-for-itself rule, ledger writes. |
-| `artifactStore.ts` | Content-addressed store of original bytes; retention and eviction. |
-| `savingsLedger.ts` | Append-only JSONL record of every event; aggregation. |
-| `contentRouter.ts` | Cheap content sniffing — picks which compressor family applies. |
-| `compressors/` | The strategies themselves, plus the registry that orders them. |
-| `markers.ts` | Marker rendering, parsing, and sanitisation of untrusted input. |
-| [dashboard.ts](../packages/core/src/dashboard.ts) | Payload construction, shared webview/browser page, and engine-facing report entry points. |
+| Module                                                          | Responsibility                                                                                                  |
+| --------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------- |
+| `engine.ts`                                                     | Orchestration. Owns the pipeline, the pay-for-itself rule, ledger writes.                                       |
+| `artifactStore.ts`                                              | Content-addressed store of original bytes; retention and eviction.                                              |
+| `savingsLedger.ts`                                              | Append-only JSONL record of every event; aggregation.                                                           |
+| `contentRouter.ts`                                              | Cheap content sniffing — picks which compressor family applies.                                                 |
+| `compressors/`                                                  | The strategies themselves, plus the registry that orders them.                                                  |
+| `markers.ts`                                                    | Marker rendering, parsing, and sanitisation of untrusted input.                                                 |
+| [dashboard.ts](../packages/core/src/dashboard.ts)               | Payload construction, shared webview/browser page, and engine-facing report entry points.                       |
 | [dashboardReports.ts](../packages/core/src/dashboardReports.ts) | Pure Markdown, JSON, and CSV formatting of a captured summary and explicit timestamp; no engine or clock reads. |
-| [dashboardServer.ts](../packages/core/src/dashboardServer.ts) | Local HTTP transport and access control. |
-| `modelTelemetry.ts` | OTLP receiver, observation parsing, source labelling. |
-| `pricing*.ts`, `costPolicy.ts`, `taskUsage.ts` | Cost estimation and policy. |
-| `ownedPolicy.ts`, `adaptiveCompression.ts` | Owned-task model/profile guards and the bounded outcome-driven compression feedback loop. |
-| `health.ts` | The checks behind `doctor` and the VS Code health command. |
-| `security/paths.ts` | Workspace-root enforcement for file reads. |
+| [dashboardServer.ts](../packages/core/src/dashboardServer.ts)   | Local HTTP transport and access control.                                                                        |
+| `modelTelemetry.ts`                                             | OTLP receiver, observation parsing, source labelling.                                                           |
+| `pricing*.ts`, `costPolicy.ts`, `taskUsage.ts`                  | Cost estimation and policy.                                                                                     |
+| `ownedPolicy.ts`, `adaptiveCompression.ts`                      | Owned-task model/profile guards and the bounded outcome-driven compression feedback loop.                       |
+| `health.ts`                                                     | The checks behind `doctor` and the VS Code health command.                                                      |
+| `security/paths.ts`                                             | Workspace-root enforcement for file reads.                                                                      |
 
 ## 4. Lifecycle of one tool call
 
@@ -92,7 +92,7 @@ The path every compression takes, in `compressBlob` (`engine.ts:701-826`):
 
 1. **Sanitise** — strip marker-shaped text from the untrusted payload.
 2. **Normalise** — strip ANSI escapes. Done before routing so every downstream
-   compressor sees clean lines. `tokensBefore` is measured on the *raw* text, so
+   compressor sees clean lines. `tokensBefore` is measured on the _raw_ text, so
    removing escape codes counts as a real saving rather than being hidden.
 3. **Measure the baseline** — `tokensBefore` / `bytesBefore`. For command output
    the baseline includes the echoed command header, because a terminal would
@@ -102,8 +102,8 @@ The path every compression takes, in `compressBlob` (`engine.ts:701-826`):
    matches and whose `compress` returns a plan (`compressorRegistry.ts:129-145`).
    A plan is a list of `kept` / `omitted` line ranges, plus optionally a
    rewritten `artifactText` that those ranges index into.
-5. **Refine against the tokenizer** — compressors decide in *lines*, but markers
-   cost *tokens*. `refineSegmentsByTokens` reverts any omitted run too cheap to
+5. **Refine against the tokenizer** — compressors decide in _lines_, but markers
+   cost _tokens_. `refineSegmentsByTokens` reverts any omitted run too cheap to
    pay for its own marker (`tokenBudget.ts:58`). Purely additive to fidelity.
 6. **Store** — the artifact text is written and content-addressed. Identical
    content deduplicates to the same id (`artifactStore.ts:83-106`).
@@ -111,7 +111,7 @@ The path every compression takes, in `compressBlob` (`engine.ts:701-826`):
    and surviving lines are run through cross-turn dedup (`engine.ts:828-859`).
 8. **Decide whether it paid** — if the result is not at least 10% smaller, throw
    it away and send the raw text instead (`engine.ts:928-945`).
-9. **Record** — write a ledger entry including the markers *actually* present in
+9. **Record** — write a ledger entry including the markers _actually_ present in
    the returned payload, and store the rendered output so the dashboard can show
    input and output side by side.
 
@@ -163,11 +163,11 @@ Two consequences worth knowing:
 All three build the same engine. They differ in how they intercept output and
 whether they capture model telemetry.
 
-| | Interception | Engine lifetime | Model telemetry |
-| --- | --- | --- | --- |
-| VS Code | `vscode.lm` tools | one root + per-request children | yes |
-| Copilot CLI | `postToolUse` hook rewrites the result | per-session, in the daemon | yes, opt-in |
-| MCP server | MCP tools over stdio | one per process | no |
+|             | Interception                           | Engine lifetime                 | Model telemetry |
+| ----------- | -------------------------------------- | ------------------------------- | --------------- |
+| VS Code     | `vscode.lm` tools                      | one root + per-request children | yes             |
+| Copilot CLI | `postToolUse` hook rewrites the result | per-session, in the daemon      | yes, opt-in     |
+| MCP server  | MCP tools over stdio                   | one per process                 | no              |
 
 ### 6.1 VS Code extension
 
@@ -186,7 +186,7 @@ hosts:
   `slipstream_getSavings`, all referenceable in prompts. Compression happens
   in-process.
 - **`@slipstream` chat participant** (`chatParticipant.ts:239-240`) — the
-  opt-in *owned-task* path. Builds a fresh per-request engine with
+  opt-in _owned-task_ path. Builds a fresh per-request engine with
   `host: 'owned-chat'`, meters tokens against a policy, and caps at 40 tool calls
   / 20 model rounds. This is the only path that can enforce a cost policy,
   because it is the only one that owns the request.
@@ -211,17 +211,17 @@ npm run install:copilot-plugin            # compression only
 npm run install:copilot-plugin:tracking   # and enable model tracking
 ```
 
-Installation goes through a *local marketplace* rather than a directory install,
+Installation goes through a _local marketplace_ rather than a directory install,
 because Copilot CLI 1.0.x will not accept a local path in `plugin install`
 (`scripts/registerCopilotCli.mjs:5-8`).
 
 The plugin registers three hooks (`copilot-plugin/hooks.json`):
 
-| Event | Timeout | What it does |
-| --- | --- | --- |
-| `userPromptSubmitted` | 5 s | records a chat event; warms the daemon |
-| `postToolUse` | 30 s | compresses and **rewrites** the tool result |
-| `sessionEnd` | 5 s | releases that session's engine |
+| Event                 | Timeout | What it does                                |
+| --------------------- | ------- | ------------------------------------------- |
+| `userPromptSubmitted` | 5 s     | records a chat event; warms the daemon      |
+| `postToolUse`         | 30 s    | compresses and **rewrites** the tool result |
+| `sessionEnd`          | 5 s     | releases that session's engine              |
 
 `postToolUse` returns `{ modifiedResult: { textResultForLlm } }` to replace the
 tool's output (`hook.ts:29-45`). On any failure the hook writes `{}` so the
@@ -243,7 +243,7 @@ receiver.
   home directory (`daemon.ts:74-80`).
 - **Startup:** the hook client tries to connect; on failure it spawns a detached
   daemon and polls for up to 3.5 s (`index.ts:80-105`).
-- **Ordering matters:** the daemon binds the telemetry receiver *before* it
+- **Ordering matters:** the daemon binds the telemetry receiver _before_ it
   accepts on the pipe. Doing it the other way round let the first hook return
   before the receiver existed, so a cold session's opening model calls were
   exported to an unbound port and lost (`daemon.ts:175-189`).
@@ -266,7 +266,7 @@ Six checks (`doctor.ts:103-130`): runtime install, daemon reachability, storage
 writable, a **byte-exact compress→retrieve round trip**, recent traffic, and
 model-tracking state. Warnings are tolerated; only failures are fatal.
 
-Note that `doctor` reports the *configured* tracking endpoint rather than
+Note that `doctor` reports the _configured_ tracking endpoint rather than
 probing it, so it can read green while nothing is listening.
 
 ### 6.3 MCP server
@@ -315,7 +315,7 @@ so failures are diagnosable rather than silent (`modelTelemetry.ts:243-310`).
 writes Copilot's `github.copilot.chat.otel` settings for you.
 
 **CLI:** consent is recorded in `model-tracking.json`; the exporter variables
-must be exported in the shell *before* `copilot` starts:
+must be exported in the shell _before_ `copilot` starts:
 
 ```bash
 node packages/copilot-plugin/dist/hook.js model-tracking enable
@@ -332,7 +332,7 @@ Two labels that are easy to conflate:
 - **`scope`** is `Conversation` or `Background`, derived from whether the
   observation carries a conversation id (`dashboard.ts:835`). Background calls
   are auxiliary model traffic — title generation, intent detection — which can
-  dominate call *counts* while being a rounding error in *tokens*.
+  dominate call _counts_ while being a rounding error in _tokens_.
 
 ## 8. Dashboard
 
@@ -349,7 +349,7 @@ The VS Code extension starts one automatically when `dashboardServer` is enabled
 
 Because the dashboard reads the shared ledger rather than talking to producers,
 it works when nothing else is running — and, conversely, an empty dashboard
-means nothing *wrote*, not that the dashboard is broken.
+means nothing _wrote_, not that the dashboard is broken.
 
 ## 9. Configuration
 
@@ -359,11 +359,11 @@ its own settings onto it. Resolution order is
 
 Three profiles (`compressionProfiles.ts:9-30`):
 
-| | `conservative` | `balanced` (default) | `aggressive` |
-| --- | --- | --- | --- |
-| `maxFileLines` | 2400 | 1200 | 600 |
-| log head/tail | 12 / 60 | 6 / 30 | 3 / 15 |
-| code `minLines` | 120 | 60 | 40 |
+|                 | `conservative` | `balanced` (default) | `aggressive` |
+| --------------- | -------------- | -------------------- | ------------ |
+| `maxFileLines`  | 2400           | 1200                 | 600          |
+| log head/tail   | 12 / 60        | 6 / 30               | 3 / 15       |
+| code `minLines` | 120            | 60                   | 40           |
 
 What makes a profile more or less aggressive is the **per-compressor
 thresholds**, not the token-budget setting — `minNetTokenGain` is a safety net
@@ -431,8 +431,8 @@ known-correct fix is applied to a scratch copy and both tests and build must pas
 
 Replaying fixed bytes is the whole point. Two live agent runs issue different
 tool calls, so any token delta between them measures the agent's choices, not
-compression. That is also why per-arm agent success rate is reported as *not
-covered* rather than estimated.
+compression. That is also why per-arm agent success rate is reported as _not
+covered_ rather than estimated.
 
 Every emitted marker is expanded and asserted byte-exact, and the recovered
 tokens are charged back as retrieval overhead.
@@ -452,17 +452,17 @@ vitest emits ~1,490 escape sequences even under `spawnSync` with no TTY. A singl
 "89% saved" figure would therefore be mostly terminal colour.
 
 So the gate scores compressors against **normalized** input (~71% here), which is
-the honest claim, and a regression test asserts that an ANSI-only win *fails*.
+the honest claim, and a regression test asserts that an ANSI-only win _fails_.
 
 ### Gate
 
-| Check | Bar |
-| --- | --- |
-| Ground-truth task verified | workload tests and build green with the fix applied |
-| Compression vs normalized input | ≥ 10% |
-| Still ahead after retrieval | net > 0 at a declared 30% expansion rate |
-| Added latency | p95 ≤ 250 ms |
-| Reproducibility | forwarded-token stdDev = 0 across runs |
+| Check                           | Bar                                                 |
+| ------------------------------- | --------------------------------------------------- |
+| Ground-truth task verified      | workload tests and build green with the fix applied |
+| Compression vs normalized input | ≥ 10%                                               |
+| Still ahead after retrieval     | net > 0 at a declared 30% expansion rate            |
+| Added latency                   | p95 ≤ 250 ms                                        |
+| Reproducibility                 | forwarded-token stdDev = 0 across runs              |
 
 Worst-case retrieval (`worst`) is reported but deliberately **not** gated:
 expanding every marker is break-even minus marker overhead by construction, so
@@ -472,14 +472,14 @@ gating on it would mean gating on "compression never helps".
 
 The JSON carries a `notCovered` block rather than simulating what it cannot
 measure: per-arm agent success rate, end-to-end latency including model time (so
-HC-08's 10% task-latency allowance is *not* evaluated), a cheaper model actually
+HC-08's 10% task-latency allowance is _not_ evaluated), a cheaper model actually
 selected (HC-05), a budget changing an owned action (HC-06), and a
 feedback-triggered rollback (HC-07). The policy arm is labelled a simulation — it
 applies the profile the pressure guard would select, because in a non-owned host
 the policy is advisory. Reference cost uses a declared constant rate, which
 supports a token-efficiency claim only, not measured financial ROI.
 
-Two operational notes: token counts are reproducible *within* an invocation, but
+Two operational notes: token counts are reproducible _within_ an invocation, but
 each invocation re-captures the workload and the captured output embeds test
 durations, so figures move slightly between invocations by design. And the
 latency check is the only non-deterministic gate — it has been observed at 187 ms
@@ -548,13 +548,13 @@ Missing or substituted documents, changes, or identities fail `ci-required` on
 both browser-proof platforms. With no comparison base, initial pushes and manual
 runs inventory the complete tree as additions, not an observed prior-run delta.
 
-| Surface | Deterministic Coverage | Residual Review |
-| --- | --- | --- |
-| [Build reference](#build-and-script-reference) | Root and workspace manifest digests, scripts, runtime and workspace mapping | Build behavior is verified by CI, not by the reference text |
-| [Extension reference](../packages/extension/README.md#commands-and-settings-reference) | Full manifest digest, command IDs, tool inputs and setting defaults | User-facing descriptions and runtime behavior |
-| [MCP reference](mcp.md#mcp-launch-reference) | Registry, plugin and package digests; launch arguments, modes and tools | Live client/provider behavior |
-| Repository Markdown and agent index | Local links and anchors; JSON/JSONC syntax and cost-policy examples, including unchanged inbound links after deletions | External links, narrative behavior and live-provider claims |
-| Static npm examples | Existing scripts and workspace selectors, prefix/relative working directories, script arguments after `--`; no execution | Dynamic/unsupported shell forms are listed in `manualExamples`; script behavior still requires tests |
+| Surface                                                                                | Deterministic Coverage                                                                                                   | Residual Review                                                                                      |
+| -------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------ | ---------------------------------------------------------------------------------------------------- |
+| [Build reference](#build-and-script-reference)                                         | Root and workspace manifest digests, scripts, runtime and workspace mapping                                              | Build behavior is verified by CI, not by the reference text                                          |
+| [Extension reference](../packages/extension/README.md#commands-and-settings-reference) | Full manifest digest, command IDs, tool inputs and setting defaults                                                      | User-facing descriptions and runtime behavior                                                        |
+| [MCP reference](mcp.md#mcp-launch-reference)                                           | Registry, plugin and package digests; launch arguments, modes and tools                                                  | Live client/provider behavior                                                                        |
+| Repository Markdown and agent index                                                    | Local links and anchors; JSON/JSONC syntax and cost-policy examples, including unchanged inbound links after deletions   | External links, narrative behavior and live-provider claims                                          |
+| Static npm examples                                                                    | Existing scripts and workspace selectors, prefix/relative working directories, script arguments after `--`; no execution | Dynamic/unsupported shell forms are listed in `manualExamples`; script behavior still requires tests |
 
 Check mode never edits documentation. `npm run docs:write` updates only designated reference
 blocks, and a second write must make no further changes. Tests compare the
@@ -595,6 +595,7 @@ Supported Node.js: >=20. The pinned development runtime is in [.node-version](..
 | improvement:report | node scripts/check-improvement.mjs |
 | improvement:rollback | node scripts/retire-improvement-rule.mjs |
 | improvement:rollback-repair | node scripts/check-remediation-rollback.mjs |
+| agent:keep-rate | node scripts/agent/eval/keep-rate.mjs |
 | benchmark:snapshot | node scripts/benchmark.mjs --markdown |
 | benchmark:recommendations | node scripts/benchmark.mjs --model-recommendations |
 | proof-table | node scripts/proof-table.mjs |
@@ -616,5 +617,5 @@ Supported Node.js: >=20. The pinned development runtime is in [.node-version](..
 | precommit | node scripts/develop.mjs precommit |
 | test:coverage | npm run build && npm run test:coverage --workspaces --if-present |
 
-<!-- source-sha256: 6d256818f029bc390b6f26a69870625887720b19bee8e8242395c31fa000a323 -->
+<!-- source-sha256: d3c0f858ba5d4b598f77d24829c09896ef6a44428ccd2ffac6db39ad10d062bd -->
 <!-- slipstream-reference:build:end -->
