@@ -13,10 +13,10 @@ if (!input || (typeof command === 'string' && isDangerousCommand(command))) {
 
 function isDangerousCommand(command) {
   return [
-    /\b(?:rm|Remove-Item)\b(?=[^\r\n;|&]*(?:--recursive\b|-(?:Recurse|r)\b|-[^\s]*r[^\s]*\b))/i,
-    /\bgit\s+clean\b(?=[^\r\n;|&]*-[^\s]*f)/i,
+    /\b(?:rm|Remove-Item)\b(?=[^;|&]*(?:--recursive\b|-(?:Recurse|r)\b|-[^\s]*r[^\s]*\b))/i,
+    /\bgit\s+clean\b(?=[^;|&]*-[^\s]*f)/i,
     /\bgit\s+reset\s+--hard\b/i,
-    /\bgit\s+push\b(?=[^\r\n;|&]*(?:--force(?:-with-lease)?\b|-[^\s]*f[^\s]*\b|\+\S+))/i,
+    /\bgit\s+push\b(?=[^;|&]*(?:--force(?:-with-lease)?\b|-[^\s]*f[^\s]*\b|\+\S+))/i,
   ].some((pattern) => pattern.test(command));
 }
 
