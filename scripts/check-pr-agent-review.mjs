@@ -21,9 +21,16 @@ export const PR_AGENT_REVIEW_MARKER = '<!-- slipstream-pr-agent-review:v1 -->';
 const REPORT_PATH = 'test-results/pr-agent-review/report.json';
 const SUMMARY_PATH = 'test-results/pr-agent-review/summary.md';
 const RUN_PATH = 'test-results/pr-agent-review/run';
+const RETAINED_FAILURE_PHASES = new Set(['response', 'usage', 'publication']);
 
 function requireReview(condition) {
   if (!condition) throw new Error('Invalid or incomplete PR agent review evidence');
+}
+
+function finalizationFailure(phase) {
+  const error = new Error('PR agent review finalization failed');
+  error.reviewPhase = phase;
+  return error;
 }
 
 function sha256(value) {
@@ -229,11 +236,21 @@ export async function finalizePrAgentReviewRun({
     AGENT_REVIEW_LIMITS.outputBytes,
   );
   requireReview(!responseBytes.includes(env.SLIPSTREAM_AGENT_REVIEW_TOKEN));
-  const response = validatePrAgentReviewResponse(responseBytes, prepared);
-  const usage = validateAgentReviewUsage(
-    readBounded(path.join(directory, 'usage.json'), AGENT_REVIEW_LIMITS.usageBytes),
-    policy.model,
-  );
+  let response;
+  try {
+    response = validatePrAgentReviewResponse(responseBytes, prepared);
+  } catch {
+    throw finalizationFailure('response');
+  }
+  let usage;
+  try {
+    usage = validateAgentReviewUsage(
+      readBounded(path.join(directory, 'usage.json'), AGENT_REVIEW_LIMITS.usageBytes),
+      policy.model,
+    );
+  } catch {
+    throw finalizationFailure('usage');
+  }
   const ids = prAgentReviewFindingIds(prepared, response);
   const report = {
     schemaVersion: 1,
@@ -262,7 +279,11 @@ export async function finalizePrAgentReviewRun({
     automaticFix: false,
   };
   const client = createPrAgentReviewClient(context.repository, env.GITHUB_TOKEN, fetcher);
-  await publishPrAgentReview(report, client);
+  try {
+    await publishPrAgentReview(report, client);
+  } catch {
+    throw finalizationFailure('publication');
+  }
   const reportDirectory = path.join(root, path.dirname(REPORT_PATH));
   fs.mkdirSync(reportDirectory, { recursive: true });
   fs.writeFileSync(path.join(root, REPORT_PATH), `${JSON.stringify(report, null, 2)}\n`);
@@ -271,8 +292,11 @@ export async function finalizePrAgentReviewRun({
   return report;
 }
 
-export function retainPrAgentReviewFailure({ root, env = process.env, event } = {}) {
+export function retainPrAgentReviewFailure({ root, env = process.env, event, failurePhase } = {}) {
   const context = prAgentReviewContext(env, event);
+  const error = RETAINED_FAILURE_PHASES.has(failurePhase)
+    ? `pr-agent-review-${failurePhase}-failed`
+    : 'pr-agent-review-failed';
   const report = {
     schemaVersion: 1,
     kind: 'pr-agent-review',
@@ -285,7 +309,7 @@ export function retainPrAgentReviewFailure({ root, env = process.env, event } = 
     publication: 'not-applied',
     humanApprovalRequired: true,
     automaticFix: false,
-    errors: ['pr-agent-review-failed'],
+    errors: [error],
   };
   const summary = [
     PR_AGENT_REVIEW_MARKER,
@@ -396,7 +420,7 @@ async function main() {
     console.log(JSON.stringify({ status: report.status, decision: report.decision ?? null }));
     process.exitCode = report.decision === 'no-objection' ? 0 : 1;
   } catch (error) {
-    retainPrAgentReviewFailure({ root, event });
+    retainPrAgentReviewFailure({ root, event, failurePhase: error?.reviewPhase });
     throw error;
   }
 }
