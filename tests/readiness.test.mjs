@@ -7378,6 +7378,7 @@ test('improvement learned rule rollback workflow opens a PR without merge author
     contents: 'write',
     'pull-requests': 'write',
   });
+  assert.equal(workflow.jobs['propose-retirement'].env.GH_TOKEN, undefined);
   assert.match(source, /secrets\.SLIPSTREAM_ROLLBACK_TOKEN/);
   assert.match(source, /persist-credentials: false/);
   assert.match(source, /gh pr create/);
@@ -7421,6 +7422,7 @@ test('improvement remediation rollback is limited to registered repairs and open
   const workflow = parse(source);
   assert.deepEqual(Object.keys(workflow.on), ['workflow_dispatch']);
   assert.deepEqual(workflow.permissions, { contents: 'read' });
+  assert.equal(workflow.jobs['propose-revert'].env.GH_TOKEN, undefined);
   assert.match(source, /secrets\.SLIPSTREAM_ROLLBACK_TOKEN/);
   assert.match(source, /git revert --mainline 1 --no-commit/);
   assert.match(source, /npm run validate/);

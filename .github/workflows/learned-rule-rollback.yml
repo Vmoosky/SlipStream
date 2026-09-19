@@ -35,12 +35,12 @@ jobs:
       RULE_ID: ${{ inputs.rule_id }}
       RULE_VERSION: ${{ inputs.rule_version }}
       RETIREMENT_REASON: ${{ inputs.reason }}
-      GH_TOKEN: ${{ secrets.SLIPSTREAM_ROLLBACK_TOKEN }}
     steps:
       - name: Require trusted default-branch context and dedicated token
         shell: bash
         env:
           DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          GH_TOKEN: ${{ secrets.SLIPSTREAM_ROLLBACK_TOKEN }}
         run: |
           set -euo pipefail
           test -n "$DEFAULT_BRANCH"
@@ -72,6 +72,7 @@ jobs:
         shell: bash
         env:
           DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          GH_TOKEN: ${{ secrets.SLIPSTREAM_ROLLBACK_TOKEN }}
         run: |
           set -euo pipefail
           branch="rollback/learned-rule-${RULE_ID}-v${RULE_VERSION}-${GITHUB_RUN_ID}"
