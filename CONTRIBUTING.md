@@ -814,7 +814,11 @@ review do not start a model session. It never generates or executes a patch.
 Activation requires the owner's separate authorization and configuration:
 
 - Set `SLIPSTREAM_AGENT_REVIEW_MODEL` to a named model available to the dedicated
-  account. There is no default, `auto` selection, or fallback model.
+  account. When the account only supports Copilot's automatic model selection,
+  set it to `auto` and separately set
+  `SLIPSTREAM_AGENT_REVIEW_AUTO_CONFIRMED=true`. Automatic selection is an
+  explicit owner choice, not a fallback: each report records both the requested
+  selector and the single resolved model from the bounded CLI usage file.
 - Configure the `SLIPSTREAM_AGENT_REVIEW_TOKEN` repository secret with a dedicated
   fine-grained PAT carrying **Copilot Requests** permission and no repository
   write permissions. Do not reuse the workflow token or an administrative login.

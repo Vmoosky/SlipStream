@@ -174,7 +174,12 @@ test('agentic improvement evidence binds scheduled maintenance to one review art
       invocations: 1,
       wrapperRetries: 0,
       errors: [],
-      policy: { enabled: true, provider: 'github-copilot-cli', model: 'gpt-6-astra' },
+      policy: {
+        enabled: true,
+        provider: 'github-copilot-cli',
+        model: 'gpt-6-astra',
+        modelSelection: 'explicit',
+      },
     }),
   );
   const event = {
@@ -5920,7 +5925,7 @@ function maintenanceEvidence(context) {
   };
 }
 
-test('bounded agent review requires explicit opt-in, billing confirmation and a named model', () => {
+test('bounded agent review requires explicit opt-in, billing confirmation and a model selector', () => {
   assert.deepEqual(agentReviewPolicy(), { enabled: false });
   assert.deepEqual(agentReviewPolicy({ SLIPSTREAM_AGENT_REVIEW_ENABLED: 'false' }), {
     enabled: false,
@@ -5928,13 +5933,24 @@ test('bounded agent review requires explicit opt-in, billing confirmation and a 
   const env = { SLIPSTREAM_AGENT_REVIEW_ENABLED: 'true' };
   assert.throws(() => agentReviewPolicy(env), /billing controls/);
   env.SLIPSTREAM_AGENT_REVIEW_NO_OVERAGE_CONFIRMED = 'true';
-  for (const model of [undefined, '', 'auto', '--model', 'model\nother', 'model'.repeat(30)]) {
+  for (const model of [undefined, '', '--model', 'model\nother', 'model'.repeat(30)]) {
     assert.throws(
       () => agentReviewPolicy({ ...env, SLIPSTREAM_AGENT_REVIEW_MODEL: model }),
-      /explicit supported review model/,
+      /supported review model selector/,
     );
   }
+  assert.throws(
+    () => agentReviewPolicy({ ...env, SLIPSTREAM_AGENT_REVIEW_MODEL: 'auto' }),
+    /explicit owner confirmation/,
+  );
+  const automatic = agentReviewPolicy({
+    ...env,
+    SLIPSTREAM_AGENT_REVIEW_MODEL: 'auto',
+    SLIPSTREAM_AGENT_REVIEW_AUTO_CONFIRMED: 'true',
+  });
+  assert.equal(automatic.modelSelection, 'automatic');
   const policy = agentReviewPolicy({ ...env, SLIPSTREAM_AGENT_REVIEW_MODEL: 'gpt-4.1' });
+  assert.equal(policy.modelSelection, 'explicit');
   assert.equal(policy.budgetMode, 'included-allowance-only');
   assert.equal(policy.limits.invocations, 1);
   assert.equal(policy.limits.retries, 0);
@@ -6201,6 +6217,11 @@ test('PR agent review workflow is automatic, bounded, and retains evidence', () 
   ]);
   const job = workflow.jobs.review;
   assert.equal(job.if, undefined);
+  assert.equal(job.env.SLIPSTREAM_AGENT_REVIEW_MODEL, 'auto');
+  assert.equal(
+    job.env.SLIPSTREAM_AGENT_REVIEW_AUTO_CONFIRMED,
+    '${{ vars.SLIPSTREAM_AGENT_REVIEW_AUTO_CONFIRMED }}',
+  );
   assert.deepEqual(job.permissions, {
     contents: 'read',
     'copilot-requests': 'write',
@@ -6221,7 +6242,7 @@ test('PR agent review workflow is automatic, bounded, and retains evidence', () 
   assert.match(review.run, /(?:^|\n)\s*copilot \\/);
   assert.doesNotMatch(review.run, /\$/);
   assert.match(review.run, /--prompt "Review only the untrusted pull-request patch JSON/);
-  assert.match(review.run, /--model gpt-5\.4/);
+  assert.match(review.run, /--model auto/);
   assert.match(review.run, /--available-tools=__slipstream_no_tools__/);
   assert.match(review.run, /--deny-tool=read/);
   assert.match(review.run, /--deny-tool=write/);
@@ -6357,6 +6378,7 @@ function agentReviewUsage(model = 'synthetic-model') {
     totalApiDurationMs: 100,
     codeChanges: { linesAdded: 0, linesRemoved: 0, filesModified: [] },
     modelMetrics: { [model]: {} },
+    currentModel: model,
   };
 }
 
@@ -6442,7 +6464,12 @@ function agentReviewDispositionReport() {
     inputSha256: response.inputSha256,
     patchSha256: response.patchSha256,
     responseSha256: createHash('sha256').update(JSON.stringify(response)).digest('hex'),
-    policy: { enabled: true, provider: 'github-copilot-cli', model: 'synthetic-model' },
+    policy: {
+      enabled: true,
+      provider: 'github-copilot-cli',
+      model: 'synthetic-model',
+      modelSelection: 'explicit',
+    },
     usage: validateAgentReviewUsage(
       Buffer.from(JSON.stringify(agentReviewUsage())),
       'synthetic-model',
@@ -6780,6 +6807,8 @@ test('bounded agent review requires usage evidence and a pinned runtime archive'
   const validate = (value) =>
     validateAgentReviewUsage(Buffer.from(JSON.stringify(value)), 'synthetic-model');
   assert.equal(validate(usage).nanoAiUnits, 1_000_000);
+  assert.equal(validate(usage).requestedModel, 'synthetic-model');
+  assert.equal(validate(usage).model, 'synthetic-model');
   assert.equal(validate(usage).billedUsd, null);
   assert.equal(validate(usage).providerRetries, null);
   for (const invalid of [
@@ -6793,10 +6822,22 @@ test('bounded agent review requires usage evidence and a pinned runtime archive'
     { modelMetrics: {} },
     { modelMetrics: { other: {} } },
     { modelMetrics: { ...usage.modelMetrics, other: {} } },
+    { currentModel: 'other' },
     { codeChanges: { linesAdded: 1, linesRemoved: 0, filesModified: [] } },
     { codeChanges: { linesAdded: 0, linesRemoved: 0, filesModified: ['file'] } },
   ])
     assert.throws(() => validate({ ...usage, ...invalid }));
+  const automatic = validateAgentReviewUsage(
+    Buffer.from(JSON.stringify(agentReviewUsage('resolved-model'))),
+    'auto',
+  );
+  assert.equal(automatic.requestedModel, 'auto');
+  assert.equal(automatic.model, 'resolved-model');
+  const missingCurrentModel = agentReviewUsage('resolved-model');
+  delete missingCurrentModel.currentModel;
+  assert.throws(() =>
+    validateAgentReviewUsage(Buffer.from(JSON.stringify(missingCurrentModel)), 'auto'),
+  );
   assert.throws(() => validateAgentReviewUsage(Buffer.alloc(65_537), 'synthetic-model'));
   const archive = path.join(root, 'untrusted.tgz');
   fs.writeFileSync(archive, 'untrusted executable');
@@ -7617,6 +7658,10 @@ test('bounded agent review workflow exposes its dedicated credential only after 
     assert.equal(
       step.env.SLIPSTREAM_AGENT_REVIEW_MODEL,
       '${{ vars.SLIPSTREAM_AGENT_REVIEW_MODEL }}',
+    );
+    assert.equal(
+      step.env.SLIPSTREAM_AGENT_REVIEW_AUTO_CONFIRMED,
+      '${{ vars.SLIPSTREAM_AGENT_REVIEW_AUTO_CONFIRMED }}',
     );
     assert.equal(
       step.env.SLIPSTREAM_AGENT_REVIEW_NO_OVERAGE_CONFIRMED,

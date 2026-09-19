@@ -44,13 +44,17 @@ export function agentReviewPolicy(env = {}) {
     );
   }
   const model = env.SLIPSTREAM_AGENT_REVIEW_MODEL;
-  if (!/^[a-z0-9][a-z0-9.-]{0,79}$/.test(model ?? '') || model === 'auto') {
-    throw new Error('An explicit supported review model is required');
+  if (!/^[a-z0-9][a-z0-9.-]{0,79}$/.test(model ?? '')) {
+    throw new Error('A supported review model selector is required');
+  }
+  if (model === 'auto' && env.SLIPSTREAM_AGENT_REVIEW_AUTO_CONFIRMED !== 'true') {
+    throw new Error('Automatic review model selection requires explicit owner confirmation');
   }
   return {
     enabled: true,
     provider: 'github-copilot-cli',
     model,
+    modelSelection: model === 'auto' ? 'automatic' : 'explicit',
     budgetMode: 'included-allowance-only',
     billingControl: 'owner-confirmed-provider-stop',
     limits: AGENT_REVIEW_LIMITS,
@@ -362,11 +366,16 @@ export function runAgentReviewProcess(
   });
 }
 
-export function validateAgentReviewUsage(bytes, model) {
+export function validateAgentReviewUsage(bytes, requestedModel) {
   if (!Buffer.isBuffer(bytes) || !bytes.length || bytes.length > AGENT_REVIEW_LIMITS.usageBytes) {
     throw new Error('Review usage exceeds its byte limit');
   }
   const usage = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes));
+  const models =
+    usage?.modelMetrics && !Array.isArray(usage.modelMetrics)
+      ? Object.keys(usage.modelMetrics)
+      : [];
+  const resolvedModel = models[0];
   if (
     !usage ||
     usage.totalUserRequests !== 1 ||
@@ -377,10 +386,14 @@ export function validateAgentReviewUsage(bytes, model) {
     !Number.isFinite(usage.totalApiDurationMs) ||
     usage.totalApiDurationMs < 0 ||
     !Number.isFinite(Date.parse(usage.sessionStartTime)) ||
-    !usage.modelMetrics ||
-    Array.isArray(usage.modelMetrics) ||
-    Object.keys(usage.modelMetrics).length !== 1 ||
-    !Object.hasOwn(usage.modelMetrics, model) ||
+    models.length !== 1 ||
+    !/^[a-z0-9][a-z0-9.-]{0,79}$/.test(resolvedModel ?? '') ||
+    resolvedModel === 'auto' ||
+    (requestedModel === 'auto' && usage.currentModel !== resolvedModel) ||
+    (requestedModel !== 'auto' &&
+      usage.currentModel !== undefined &&
+      usage.currentModel !== resolvedModel) ||
+    (requestedModel !== 'auto' && resolvedModel !== requestedModel) ||
     usage.codeChanges?.linesAdded !== 0 ||
     usage.codeChanges?.linesRemoved !== 0 ||
     !Array.isArray(usage.codeChanges?.filesModified) ||
@@ -391,7 +404,8 @@ export function validateAgentReviewUsage(bytes, model) {
   return {
     source: 'copilot-cli-usage-file',
     sha256: digest(bytes),
-    model,
+    requestedModel,
+    model: resolvedModel,
     userRequests: usage.totalUserRequests,
     nanoAiUnits: usage.totalNanoAiu,
     premiumRequestCost: usage.totalPremiumRequestCost,
@@ -712,9 +726,14 @@ function dispositionSource(bytes) {
     report.policy?.provider !== 'github-copilot-cli' ||
     typeof report.policy?.model !== 'string' ||
     !/^[a-z0-9][a-z0-9.-]{0,79}$/.test(report.policy.model) ||
-    report.policy.model === 'auto' ||
+    !['automatic', 'explicit'].includes(report.policy.modelSelection) ||
+    report.policy.modelSelection !== (report.policy.model === 'auto' ? 'automatic' : 'explicit') ||
     report.usage?.source !== 'copilot-cli-usage-file' ||
-    report.usage?.model !== report.policy.model ||
+    report.usage?.requestedModel !== report.policy.model ||
+    typeof report.usage?.model !== 'string' ||
+    !/^[a-z0-9][a-z0-9.-]{0,79}$/.test(report.usage.model) ||
+    report.usage.model === 'auto' ||
+    (report.policy.model !== 'auto' && report.usage.model !== report.policy.model) ||
     typeof report.usage?.sha256 !== 'string' ||
     !/^[a-f0-9]{64}$/.test(report.usage.sha256) ||
     report.usage.userRequests !== 1 ||
