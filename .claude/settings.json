@@ -10,11 +10,27 @@
     "deny": [
       "Read(./.env)",
       "Read(./.env.*)",
+      "Read(/**/.env*)",
+      "Edit(/**/.env*)",
+      "Write(/**/.env*)",
+      "Read(/vendor/**)",
+      "Edit(/vendor/**)",
+      "Write(/vendor/**)",
       "Bash(git clean -f*)",
       "Bash(git push --force*)",
+      "Bash(git push * --force*)",
+      "Bash(git push --mirror*)",
+      "Bash(git push -f*)",
+      "Bash(git push * -f*)",
+      "Bash(git push * +*)",
       "Bash(git reset --hard*)",
       "PowerShell(git clean -f*)",
       "PowerShell(git push --force*)",
+      "PowerShell(git push * --force*)",
+      "PowerShell(git push --mirror*)",
+      "PowerShell(git push -f*)",
+      "PowerShell(git push * -f*)",
+      "PowerShell(git push * +*)",
       "PowerShell(git reset --hard*)"
     ]
   }
