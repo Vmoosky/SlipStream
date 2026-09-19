@@ -84,6 +84,34 @@ review or validation. Local notes persist in that checkout; sharing them require
 the normal reviewed commit/push workflow, not automatic publication. Historical
 results in memory do not satisfy current validation or approval requirements.
 
+### Claude Code permission guards
+
+Claude settings use the supported `permissions.ask` and `permissions.deny` arrays,
+not `permission.path_rules` or `permission.denied_commands`. The source-anchored
+`Read(/**/.env*)`, `Edit(/**/.env*)`, and `Write(/**/.env*)` rules cover
+environment-file names at any depth in the project, including `.envrc` and
+credential-free `.env.example`. The equivalent `/vendor/**` rules cover the
+project's root vendor directory. The leading `/` anchors these paths to the
+project settings source, not the OS filesystem root. Start Claude Code in the
+repository root.
+
+For Bash and PowerShell, deny rules cover direct `git push` commands with
+`--force` (including `--force-with-lease`) before or after the remote, `-f` before
+or after the remote, and explicit forced refspecs such as
+`git push origin +HEAD:main`. Ordinary commits and pushes still require approval.
+Read, Edit, and Write are all specified because their denial effects differ
+between Claude Code versions.
+
+These are local tool guards, not a sandbox or a complete Git-command parser.
+Alternate executable paths, Git aliases/global options, grouped flags such as
+`-uf`, wrappers, or arbitrary scripts are not comprehensively covered by these
+patterns. File rules do not provide OS-level protection from arbitrary processes.
+Do not bypass prompts or grant broad shell allowances; retain server-side
+protected-branch rules as the force-push enforcement boundary. See the
+[official permission syntax and limitations](https://code.claude.com/docs/en/permissions).
+Adding unsupported settings solely to satisfy a readiness warning would not
+provide protection.
+
 ### Claude Code project commands
 
 Start Claude Code in the Slipstream checkout to use these explicitly invoked

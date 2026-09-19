@@ -1910,6 +1910,38 @@ test('shared agent memory is bounded and discoverable without granting authority
   );
 });
 
+test('Claude permission guards retain approvals and cover explicit path and force-push forms', () => {
+  const settings = JSON.parse(fs.readFileSync(path.join(REPO, '.claude/settings.json'), 'utf8'));
+  assert.deepEqual(Object.keys(settings).sort(), ['$schema', 'permissions']);
+  assert.deepEqual(Object.keys(settings.permissions).sort(), ['ask', 'deny']);
+  const { ask, deny } = settings.permissions;
+  assert.deepEqual(ask, [
+    'Bash(git commit *)',
+    'Bash(git push *)',
+    'PowerShell(git commit *)',
+    'PowerShell(git push *)',
+  ]);
+  assert.equal(new Set(deny).size, deny.length);
+  for (const tool of ['Read', 'Edit', 'Write']) {
+    for (const pattern of ['/**/.env*', '/vendor/**']) {
+      assert.ok(deny.includes(`${tool}(${pattern})`), `${tool} must guard ${pattern}`);
+    }
+  }
+  for (const tool of ['Bash', 'PowerShell']) {
+    for (const pattern of [
+      'git push --force*',
+      'git push * --force*',
+      'git push -f*',
+      'git push * -f*',
+      'git push * +*',
+    ]) {
+      assert.ok(deny.includes(`${tool}(${pattern})`), `${tool} must guard ${pattern}`);
+    }
+    assert.equal(deny.includes(tool), false, 'Do not disable the shell entirely');
+    assert.equal(deny.includes(`${tool}(git push *)`), false, 'Ordinary pushes still ask');
+  }
+});
+
 test('agent harness configurations are bounded, non-publishing, and workspace-scoped', async () => {
   const claude = JSON.parse(fs.readFileSync(path.join(REPO, '.claude/settings.json'), 'utf8'));
   assert.equal(claude.$schema, 'https://json.schemastore.org/claude-code-settings.json');
