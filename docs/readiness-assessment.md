@@ -1,5 +1,38 @@
 # Readiness Reassessment
 
+## Current Status
+
+CodeBlend completed again on 2026-09-19 at merge commit
+`5ec8594c7e60655764be7e2513f4d03209f134b1`. The current result is **80.6/100**:
+Substrate is **89.6, L5 Autonomous**, and Operation is **72.5, Agent-Enabled**.
+The repository is not AI-ready because both axes must reach 80.
+
+The assessment used reported repository and GitHub API evidence. It found the
+root `pull_request_target` workflow but could not correlate the custom
+JavaScript implementation into its supported static LLM-review capability
+model. More importantly, static workflow inspection cannot prove successful
+execution. The hosted `PR Agent Review` runs visible at assessment time all
+predated the merged fenced-JSON compatibility fix and ended in failure.
+
+A runtime success claim therefore requires a fresh pull request against the
+post-fix default branch and all of the following bound evidence:
+
+- a completed `PR Agent Review` run for the pull request's exact head commit;
+- a successful workflow conclusion and successful evaluation, finalization,
+  publication, and artifact-upload steps;
+- one retained `pr-agent-review-<pr>-<run>-<attempt>` artifact containing a
+  schema-valid report bound to the same repository, pull request, base, head,
+  input digest, concrete resolved model, one invocation, and zero retries; and
+- the owned advisory PR comment for that head, while required CI, security, and
+  independent human approval remain separate controls.
+
+Until that evidence exists, the reviewer is configured but not operationally
+verified. The evaluator's static limitation should not be bypassed with dummy
+configuration or inferred from filenames.
+
+The remainder of this document preserves the original 2026-09-14 reassessment
+record and should be read as historical context.
+
 ## Result
 
 CodeBlend completed successfully on 2026-09-14. The headline improved by
