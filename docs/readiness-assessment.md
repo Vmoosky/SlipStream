@@ -18,7 +18,9 @@ that Copilot ignores piped standard input when `--prompt` is also supplied and
 that text output can hard-wrap JSON. The PR now supplies the complete prompt on
 standard input, captures machine-readable JSONL, extracts exactly one successful
 no-tools assistant response, and deletes the raw event stream before secret-free
-finalization. Success remains unverified until the updated hosted run completes.
+finalization. Because `pull_request_target` executes trusted default-branch code,
+success remains unverified until a subsequent pull request completes against the
+post-fix default branch.
 
 A runtime success claim therefore requires a fresh pull request against the
 post-fix default branch and all of the following bound evidence:
