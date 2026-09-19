@@ -3,9 +3,9 @@ import process from 'node:process';
 const input = await readInput();
 const command = input?.tool_input?.command;
 
-if (!input || (typeof command === 'string' && isDangerousCommand(command))) {
+if (typeof command !== 'string' || isDangerousCommand(command)) {
   denyCommand(
-    input
+    typeof command === 'string'
       ? 'Blocked destructive shell command. Use a targeted, reversible operation instead.'
       : 'Blocked command because the hook input was invalid.',
   );

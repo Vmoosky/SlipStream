@@ -87,12 +87,13 @@ test('dangerous-command hook leaves safe shell commands to normal permissions', 
   assert.equal(result.stdout, '');
 });
 
-test('dangerous-command hook denies malformed input', (context) => {
+test('dangerous-command hook denies invalid input', (context) => {
   const { project } = fixture(context);
-  const result = runHook('PreToolUse', undefined, project, project, '{');
-
-  assert.equal(result.status, 0, `${result.error ?? ''}\n${result.stderr}`);
-  assert.equal(JSON.parse(result.stdout).hookSpecificOutput.permissionDecision, 'deny');
+  for (const input of ['{', '{}', '{"tool_input":{}}']) {
+    const result = runHook('PreToolUse', undefined, project, project, input);
+    assert.equal(result.status, 0, `${result.error ?? ''}\n${result.stderr}`);
+    assert.equal(JSON.parse(result.stdout).hookSpecificOutput.permissionDecision, 'deny');
+  }
 });
 
 test('configured formatting hook formats an edited file in a project path with spaces', (context) => {
