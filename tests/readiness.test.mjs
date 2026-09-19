@@ -6021,7 +6021,7 @@ test('bounded agent review fixes tool denial and bounds the complete prompt', (c
   );
   assert.ok(args.includes('--disable-builtin-mcps'));
   assert.ok(args.includes('--no-custom-instructions'));
-  assert.ok(args.includes('--no-auto-login'));
+  assert.ok(!args.includes('--no-auto-login'));
   assert.ok(args.includes('--max-ai-credits=30'));
   assert.ok(args.includes('--max-autopilot-continues=0'));
   assert.equal(args[args.indexOf('--model') + 1], 'synthetic-model');

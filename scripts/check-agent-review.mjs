@@ -143,7 +143,6 @@ function boundedAgentReviewArguments(prompt, policy, directory) {
     '--no-custom-instructions',
     '--disallow-temp-dir',
     '--no-ask-user',
-    '--no-auto-login',
     '--no-auto-update',
     '--no-bash-env',
     '--no-experimental',
