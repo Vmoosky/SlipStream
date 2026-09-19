@@ -24,16 +24,29 @@ function readBoundedFile(root, file, limit) {
   const descriptor = fs.openSync(requested, fs.constants.O_RDONLY | noFollow);
   try {
     assertOpenedFileIsInsideRoot(canonicalRoot, requestedRelative, descriptor);
-    const stat = fs.fstatSync(descriptor);
-    if (!stat.isFile() || stat.size < 1 || stat.size > limit) {
+    const before = fs.fstatSync(descriptor, { bigint: true });
+    if (!before.isFile() || before.size < 1n || before.size > BigInt(limit)) {
       throw new Error('Evidence file is invalid or exceeds its byte limit');
     }
     const bytes = fs.readFileSync(descriptor);
-    if (bytes.length !== stat.size) throw new Error('Evidence file changed while it was read');
+    const after = fs.fstatSync(descriptor, { bigint: true });
+    if (bytes.length !== Number(before.size) || !sameFileSnapshot(before, after)) {
+      throw new Error('Evidence file changed while it was read');
+    }
     return bytes;
   } finally {
     fs.closeSync(descriptor);
   }
+}
+
+export function sameFileSnapshot(before, after) {
+  return (
+    before.dev === after.dev &&
+    before.ino === after.ino &&
+    before.size === after.size &&
+    before.mtimeNs === after.mtimeNs &&
+    before.ctimeNs === after.ctimeNs
+  );
 }
 
 function assertNoSymlinkComponents(root, relativeFile) {

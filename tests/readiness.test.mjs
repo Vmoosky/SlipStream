@@ -15,7 +15,7 @@ import {
   checkAgentSession,
   readHookInput,
 } from '../scripts/check-agent-session.mjs';
-import { calculateKeepRate } from '../scripts/agent/eval/keep-rate.mjs';
+import { calculateKeepRate, sameFileSnapshot } from '../scripts/agent/eval/keep-rate.mjs';
 
 import { developmentPlan, runDevelopmentCommand, runDevelopment } from '../scripts/develop.mjs';
 import {
@@ -3620,6 +3620,14 @@ test('agent keep rate rejects evidence reached through a symbolic link', (contex
     () => calculateKeepRate([['linked/review.json', 'dispositions.json']], root),
     /symbolic links|resolve inside the repository|requires Linux opened-file containment checks/,
   );
+});
+
+test('agent keep rate detects same-size evidence mutations', () => {
+  const before = { dev: 1n, ino: 2n, size: 3n, mtimeNs: 4n, ctimeNs: 5n };
+  assert.ok(sameFileSnapshot(before, { ...before }));
+  for (const key of Object.keys(before)) {
+    assert.equal(sameFileSnapshot(before, { ...before, [key]: before[key] + 1n }), false);
+  }
 });
 
 function improvementRulePromotionHistory(context) {
