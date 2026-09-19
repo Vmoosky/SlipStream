@@ -6,18 +6,38 @@ import { AGENT_REVIEW_LIMITS, validateAgentReviewDispositions } from '../../chec
 const ROOT = fileURLToPath(new URL('../../../', import.meta.url));
 
 function readBoundedFile(root, file, limit) {
-  const resolved = path.resolve(root, file);
-  const relative = path.relative(root, resolved);
-  if (!relative || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) {
+  const canonicalRoot = fs.realpathSync.native(root);
+  const requested = path.resolve(canonicalRoot, file);
+  const requestedRelative = path.relative(canonicalRoot, requested);
+  if (
+    !requestedRelative ||
+    requestedRelative.startsWith(`..${path.sep}`) ||
+    path.isAbsolute(requestedRelative)
+  ) {
     throw new Error('Evidence files must be inside the repository');
   }
-  const stat = fs.lstatSync(resolved);
-  if (!stat.isFile() || stat.isSymbolicLink() || stat.size < 1 || stat.size > limit) {
-    throw new Error('Evidence file is invalid or exceeds its byte limit');
+  const canonicalFile = fs.realpathSync.native(requested);
+  const canonicalRelative = path.relative(canonicalRoot, canonicalFile);
+  if (
+    !canonicalRelative ||
+    canonicalRelative.startsWith(`..${path.sep}`) ||
+    path.isAbsolute(canonicalRelative)
+  ) {
+    throw new Error('Evidence files must resolve inside the repository');
   }
-  const bytes = fs.readFileSync(resolved);
-  if (bytes.length !== stat.size) throw new Error('Evidence file changed while it was read');
-  return bytes;
+  const noFollow = fs.constants.O_NOFOLLOW ?? 0;
+  const descriptor = fs.openSync(canonicalFile, fs.constants.O_RDONLY | noFollow);
+  try {
+    const stat = fs.fstatSync(descriptor);
+    if (!stat.isFile() || stat.size < 1 || stat.size > limit) {
+      throw new Error('Evidence file is invalid or exceeds its byte limit');
+    }
+    const bytes = fs.readFileSync(descriptor);
+    if (bytes.length !== stat.size) throw new Error('Evidence file changed while it was read');
+    return bytes;
+  } finally {
+    fs.closeSync(descriptor);
+  }
 }
 
 export function calculateKeepRate(pairs, root = ROOT) {
