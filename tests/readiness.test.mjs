@@ -1912,7 +1912,7 @@ test('shared agent memory is bounded and discoverable without granting authority
 
 test('Claude permission guards retain approvals and cover explicit path and force-push forms', () => {
   const settings = JSON.parse(fs.readFileSync(path.join(REPO, '.claude/settings.json'), 'utf8'));
-  assert.deepEqual(Object.keys(settings).sort(), ['$schema', 'permissions']);
+  assert.deepEqual(Object.keys(settings).sort(), ['$schema', 'hooks', 'permissions']);
   assert.deepEqual(Object.keys(settings.permissions).sort(), ['ask', 'deny']);
   const { ask, deny } = settings.permissions;
   assert.deepEqual(ask, [
