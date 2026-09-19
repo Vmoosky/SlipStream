@@ -7425,9 +7425,10 @@ test('improvement remediation rollback is limited to registered repairs and open
   assert.equal(workflow.jobs['propose-revert'].env.GH_TOKEN, undefined);
   assert.match(source, /secrets\.SLIPSTREAM_ROLLBACK_TOKEN/);
   assert.match(source, /git revert --mainline 1 --no-commit/);
+  assert.match(source, /git diff --cached --name-only/);
   assert.match(source, /npm run validate/);
   assert.match(source, /gh pr create/);
-  assert.doesNotMatch(source, /gh pr merge|enable-auto-merge|merge_group/);
+  assert.doesNotMatch(source, /git add --all|gh pr merge|enable-auto-merge|merge_group/);
 });
 
 test('improvement learned rule loader rejects invalid bytes and linked paths', (context) => {
