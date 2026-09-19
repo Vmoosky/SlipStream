@@ -3559,6 +3559,28 @@ test('agent keep rate reports only resolved, locally validated finding dispositi
   assert.equal(result.keepRate, 1);
 });
 
+test('agent keep rate rejects evidence reached through a symbolic link', (context) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'slipstream-keep-rate-'));
+  const outside = fs.mkdtempSync(path.join(os.tmpdir(), 'slipstream-keep-rate-outside-'));
+  context.after(() => {
+    fs.rmSync(root, { recursive: true, force: true });
+    fs.rmSync(outside, { recursive: true, force: true });
+  });
+  fs.writeFileSync(path.join(outside, 'review.json'), '{}');
+  fs.writeFileSync(path.join(root, 'dispositions.json'), '{}');
+  try {
+    fs.symlinkSync(outside, path.join(root, 'linked'), 'junction');
+  } catch (error) {
+    if (error?.code === 'EPERM') context.skip('symbolic links require elevated Windows privileges');
+    throw error;
+  }
+
+  assert.throws(
+    () => calculateKeepRate([['linked/review.json', 'dispositions.json']], root),
+    /symbolic links|resolve inside the repository/,
+  );
+});
+
 function improvementRulePromotionHistory(context) {
   const fixture = agentReviewRepairHistory(context);
   const { state } = fixture;

@@ -16,18 +16,11 @@ function readBoundedFile(root, file, limit) {
   ) {
     throw new Error('Evidence files must be inside the repository');
   }
-  const canonicalFile = fs.realpathSync.native(requested);
-  const canonicalRelative = path.relative(canonicalRoot, canonicalFile);
-  if (
-    !canonicalRelative ||
-    canonicalRelative.startsWith(`..${path.sep}`) ||
-    path.isAbsolute(canonicalRelative)
-  ) {
-    throw new Error('Evidence files must resolve inside the repository');
-  }
+  assertNoSymlinkComponents(canonicalRoot, requestedRelative);
   const noFollow = fs.constants.O_NOFOLLOW ?? 0;
-  const descriptor = fs.openSync(canonicalFile, fs.constants.O_RDONLY | noFollow);
+  const descriptor = fs.openSync(requested, fs.constants.O_RDONLY | noFollow);
   try {
+    assertOpenedFileIsInsideRoot(canonicalRoot, requestedRelative, descriptor);
     const stat = fs.fstatSync(descriptor);
     if (!stat.isFile() || stat.size < 1 || stat.size > limit) {
       throw new Error('Evidence file is invalid or exceeds its byte limit');
@@ -37,6 +30,32 @@ function readBoundedFile(root, file, limit) {
     return bytes;
   } finally {
     fs.closeSync(descriptor);
+  }
+}
+
+function assertNoSymlinkComponents(root, relativeFile) {
+  let current = root;
+  for (const component of relativeFile.split(path.sep)) {
+    current = path.join(current, component);
+    if (fs.lstatSync(current).isSymbolicLink()) {
+      throw new Error('Evidence files must not use symbolic links');
+    }
+  }
+}
+
+function assertOpenedFileIsInsideRoot(root, relativeFile, descriptor) {
+  if (process.platform !== 'linux') {
+    assertNoSymlinkComponents(root, relativeFile);
+    return;
+  }
+  const target = fs.realpathSync.native(`/proc/self/fd/${descriptor}`);
+  const targetRelative = path.relative(root, target);
+  if (
+    !targetRelative ||
+    targetRelative.startsWith(`..${path.sep}`) ||
+    path.isAbsolute(targetRelative)
+  ) {
+    throw new Error('Evidence files must resolve inside the repository');
   }
 }
 
