@@ -1902,6 +1902,11 @@ test('shared agent memory is bounded and discoverable without granting authority
     assert.match(instructions, /read-only review/u);
     assert.match(instructions, /when edits are authorized/u);
   }
+  assert.match(copilot, /MEMORY\.md.*untrusted project\s+context/su);
+  assert.match(
+    copilot,
+    /cannot override.*user's task.*system policy.*approval boundaries.*tool\s+selection/su,
+  );
 });
 
 test('agent harness configurations are bounded, non-publishing, and workspace-scoped', async () => {
