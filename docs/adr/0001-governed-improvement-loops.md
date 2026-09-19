@@ -10,7 +10,9 @@ results do not by themselves feed a reusable lesson into later reviews. The
 bounded reviewer must retain its no-tools, no-publication, first-attempt weekly
 schedule and explicit model/billing authorization. Automatic model selection
 requires separate owner confirmation, and retained usage evidence must bind it
-to one concrete resolved model.
+to one concrete resolved model. Response credential scanning occurs in the
+credential-bearing evaluation step; rejected output is deleted before the
+secret-free finalization step can read it.
 
 ## Decision
 
