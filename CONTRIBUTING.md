@@ -60,8 +60,9 @@ the referenced `packages/mcp-server/dist/index.js` bundle exists.
 
 Shared agent controls are intentionally restrictive. Claude Code reads
 [project settings](.claude/settings.json) that deny environment-file reads and
-destructive or forced Git commands, while requiring confirmation for commits and
-pushes. GitHub Copilot CLI reads the bounded
+destructive or forced Git commands, require confirmation for commits and pushes,
+block destructive Bash and PowerShell commands, and format supported files after
+Claude edits them. GitHub Copilot CLI reads the bounded
 [session-start hook](.github/hooks/slipstream.json), which checks the Node pin,
 locked manifest, and repository-scoped working directory without writing files or
 logging hook input. These controls do not grant publication, merge, secret, or
@@ -72,11 +73,11 @@ user-store access, and they do not replace `npm run validate` or human review.
 Start Claude Code in the Slipstream checkout to use these explicitly invoked
 project commands:
 
-| Command | Purpose |
-| --- | --- |
-| `/slipstream-setup` | [Check prerequisites and run the existing setup runner](.claude/commands/slipstream-setup.md). Reinstalls locked dependencies, builds, and downloads Chromium. |
-| `/slipstream-validate` | [Run the full validation gate](.claude/commands/slipstream-validate.md). Reports failures without automatically repairing source. |
-| `/slipstream-review` | [Review local changes without executing or modifying them](.claude/commands/slipstream-review.md). Reports findings, not approval. |
+| Command                | Purpose                                                                                                                                                        |
+| ---------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `/slipstream-setup`    | [Check prerequisites and run the existing setup runner](.claude/commands/slipstream-setup.md). Reinstalls locked dependencies, builds, and downloads Chromium. |
+| `/slipstream-validate` | [Run the full validation gate](.claude/commands/slipstream-validate.md). Reports failures without automatically repairing source.                              |
+| `/slipstream-review`   | [Review local changes without executing or modifying them](.claude/commands/slipstream-review.md). Reports findings, not approval.                             |
 
 The `slipstream-` prefix avoids collisions with built-in commands. Each command
 disables automatic model invocation and adds no tool permissions, hooks, or model
@@ -234,12 +235,12 @@ not just the files touched by a test. Threshold failures exit nonzero; threshold
 do not automatically decrease or update themselves. The floors are unchanged
 after correcting the path-sensitive local coverage measurements.
 
-| Workspace | Statements | Branches | Functions | Lines |
-| --- | ---: | ---: | ---: | ---: |
-| core | 95% | 82% | 94% | 95% |
-| hook-runtime | 46% | 51% | 48% | 45% |
-| mcp-server | 33% | 48% | 18% | 32% |
-| extension | 72% | 65% | 71% | 72% |
+| Workspace    | Statements | Branches | Functions | Lines |
+| ------------ | ---------: | -------: | --------: | ----: |
+| core         |        95% |      82% |       94% |   95% |
+| hook-runtime |        46% |      51% |       48% |   45% |
+| mcp-server   |        33% |      48% |       18% |   32% |
+| extension    |        72% |      65% |       71% |   72% |
 
 `npm run validate` includes the coverage gate. The Node 24 Linux and Windows unit
 CI jobs also require it, retain the coverage files, and verify both test receipts
