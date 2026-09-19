@@ -12,8 +12,8 @@ pullRequest:
   requiredApprovals: 1
   dismissStaleReviewsOnPush: true
   requireLastPushApproval: true
-  requireCodeOwnerReview: false
-  requireReviewThreadResolution: false
+  requireCodeOwnerReview: true
+  requireReviewThreadResolution: true
   requireApprovalForUnattributedChanges: true
   allowedMergeMethods:
     - merge
