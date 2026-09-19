@@ -12,6 +12,7 @@ import {
   prepareAgentReviewRuntime,
   preparePrAgentReview,
   prAgentReviewArguments,
+  prAgentReviewPrompt,
   runAgentReviewProcess,
   validateAgentReviewUsage,
   validatePrAgentReviewResponse,
@@ -217,20 +218,55 @@ export async function preparePrAgentReviewRun({
   const executable = await prepareAgentReviewRuntime(archive, directory);
   const input = prAgentReviewInputEnvelope(prepared);
   writeExclusive(path.join(directory, 'input.json'), `${JSON.stringify(input)}\n`);
+  writeExclusive(path.join(directory, 'prompt.txt'), prAgentReviewPrompt(prepared));
   if (env.GITHUB_ACTIONS === 'true' && env.GITHUB_PATH) {
     fs.appendFileSync(env.GITHUB_PATH, `${path.dirname(executable)}\n`);
   }
   return { ...context, base: prepared.base, inputSha256: prepared.inputSha256, executable };
 }
 
-export function checkPrAgentReviewResponseCredential({ root, env = process.env } = {}) {
+export function extractPrAgentReviewResponse({ root, env = process.env } = {}) {
+  const eventsPath = path.join(root, RUN_PATH, 'events.jsonl');
   const responsePath = path.join(root, RUN_PATH, 'response.json');
   const token = env.COPILOT_GITHUB_TOKEN;
   requireReview(typeof token === 'string' && token.length > 0);
-  const responseBytes = readBounded(responsePath, AGENT_REVIEW_LIMITS.outputBytes);
-  if (responseBytes.includes(token)) {
-    fs.rmSync(responsePath, { force: true });
-    throw new Error('PR agent review response contains a credential');
+  try {
+    const eventBytes = readBounded(eventsPath, AGENT_REVIEW_LIMITS.eventsBytes);
+    requireReview(!eventBytes.includes(token));
+    const lines = new TextDecoder('utf-8', { fatal: true })
+      .decode(eventBytes)
+      .trim()
+      .split(/\r?\n/);
+    requireReview(lines.length > 0 && lines.length <= 100);
+    const events = lines.map((line) => JSON.parse(line));
+    requireReview(
+      events.every(
+        (event) =>
+          event &&
+          !Array.isArray(event) &&
+          typeof event.type === 'string' &&
+          event.type.length <= 100,
+      ),
+    );
+    const messages = events.filter((event) => event.type === 'assistant.message');
+    const completions = events.filter((event) => event.type === 'model.call_finished');
+    requireReview(
+      messages.length === 1 &&
+        completions.length === 1 &&
+        completions[0].data?.outcome === 'success' &&
+        completions[0].data?.containsBuiltInFileEditRequest === false &&
+        events.filter((event) => event.type === 'result').length === 1 &&
+        Array.isArray(messages[0].data?.toolRequests) &&
+        messages[0].data.toolRequests.length === 0 &&
+        typeof messages[0].data.content === 'string',
+    );
+    const responseBytes = Buffer.from(messages[0].data.content);
+    requireReview(
+      responseBytes.length > 0 && responseBytes.length <= AGENT_REVIEW_LIMITS.outputBytes,
+    );
+    writeExclusive(responsePath, responseBytes);
+  } finally {
+    fs.rmSync(eventsPath, { force: true });
   }
 }
 
@@ -434,17 +470,12 @@ export async function runPrAgentReview({ env = process.env, event, fetcher = fet
 
 async function main() {
   const args = process.argv.slice(2);
-  if (
-    args.length !== 1 ||
-    !['--prepare', '--check-response-credential', '--finalize'].includes(args[0])
-  ) {
-    throw new Error(
-      'Usage: check-pr-agent-review.mjs --prepare | --check-response-credential | --finalize',
-    );
+  if (args.length !== 1 || !['--prepare', '--extract-response', '--finalize'].includes(args[0])) {
+    throw new Error('Usage: check-pr-agent-review.mjs --prepare | --extract-response | --finalize');
   }
   const root = fileURLToPath(new URL('../', import.meta.url));
-  if (args[0] === '--check-response-credential') {
-    checkPrAgentReviewResponseCredential({ root });
+  if (args[0] === '--extract-response') {
+    extractPrAgentReviewResponse({ root });
     return;
   }
   const event = JSON.parse(fs.readFileSync(process.env.GITHUB_EVENT_PATH, 'utf8'));

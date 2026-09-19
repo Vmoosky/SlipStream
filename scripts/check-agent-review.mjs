@@ -25,6 +25,7 @@ export const AGENT_REVIEW_LIMITS = Object.freeze({
   timeoutMs: 300_000,
   softAiCredits: 30,
   inputBytes: 96 * 1024,
+  eventsBytes: 512 * 1024,
   outputBytes: 64 * 1024,
   usageBytes: 64 * 1024,
   findings: 10,

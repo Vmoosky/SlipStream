@@ -11,12 +11,14 @@ The assessment used reported repository and GitHub API evidence. It found the
 root `pull_request_target` workflow but could not correlate the custom
 JavaScript implementation into its supported static LLM-review capability
 model. More importantly, static workflow inspection cannot prove successful
-execution. A fresh run on PR 50 later proved preparation and model evaluation
-completed for the exact PR head, but finalization failed with the sanitized
-phase `pr-agent-review-response-json-failed`. The model input omitted the
-`inputSha256` value that the response contract required it to copy. The PR now
-includes a regression-tested correction to that handoff; success remains
-unverified until the updated hosted run completes.
+execution. Two fresh runs on PR 50 proved preparation and model evaluation
+completed for each exact PR head, but finalization failed with the sanitized
+phase `pr-agent-review-response-json-failed`. A bounded local reproduction found
+that Copilot ignores piped standard input when `--prompt` is also supplied and
+that text output can hard-wrap JSON. The PR now supplies the complete prompt on
+standard input, captures machine-readable JSONL, extracts exactly one successful
+no-tools assistant response, and deletes the raw event stream before secret-free
+finalization. Success remains unverified until the updated hosted run completes.
 
 A runtime success claim therefore requires a fresh pull request against the
 post-fix default branch and all of the following bound evidence:

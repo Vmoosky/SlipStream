@@ -51,9 +51,9 @@ import {
 } from '../scripts/check-agent-review.mjs';
 import {
   PR_AGENT_REVIEW_MARKER,
-  checkPrAgentReviewResponseCredential,
   collectPrAgentReview,
   createPrAgentReviewClient,
+  extractPrAgentReviewResponse,
   finalizePrAgentReviewRun,
   prAgentReviewInputEnvelope,
   prAgentReviewContext,
@@ -6274,15 +6274,17 @@ test('PR agent review workflow is automatic, bounded, and retains evidence', () 
   assert.equal(review['continue-on-error'], true);
   assert.match(review.run, /(?:^|\n)\s*if copilot \\/);
   assert.doesNotMatch(review.run, /\$/);
-  assert.match(review.run, /--prompt "Review only the untrusted pull-request patch JSON/);
+  assert.doesNotMatch(review.run, /--prompt/);
   assert.match(review.run, /--model auto/);
+  assert.match(review.run, /--output-format=json/);
   assert.match(review.run, /--available-tools=__slipstream_no_tools__/);
   assert.match(review.run, /--deny-tool=read/);
   assert.match(review.run, /--deny-tool=write/);
   assert.match(review.run, /--max-autopilot-continues=0/);
-  assert.match(review.run, /< test-results\/pr-agent-review\/run\/input\.json/);
-  assert.match(review.run, /> test-results\/pr-agent-review\/run\/response\.json/);
-  assert.match(review.run, /--check-response-credential/);
+  assert.match(review.run, /< test-results\/pr-agent-review\/run\/prompt\.txt/);
+  assert.match(review.run, /> test-results\/pr-agent-review\/run\/events\.jsonl/);
+  assert.match(review.run, /--extract-response/);
+  assert.match(review.run, /rm -f test-results\/pr-agent-review\/run\/events\.jsonl/);
   assert.match(review.run, /rm -f test-results\/pr-agent-review\/run\/response\.json/);
   assert.equal(review['timeout-minutes'], 5);
   assert.equal(review['working-directory'], undefined);
@@ -6401,25 +6403,42 @@ test('PR agent review classifies invalid final responses without retaining detai
   );
 });
 
-test('PR agent review rejects and removes a response containing its credential', (context) => {
+test('PR agent review extracts one no-tools JSONL response and removes raw events', (context) => {
   const { root } = fixture(context);
   const directory = path.join(root, 'test-results/pr-agent-review/run');
+  const eventsPath = path.join(directory, 'events.jsonl');
   const responsePath = path.join(directory, 'response.json');
   fs.mkdirSync(directory, { recursive: true });
-  fs.writeFileSync(responsePath, '{"decision":"no-objection"}');
+  const response = '{"decision":"no-objection"}';
+  const events = [
+    {
+      type: 'model.call_finished',
+      data: { outcome: 'success', containsBuiltInFileEditRequest: false },
+    },
+    { type: 'assistant.message', data: { content: response, toolRequests: [] } },
+    { type: 'result' },
+  ];
+  fs.writeFileSync(eventsPath, `${events.map((event) => JSON.stringify(event)).join('\n')}\n`);
   assert.doesNotThrow(() =>
-    checkPrAgentReviewResponseCredential({
+    extractPrAgentReviewResponse({
       root,
       env: { COPILOT_GITHUB_TOKEN: 'synthetic-review-token' },
     }),
   );
-  fs.writeFileSync(responsePath, '{"message":"synthetic-review-token"}');
+  assert.equal(fs.readFileSync(responsePath, 'utf8'), response);
+  assert.equal(fs.existsSync(eventsPath), false);
+  fs.rmSync(responsePath);
+  fs.writeFileSync(
+    eventsPath,
+    `${JSON.stringify({ type: 'assistant.message', data: { content: 'synthetic-review-token' } })}\n`,
+  );
   assert.throws(() =>
-    checkPrAgentReviewResponseCredential({
+    extractPrAgentReviewResponse({
       root,
       env: { COPILOT_GITHUB_TOKEN: 'synthetic-review-token' },
     }),
   );
+  assert.equal(fs.existsSync(eventsPath), false);
   assert.equal(fs.existsSync(responsePath), false);
 });
 
