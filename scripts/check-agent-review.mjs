@@ -236,11 +236,22 @@ export function prAgentReviewPrompt(prepared) {
   return prompt;
 }
 
+function invalidPrAgentReviewResponse(responseClass) {
+  const error = new Error('Invalid PR review response');
+  error.responseClass = responseClass;
+  return error;
+}
+
 export function validatePrAgentReviewResponse(bytes, prepared) {
   if (!Buffer.isBuffer(bytes) || !bytes.length || bytes.length > AGENT_REVIEW_LIMITS.outputBytes) {
-    throw new Error('Invalid PR review response');
+    throw invalidPrAgentReviewResponse('schema');
   }
-  const response = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes));
+  let response;
+  try {
+    response = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes));
+  } catch {
+    throw invalidPrAgentReviewResponse('json');
+  }
   if (
     !response ||
     Array.isArray(response) ||
@@ -257,15 +268,19 @@ export function validatePrAgentReviewResponse(bytes, prepared) {
         ].sort(),
       ) ||
     response.schemaVersion !== 1 ||
-    response.repository !== prepared.repository ||
-    response.number !== prepared.number ||
-    response.head !== prepared.head ||
-    response.inputSha256 !== prepared.inputSha256 ||
     !['no-objection', 'changes-requested'].includes(response.decision) ||
     !Array.isArray(response.findings) ||
     response.findings.length > AGENT_REVIEW_LIMITS.findings
   ) {
-    throw new Error('Invalid PR review response');
+    throw invalidPrAgentReviewResponse('schema');
+  }
+  if (
+    response.repository !== prepared.repository ||
+    response.number !== prepared.number ||
+    response.head !== prepared.head ||
+    response.inputSha256 !== prepared.inputSha256
+  ) {
+    throw invalidPrAgentReviewResponse('binding');
   }
   const allowed = new Set(prepared.files.map((file) => file.filename));
   for (const finding of response.findings) {
@@ -280,14 +295,14 @@ export function validatePrAgentReviewResponse(bytes, prepared) {
       !finding.message.trim() ||
       Buffer.byteLength(finding.message) > 2000
     ) {
-      throw new Error('Invalid PR review finding');
+      throw invalidPrAgentReviewResponse('finding');
     }
   }
   if (
     (response.decision === 'no-objection' && response.findings.length !== 0) ||
     (response.decision === 'changes-requested' && response.findings.length === 0)
   ) {
-    throw new Error('Invalid PR review decision');
+    throw invalidPrAgentReviewResponse('decision');
   }
   return response;
 }

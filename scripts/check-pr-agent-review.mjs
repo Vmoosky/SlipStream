@@ -21,7 +21,15 @@ export const PR_AGENT_REVIEW_MARKER = '<!-- slipstream-pr-agent-review:v1 -->';
 const REPORT_PATH = 'test-results/pr-agent-review/report.json';
 const SUMMARY_PATH = 'test-results/pr-agent-review/summary.md';
 const RUN_PATH = 'test-results/pr-agent-review/run';
-const RETAINED_FAILURE_PHASES = new Set(['response', 'usage', 'publication']);
+const RETAINED_FAILURE_PHASES = new Set([
+  'response-json',
+  'response-schema',
+  'response-binding',
+  'response-finding',
+  'response-decision',
+  'usage',
+  'publication',
+]);
 
 function requireReview(condition) {
   if (!condition) throw new Error('Invalid or incomplete PR agent review evidence');
@@ -249,8 +257,13 @@ export async function finalizePrAgentReviewRun({
   let response;
   try {
     response = validatePrAgentReviewResponse(responseBytes, prepared);
-  } catch {
-    throw finalizationFailure('response');
+  } catch (error) {
+    const responseClass = ['json', 'schema', 'binding', 'finding', 'decision'].includes(
+      error?.responseClass,
+    )
+      ? error.responseClass
+      : 'schema';
+    throw finalizationFailure(`response-${responseClass}`);
   }
   let usage;
   try {
