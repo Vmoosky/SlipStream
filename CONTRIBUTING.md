@@ -67,6 +67,23 @@ locked manifest, and repository-scoped working directory without writing files o
 logging hook input. These controls do not grant publication, merge, secret, or
 user-store access, and they do not replace `npm run validate` or human review.
 
+### Shared agent memory
+
+[MEMORY.md](MEMORY.md) holds concise, version-controlled project knowledge and an
+optional current handoff for later sessions. The
+[Copilot workspace instructions](.github/copilot-instructions.md) and
+[Claude Code instructions](CLAUDE.md) direct agents to read it at session start.
+Other clients may need it opened explicitly; this is not a custom memory service
+or a guarantee that every client automatically loads it.
+
+Keep memory at most 100 lines, cite verified sources and dates, and recheck notes
+against the current revision before acting. Record only reusable findings and a
+bounded handoff, not secrets, private data, raw transcripts, or generated reports.
+Update it only during authorized editing work, never as a side effect of read-only
+review or validation. Local notes persist in that checkout; sharing them requires
+the normal reviewed commit/push workflow, not automatic publication. Historical
+results in memory do not satisfy current validation or approval requirements.
+
 ### Claude Code project commands
 
 Start Claude Code in the Slipstream checkout to use these explicitly invoked
