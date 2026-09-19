@@ -1061,6 +1061,18 @@ recompute omitted raw response/usage evidence. Keep the original report and the
 separate decision record for later authenticated verification; no live ledger,
 resolution claim, scheduler, or automatic publication is created by this feature.
 
+To aggregate reviewed disposition records without claiming unavailable evidence,
+run the keep-rate evaluator with report/record pairs:
+
+```sh
+npm run agent:keep-rate -- test-results/maintenance/run-EXAMPLE/agent-review.json test-results/agent-review-dispositions.json
+```
+
+Its `keepRate` is `accepted / (accepted + rejected)`. Deferred and untriaged
+findings are excluded, and `keepRate` is `null` until at least one finding is
+accepted or rejected. The output remains local-consistency-only; it is not a
+production quality, repair-success, or approval metric.
+
 ### Verified Finding-To-Fix Links
 
 The existing read-only improvement collector can verify a repair link for an

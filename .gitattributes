@@ -8,6 +8,7 @@ scripts/develop.mjs text eol=lf
 scripts/install-hooks.mjs text eol=lf
 scripts/maintenance.mjs text eol=lf
 scripts/retire-improvement-rule.mjs text eol=lf
+scripts/agent/eval/* text eol=lf
 tests/check-docs.test.mjs text eol=lf
 tests/readiness.test.mjs text eol=lf
 .github/workflows/*.yml text eol=lf

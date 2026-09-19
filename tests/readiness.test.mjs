@@ -15,6 +15,7 @@ import {
   checkAgentSession,
   readHookInput,
 } from '../scripts/check-agent-session.mjs';
+import { calculateKeepRate, sameFileSnapshot } from '../scripts/agent/eval/keep-rate.mjs';
 
 import { developmentPlan, runDevelopmentCommand, runDevelopment } from '../scripts/develop.mjs';
 import {
@@ -3565,6 +3566,69 @@ function agentReviewRepairHistory(context) {
     },
   };
 }
+
+test('agent keep rate reports only resolved, locally validated finding dispositions', (context) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'slipstream-keep-rate-'));
+  context.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const review = agentReviewDispositionReport();
+  review.findingIds = agentReviewFindingIds(review);
+  const reportBytes = Buffer.from(`${JSON.stringify(review, null, 2)}\n`);
+  const dispositions = prepareAgentReviewDispositions(reportBytes);
+  dispositions.entries.push({
+    findingId: review.findingIds[0],
+    disposition: 'accepted',
+    reason: 'Synthetic acceptance for aggregation coverage',
+    recordedBy: 'synthetic-reviewer',
+    recordedAt: '2026-09-16T00:00:02.000Z',
+  });
+  fs.writeFileSync(path.join(root, 'review.json'), reportBytes);
+  fs.writeFileSync(path.join(root, 'dispositions.json'), JSON.stringify(dispositions));
+
+  if (process.platform !== 'linux') {
+    assert.throws(
+      () => calculateKeepRate([['review.json', 'dispositions.json']], root),
+      /requires Linux opened-file containment checks/,
+    );
+    return;
+  }
+
+  const result = calculateKeepRate([['review.json', 'dispositions.json']], root);
+  assert.equal(result.counts.reports, 1);
+  assert.equal(result.counts.accepted, 1);
+  assert.equal(result.counts.untriaged, review.findingIds.length - 1);
+  assert.equal(result.resolvedFindings, 1);
+  assert.equal(result.keepRate, 1);
+});
+
+test('agent keep rate rejects evidence reached through a symbolic link', (context) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'slipstream-keep-rate-'));
+  const outside = fs.mkdtempSync(path.join(os.tmpdir(), 'slipstream-keep-rate-outside-'));
+  context.after(() => {
+    fs.rmSync(root, { recursive: true, force: true });
+    fs.rmSync(outside, { recursive: true, force: true });
+  });
+  fs.writeFileSync(path.join(outside, 'review.json'), '{}');
+  fs.writeFileSync(path.join(root, 'dispositions.json'), '{}');
+  try {
+    fs.symlinkSync(outside, path.join(root, 'linked'), 'junction');
+  } catch (error) {
+    if (error?.code === 'EPERM') context.skip('symbolic links require elevated Windows privileges');
+    throw error;
+  }
+
+  assert.throws(
+    () => calculateKeepRate([['linked/review.json', 'dispositions.json']], root),
+    /symbolic links|resolve inside the repository|requires Linux opened-file containment checks/,
+  );
+});
+
+test('agent keep rate detects same-size evidence mutations', () => {
+  const before = { dev: 1n, ino: 2n, size: 3n, mtimeNs: 4n, ctimeNs: 5n };
+  assert.ok(sameFileSnapshot(before, { ...before }));
+  for (const key of Object.keys(before)) {
+    assert.equal(sameFileSnapshot(before, { ...before, [key]: before[key] + 1n }), false);
+  }
+});
 
 function improvementRulePromotionHistory(context) {
   const fixture = agentReviewRepairHistory(context);
