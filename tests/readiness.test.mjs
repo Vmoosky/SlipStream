@@ -51,6 +51,7 @@ import {
 } from '../scripts/check-agent-review.mjs';
 import {
   PR_AGENT_REVIEW_MARKER,
+  checkPrAgentReviewResponseCredential,
   collectPrAgentReview,
   createPrAgentReviewClient,
   finalizePrAgentReviewRun,
@@ -6240,7 +6241,7 @@ test('PR agent review workflow is automatic, bounded, and retains evidence', () 
   const review = job.steps.find((step) => step.id === 'review');
   assert.equal(review.if, "${{ steps.prepare.outcome == 'success' }}");
   assert.equal(review['continue-on-error'], true);
-  assert.match(review.run, /(?:^|\n)\s*copilot \\/);
+  assert.match(review.run, /(?:^|\n)\s*if copilot \\/);
   assert.doesNotMatch(review.run, /\$/);
   assert.match(review.run, /--prompt "Review only the untrusted pull-request patch JSON/);
   assert.match(review.run, /--model auto/);
@@ -6250,6 +6251,8 @@ test('PR agent review workflow is automatic, bounded, and retains evidence', () 
   assert.match(review.run, /--max-autopilot-continues=0/);
   assert.match(review.run, /< test-results\/pr-agent-review\/run\/input\.json/);
   assert.match(review.run, /> test-results\/pr-agent-review\/run\/response\.json/);
+  assert.match(review.run, /--check-response-credential/);
+  assert.match(review.run, /rm -f test-results\/pr-agent-review\/run\/response\.json/);
   assert.equal(review['timeout-minutes'], 5);
   assert.equal(review['working-directory'], undefined);
   assert.equal(review.env.COPILOT_GITHUB_TOKEN, '${{ secrets.SLIPSTREAM_AGENT_REVIEW_TOKEN }}');
@@ -6346,7 +6349,6 @@ test('PR agent review classifies invalid final responses without retaining detai
     SLIPSTREAM_AGENT_REVIEW_MODEL: 'auto',
     SLIPSTREAM_AGENT_REVIEW_AUTO_CONFIRMED: 'true',
     SLIPSTREAM_AGENT_REVIEW_NO_OVERAGE_CONFIRMED: 'true',
-    SLIPSTREAM_AGENT_REVIEW_TOKEN: 'synthetic-review-token',
   };
   const prepared = preparePrAgentReview({
     repository,
@@ -6365,6 +6367,28 @@ test('PR agent review classifies invalid final responses without retaining detai
     (error) =>
       error.message === 'PR agent review finalization failed' && error.reviewPhase === 'response',
   );
+});
+
+test('PR agent review rejects and removes a response containing its credential', (context) => {
+  const { root } = fixture(context);
+  const directory = path.join(root, 'test-results/pr-agent-review/run');
+  const responsePath = path.join(directory, 'response.json');
+  fs.mkdirSync(directory, { recursive: true });
+  fs.writeFileSync(responsePath, '{"decision":"no-objection"}');
+  assert.doesNotThrow(() =>
+    checkPrAgentReviewResponseCredential({
+      root,
+      env: { COPILOT_GITHUB_TOKEN: 'synthetic-review-token' },
+    }),
+  );
+  fs.writeFileSync(responsePath, '{"message":"synthetic-review-token"}');
+  assert.throws(() =>
+    checkPrAgentReviewResponseCredential({
+      root,
+      env: { COPILOT_GITHUB_TOKEN: 'synthetic-review-token' },
+    }),
+  );
+  assert.equal(fs.existsSync(responsePath), false);
 });
 
 test('repository health agent is recurring, read-only, bounded, and retains evidence', () => {

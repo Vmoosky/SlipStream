@@ -209,6 +209,17 @@ export async function preparePrAgentReviewRun({
   return { ...context, base: prepared.base, inputSha256: prepared.inputSha256, executable };
 }
 
+export function checkPrAgentReviewResponseCredential({ root, env = process.env } = {}) {
+  const responsePath = path.join(root, RUN_PATH, 'response.json');
+  const token = env.COPILOT_GITHUB_TOKEN;
+  requireReview(typeof token === 'string' && token.length > 0);
+  const responseBytes = readBounded(responsePath, AGENT_REVIEW_LIMITS.outputBytes);
+  if (responseBytes.includes(token)) {
+    fs.rmSync(responsePath, { force: true });
+    throw new Error('PR agent review response contains a credential');
+  }
+}
+
 export async function finalizePrAgentReviewRun({
   root,
   env = process.env,
@@ -235,7 +246,6 @@ export async function finalizePrAgentReviewRun({
     path.join(directory, 'response.json'),
     AGENT_REVIEW_LIMITS.outputBytes,
   );
-  requireReview(!responseBytes.includes(env.SLIPSTREAM_AGENT_REVIEW_TOKEN));
   let response;
   try {
     response = validatePrAgentReviewResponse(responseBytes, prepared);
@@ -405,11 +415,20 @@ export async function runPrAgentReview({ env = process.env, event, fetcher = fet
 
 async function main() {
   const args = process.argv.slice(2);
-  if (args.length !== 1 || !['--prepare', '--finalize'].includes(args[0])) {
-    throw new Error('Usage: check-pr-agent-review.mjs --prepare | --finalize');
+  if (
+    args.length !== 1 ||
+    !['--prepare', '--check-response-credential', '--finalize'].includes(args[0])
+  ) {
+    throw new Error(
+      'Usage: check-pr-agent-review.mjs --prepare | --check-response-credential | --finalize',
+    );
+  }
+  const root = fileURLToPath(new URL('../', import.meta.url));
+  if (args[0] === '--check-response-credential') {
+    checkPrAgentReviewResponseCredential({ root });
+    return;
   }
   const event = JSON.parse(fs.readFileSync(process.env.GITHUB_EVENT_PATH, 'utf8'));
-  const root = fileURLToPath(new URL('../', import.meta.url));
   try {
     if (args[0] === '--prepare') {
       const prepared = await preparePrAgentReviewRun({ root, event });
