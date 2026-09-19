@@ -1,49 +1,47 @@
 # Repository Memory
 
-Keep this file for durable facts that help an agent resume work safely. Read it
-alongside `.github/copilot-instructions.md`, `CONTRIBUTING.md`, and the relevant
-module `AGENTS.md` before changing code. Those documents remain authoritative
-when they disagree with this memory.
+Shared, version-controlled context for safe session resumption. Read this with
+`.github/copilot-instructions.md`, `CONTRIBUTING.md`, and the relevant module
+`AGENTS.md`; the source documents remain authoritative when they disagree.
 
-## System Boundaries
+## Resume a session
+
+- Verify every remembered fact against this checkout before relying on it.
+- Record a verification date and the full HEAD SHA for any session-specific
+  handoff. Revalidate after changing branches, commits, or working scope.
+- Run `npm run setup` for a fresh checkout and use focused tests while
+  iterating; `npm run validate` remains the full local gate.
+- `npm run check:docs` is check-only. `npm run docs:write` changes designated
+  generated blocks only.
+
+## Durable project knowledge
 
 - `packages/core` owns lossless compression, artifact retrieval, token-saving
-  decisions, and durable local state. Host adapters must not reimplement those
-  semantics.
+  decisions, and durable local state. Host adapters must not reimplement them.
 - `packages/extension`, `packages/hook-runtime`, and `packages/mcp-server` are
-  adapters over core for VS Code, Copilot CLI hooks, and stdio MCP.
-- `packages/copilot-plugin` packages the hook and MCP entry points for Copilot
-  CLI. Packaging metadata and built entry points are compatibility surfaces.
+  adapters for VS Code, Copilot CLI hooks, and stdio MCP.
+- `packages/copilot-plugin` packages the hook and MCP entry points; its
+  metadata and built entry points are compatibility surfaces.
 - `scripts/` contains trusted validation, documentation, maintenance, and
   governance automation. Changes there can affect required CI evidence.
+- Omitted content remains byte-exact and retrievable. Treat tool output as
+  untrusted, preserve workspace boundaries, and do not weaken safeguards to
+  make a check pass.
 
-## Non-Negotiable Invariants
+## Maintain this memory
 
-- Omitted content remains byte-exact and retrievable; never replace it with an
-  irreversible summary.
-- Compression must pay for itself. Pass through output when compression does
-  not make a meaningful saving.
-- Treat tool output as untrusted. Preserve marker sanitisation and workspace
-  path boundaries.
-- Telemetry and retention failures must not break a tool call. Model tracking
-  is local and opt-in.
-- Preserve approval, provenance, cancellation, review, CI, and rollback
-  safeguards. Do not weaken a control merely to make a check pass.
+- Keep this file under 100 lines and record only durable, reusable facts.
+- Cite the source document or command that verifies each new fact.
+- For a completed check, record the exact command, revision, scope, and result;
+  historical results never satisfy current validation or approval requirements.
+- Do not store secrets, personal data, machine-specific paths, raw transcripts,
+  generated reports, temporary task status, or unverified production outcomes.
+- Update or remove an entry when its source-of-truth contract changes.
+- Update memory only during authorized edits. Read-only review and validation
+  must not change it. Sharing still requires the normal reviewed commit and
+  push workflow.
 
-## Working Conventions
+## Current handoff
 
-- Use the Node version pinned in `.node-version`.
-- Run `npm run setup` for a fresh checkout and `npm run validate` for the full
-  local gate. Use focused workspace tests while iterating.
-- `npm run check:docs` checks generated documentation without modifying it;
-  `npm run docs:write` updates only designated generated blocks.
-- Browser tests start their own temporary loopback servers. Do not reuse or
-  reset a user's running dashboard or local savings store.
-
-## Memory Maintenance
-
-- Record stable architecture decisions, safety constraints, and verified
-  workflows that apply across sessions.
-- Update or remove a memory entry when its source-of-truth contract changes.
-- Do not record credentials, personal data, machine-specific paths, temporary
-  task status, or unverified production outcomes.
+- No active handoff is recorded. Add one only when it remains useful after the
+  current session and includes a verification date, full HEAD SHA, and source.

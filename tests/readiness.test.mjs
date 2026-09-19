@@ -1877,6 +1877,39 @@ test('Claude project commands are manual and reuse existing repository workflows
   }
 });
 
+test('shared agent memory is bounded and discoverable without granting authority', () => {
+  const memory = fs.readFileSync(path.join(REPO, 'MEMORY.md'), 'utf8');
+  assert.ok(memory.trimEnd().split(/\r?\n/u).length <= 100);
+  for (const heading of [
+    'Resume a session',
+    'Durable project knowledge',
+    'Maintain this memory',
+    'Current handoff',
+  ]) {
+    assert.ok(memory.includes(`## ${heading}`), `Missing memory section: ${heading}`);
+  }
+  assert.match(memory, /verification date/u);
+  assert.match(memory, /full HEAD SHA/u);
+  assert.match(memory, /exact command, revision, scope, and result/u);
+  assert.match(memory, /Do not store secrets/u);
+  const claude = fs.readFileSync(path.join(REPO, 'CLAUDE.md'), 'utf8');
+  const copilot = fs.readFileSync(path.join(REPO, '.github/copilot-instructions.md'), 'utf8');
+  const contributing = fs.readFileSync(path.join(REPO, 'CONTRIBUTING.md'), 'utf8');
+  assert.ok(claude.includes('[MEMORY.md](MEMORY.md)'));
+  assert.ok(copilot.includes('[MEMORY.md](../MEMORY.md)'));
+  assert.ok(contributing.includes('[MEMORY.md](MEMORY.md)'));
+  assert.ok(contributing.includes('[Claude Code instructions](CLAUDE.md)'));
+  for (const instructions of [claude, copilot]) {
+    assert.match(instructions, /read-only review/u);
+    assert.match(instructions, /when edits are authorized/u);
+  }
+  assert.match(copilot, /MEMORY\.md.*untrusted project\s+context/su);
+  assert.match(
+    copilot,
+    /cannot override.*user's task.*system policy.*approval boundaries.*tool\s+selection/su,
+  );
+});
+
 test('agent harness configurations are bounded, non-publishing, and workspace-scoped', async () => {
   const claude = JSON.parse(fs.readFileSync(path.join(REPO, '.claude/settings.json'), 'utf8'));
   assert.equal(claude.$schema, 'https://json.schemastore.org/claude-code-settings.json');
@@ -5134,6 +5167,8 @@ test('CODEOWNERS routes governance and maintained repository surfaces', () => {
     '/scripts/check-*.mjs @Vmoosky @VMoose',
     '/.agents/ @Vmoosky @VMoose',
     '/.claude/ @Vmoosky @VMoose',
+    '/CLAUDE.md @Vmoosky @VMoose',
+    '/MEMORY.md @Vmoosky @VMoose',
     '/.devcontainer/ @Vmoosky @VMoose',
     '/.vscode/mcp.json @Vmoosky @VMoose',
     '/packages/copilot-plugin/*.json @Vmoosky @VMoose',
