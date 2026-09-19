@@ -833,8 +833,10 @@ Activation requires the owner's separate authorization and configuration:
 The automatic PR Agent Review uses the same dedicated secret only for its bounded
 model step. Diff preparation and finding publication use the workflow token and
 do not receive the Copilot credential. Failed finalization retains only an
-allowlisted `response`, `usage`, or `publication` phase; raw model output, usage
-details, exception text, and credentials are not retained.
+allowlisted `response-json`, `response-schema`, `response-binding`,
+`response-finding`, `response-decision`, `usage`, or `publication` phase; raw
+model output, field values, usage details, exception text, and credentials are
+not retained.
 
 The runtime is the SHA-512-pinned Linux x64 Copilot CLI package `1.0.86`.
 Download and integrity checks precede the credential-bearing step; extraction
