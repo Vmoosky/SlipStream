@@ -176,6 +176,39 @@ The hook checks commits with staged additions, copies, modifications, or renames
 empty and deletion-only commits do not trigger lint-staged tasks. Hooks are a local,
 bypassable guard, not a replacement for `npm run validate` or required CI gates.
 
+### Optional pre-commit framework
+
+[.pre-commit-config.yaml](.pre-commit-config.yaml) provides an ESLint-only
+alternative for contributors already using the
+[pre-commit framework](https://pre-commit.com/). After repository setup, with
+pre-commit 3.2 or newer installed separately, run:
+
+```sh
+pre-commit validate-config
+pre-commit run eslint --files scripts/develop.mjs
+pre-commit run eslint --all-files
+```
+
+The local system hook uses the locked ESLint installation in `node_modules` and
+the existing [ESLint configuration](eslint.config.mjs), including import-boundary
+rules and generated/fixture exclusions. It accepts `.js`, `.mjs`, `.cjs`, `.ts`,
+`.mts`, and `.cts` files, matching the existing lint scope. Normal hook runs check
+selected staged files; `--files` and `--all-files` inspect working-tree content.
+Filenames are passed as separate arguments, including paths with spaces. Errors
+or warnings fail the check; ignored files do not produce misleading warnings.
+The hook does not download its own Node/ESLint, fix files, format, build, typecheck,
+test, package, or install dependencies. Missing Node or dependencies is a setup
+failure, not a passing lint result.
+
+Husky remains the default hook manager. These manual commands can be used without
+installing another Git hook. Do not run `pre-commit install` over Husky or another
+existing hook configuration. If deliberately choosing the pre-commit framework
+as the sole manager, install its hook only in a checkout without another manager,
+after reviewing existing hooks; never overwrite or bypass them. This narrower
+lint-only path does not replace Husky's formatting check, full validation, or CI.
+No Python or Go source is maintained here, so Ruff and golangci-lint are not added
+just to satisfy a scanner convention.
+
 ## Test Coverage
 
 Run the instrumented suites from the repository root:
