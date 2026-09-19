@@ -250,7 +250,7 @@ export function validatePrAgentReviewResponse(bytes, prepared) {
   let response;
   try {
     const text = new TextDecoder('utf-8', { fatal: true }).decode(bytes).trim();
-    const fenced = /^```json\r?\n([\s\S]*)\r?\n```$/.exec(text);
+    const fenced = /^```(?:json)?\r?\n([\s\S]*)\r?\n```$/i.exec(text);
     response = JSON.parse(fenced ? fenced[1] : text);
   } catch {
     throw invalidPrAgentReviewResponse('json');
