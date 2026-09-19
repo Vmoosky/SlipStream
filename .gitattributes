@@ -1,4 +1,5 @@
 .gitattributes text eol=lf
+.pre-commit-config.yaml text eol=lf
 eslint.config.mjs text eol=lf
 lint-staged.config.mjs text eol=lf
 playwright.config.ts text eol=lf

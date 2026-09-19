@@ -1,0 +1,14 @@
+minimum_pre_commit_version: '3.2.0'
+repos:
+  - repo: local
+    hooks:
+      - id: eslint
+        name: ESLint (JavaScript and TypeScript)
+        entry: node node_modules/eslint/bin/eslint.js
+        args: [--max-warnings, '0', --no-warn-ignored]
+        language: system
+        files: '\.(?:[cm]?[jt]s)$'
+        types: [file]
+        pass_filenames: true
+        require_serial: true
+        stages: [pre-commit]

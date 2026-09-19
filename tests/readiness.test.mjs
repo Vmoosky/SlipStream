@@ -2253,7 +2253,7 @@ function developmentFixture(context) {
   return { root, npmCli, nodeVersion: '24.14.1', log: () => {} };
 }
 
-test('development runner and label configuration retain LF in Windows-style Git checkouts', (context) => {
+test('development runner and hook configuration retain LF in Windows-style Git checkouts', (context) => {
   const { root } = fixture(context);
   const files = [
     'scripts/develop.mjs',
@@ -2261,6 +2261,7 @@ test('development runner and label configuration retain LF in Windows-style Git 
     'lint-staged.config.mjs',
     '.husky/pre-commit',
     '.github/labeler.yml',
+    '.pre-commit-config.yaml',
   ];
   const checkout = path.join(root, 'windows checkout');
   fs.copyFileSync(path.join(REPO, '.gitattributes'), path.join(root, '.gitattributes'));
@@ -8140,6 +8141,7 @@ function precommitFixture(context) {
   for (const file of [
     '.gitattributes',
     '.prettierrc.json',
+    '.pre-commit-config.yaml',
     '.husky/pre-commit',
     'eslint.config.mjs',
     'lint-staged.config.mjs',
@@ -8195,6 +8197,77 @@ function precommitFixture(context) {
   };
   return { root, env, git, npm, install, probe };
 }
+
+test('pre-commit framework configuration reuses local ESLint without broadening lint scope', async () => {
+  const file = path.join(REPO, '.pre-commit-config.yaml');
+  const text = fs.readFileSync(file, 'utf8');
+  const configuration = parse(text);
+  assert.deepEqual(configuration, {
+    minimum_pre_commit_version: '3.2.0',
+    repos: [
+      {
+        repo: 'local',
+        hooks: [
+          {
+            id: 'eslint',
+            name: 'ESLint (JavaScript and TypeScript)',
+            entry: 'node node_modules/eslint/bin/eslint.js',
+            args: ['--max-warnings', '0', '--no-warn-ignored'],
+            language: 'system',
+            files: '\\.(?:[cm]?[jt]s)$',
+            types: ['file'],
+            pass_filenames: true,
+            require_serial: true,
+            stages: ['pre-commit'],
+          },
+        ],
+      },
+    ],
+  });
+  const hook = configuration.repos[0].hooks[0];
+  const files = new RegExp(hook.files, 'u');
+  for (const extension of ['js', 'mjs', 'cjs', 'ts', 'mts', 'cts']) {
+    assert.equal(files.test(`packages/core/src/file with spaces.${extension}`), true);
+  }
+  for (const filename of ['README.md', 'package.json', 'workflow.yml', 'module.py', 'main.go']) {
+    assert.equal(files.test(filename), false);
+  }
+  assert.equal(await check(text, { ...(await resolveConfig(file)), filepath: file }), true);
+});
+
+test('pre-commit framework ESLint entry checks only selected files without modifying them', (context) => {
+  const { root, env, git, probe } = precommitFixture(context);
+  const configuration = parse(fs.readFileSync(path.join(root, '.pre-commit-config.yaml'), 'utf8'));
+  const hook = configuration.repos[0].hooks[0];
+  const [command, ...entry] = hook.entry.split(' ');
+  assert.equal(command, 'node');
+  const lint = (files) =>
+    spawnSync(process.execPath, [...entry, ...hook.args, ...files], {
+      cwd: root,
+      env,
+      encoding: 'utf8',
+      timeout: 30_000,
+    });
+  const valid = 'scripts/check-file with spaces.mjs';
+  const validBytes = 'console.log("lint does not enforce formatting")\n';
+  fs.writeFileSync(path.join(root, valid), validBytes);
+  fs.writeFileSync(probe, 'debugger;\n');
+  const tree = git(['write-tree']);
+  const configBefore = fs.readFileSync(path.join(root, '.git/config'), 'utf8');
+  const passed = lint([valid]);
+  assert.equal(passed.status, 0, `${passed.stdout}\n${passed.stderr}`);
+  const failed = lint(['scripts/check-hook-probe.mjs']);
+  assert.equal(failed.status, 1, `${failed.stdout}\n${failed.stderr}`);
+  assert.match(failed.stdout, /no-debugger/u);
+  fs.mkdirSync(path.join(root, 'dist'));
+  fs.writeFileSync(path.join(root, 'dist/ignored.ts'), 'not valid syntax!');
+  const ignored = lint(['dist/ignored.ts']);
+  assert.equal(ignored.status, 0, `${ignored.stdout}\n${ignored.stderr}`);
+  assert.equal(fs.readFileSync(path.join(root, valid), 'utf8'), validBytes);
+  assert.equal(fs.readFileSync(probe, 'utf8'), 'debugger;\n');
+  assert.equal(git(['write-tree']), tree);
+  assert.equal(fs.readFileSync(path.join(root, '.git/config'), 'utf8'), configBefore);
+});
 
 test('pre-commit installation is explicit and repeatable without changing the index', (context) => {
   const { root, git, install } = precommitFixture(context);
