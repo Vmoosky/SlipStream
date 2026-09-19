@@ -3584,6 +3584,14 @@ test('agent keep rate reports only resolved, locally validated finding dispositi
   fs.writeFileSync(path.join(root, 'review.json'), reportBytes);
   fs.writeFileSync(path.join(root, 'dispositions.json'), JSON.stringify(dispositions));
 
+  if (process.platform !== 'linux') {
+    assert.throws(
+      () => calculateKeepRate([['review.json', 'dispositions.json']], root),
+      /requires Linux opened-file containment checks/,
+    );
+    return;
+  }
+
   const result = calculateKeepRate([['review.json', 'dispositions.json']], root);
   assert.equal(result.counts.reports, 1);
   assert.equal(result.counts.accepted, 1);
@@ -3610,7 +3618,7 @@ test('agent keep rate rejects evidence reached through a symbolic link', (contex
 
   assert.throws(
     () => calculateKeepRate([['linked/review.json', 'dispositions.json']], root),
-    /symbolic links|resolve inside the repository/,
+    /symbolic links|resolve inside the repository|requires Linux opened-file containment checks/,
   );
 });
 

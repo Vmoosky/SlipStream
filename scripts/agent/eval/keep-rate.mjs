@@ -6,6 +6,9 @@ import { AGENT_REVIEW_LIMITS, validateAgentReviewDispositions } from '../../chec
 const ROOT = fileURLToPath(new URL('../../../', import.meta.url));
 
 function readBoundedFile(root, file, limit) {
+  if (process.platform !== 'linux') {
+    throw new Error('Evidence evaluation requires Linux opened-file containment checks');
+  }
   const canonicalRoot = fs.realpathSync.native(root);
   const requested = path.resolve(canonicalRoot, file);
   const requestedRelative = path.relative(canonicalRoot, requested);
@@ -44,10 +47,6 @@ function assertNoSymlinkComponents(root, relativeFile) {
 }
 
 function assertOpenedFileIsInsideRoot(root, relativeFile, descriptor) {
-  if (process.platform !== 'linux') {
-    assertNoSymlinkComponents(root, relativeFile);
-    return;
-  }
   const target = fs.realpathSync.native(`/proc/self/fd/${descriptor}`);
   const targetRelative = path.relative(root, target);
   if (
