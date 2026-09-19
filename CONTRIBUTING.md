@@ -602,8 +602,11 @@ human approval. Invalid, stale, proposed, or already-retired versions fail close
 For a source repair already registered in the same evidence registry, owners can
 dispatch **Governed Remediation Rollback** with its merged PR number and a
 bounded reason. The workflow verifies the registry reference and same-repository
-default-branch merge, reverts that merge, runs `npm run validate`, and opens a
-new pull request. It uses the same dedicated token and has no merge authority.
+default-branch merge. Only repairs merged with a two-parent merge commit are
+eligible; squash and rebase merges fail closed because they do not provide the
+single merge boundary this workflow reverts. The workflow runs `npm run validate`
+and opens a new pull request. It uses the same dedicated token and has no merge
+authority.
 
 Run the focused offline checks from the repository root:
 

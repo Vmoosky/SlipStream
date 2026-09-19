@@ -7424,6 +7424,7 @@ test('improvement remediation rollback is limited to registered repairs and open
   assert.deepEqual(workflow.permissions, { contents: 'read' });
   assert.equal(workflow.jobs['propose-revert'].env.GH_TOKEN, undefined);
   assert.match(source, /secrets\.SLIPSTREAM_ROLLBACK_TOKEN/);
+  assert.match(source, /two-parent merge commit; squash and rebase merges are not eligible/);
   assert.match(source, /git revert --mainline 1 --no-commit/);
   assert.match(source, /git diff --cached --name-only/);
   assert.match(source, /npm run validate/);

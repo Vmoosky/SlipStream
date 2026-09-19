@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       repair_pull_request:
-        description: Registered merged repair PR to revert
+        description: Registered repair PR merged with a merge commit
         required: true
         type: string
       reason:
@@ -77,7 +77,10 @@ jobs:
           merge_sha="$(jq -r '.merge_commit_sha' <<<"$pr")"
           [[ "$merge_sha" =~ ^[a-f0-9]{40}$ ]]
           git merge-base --is-ancestor "$merge_sha" HEAD
-          test "$(git rev-list --parents -n 1 "$merge_sha" | wc -w)" -eq 3
+          if test "$(git rev-list --parents -n 1 "$merge_sha" | wc -w)" -ne 3; then
+            echo '::error::Rollback requires a repair PR merged with a two-parent merge commit; squash and rebase merges are not eligible.'
+            exit 1
+          fi
           echo "merge-sha=$merge_sha" >> "$GITHUB_OUTPUT"
       - name: Revert the registered repair and validate the repository
         shell: bash
