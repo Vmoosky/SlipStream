@@ -249,18 +249,25 @@ export function extractPrAgentReviewResponse({ root, env = process.env } = {}) {
       ),
     );
     const messages = events.filter((event) => event.type === 'assistant.message');
+    const responses = messages.filter(
+      (event) => typeof event.data?.content === 'string' && event.data.content.trim().length > 0,
+    );
     const completions = events.filter((event) => event.type === 'model.call_finished');
     requireReview(
-      messages.length === 1 &&
+      messages.length > 0 &&
+        messages.every(
+          (event) =>
+            Array.isArray(event.data?.toolRequests) &&
+            event.data.toolRequests.length === 0 &&
+            typeof event.data.content === 'string',
+        ) &&
+        responses.length === 1 &&
         completions.length === 1 &&
         completions[0].data?.outcome === 'success' &&
         completions[0].data?.containsBuiltInFileEditRequest === false &&
-        events.filter((event) => event.type === 'result').length === 1 &&
-        Array.isArray(messages[0].data?.toolRequests) &&
-        messages[0].data.toolRequests.length === 0 &&
-        typeof messages[0].data.content === 'string',
+        events.filter((event) => event.type === 'result').length === 1,
     );
-    const responseBytes = Buffer.from(messages[0].data.content);
+    const responseBytes = Buffer.from(responses[0].data.content);
     requireReview(
       responseBytes.length > 0 && responseBytes.length <= AGENT_REVIEW_LIMITS.outputBytes,
     );

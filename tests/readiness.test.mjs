@@ -6471,7 +6471,9 @@ test('PR agent review extracts one no-tools JSONL response and removes raw event
       type: 'model.call_finished',
       data: { outcome: 'success', containsBuiltInFileEditRequest: false },
     },
+    { type: 'assistant.message', data: { content: '', toolRequests: [] } },
     { type: 'assistant.message', data: { content: response, toolRequests: [] } },
+    { type: 'assistant.message', data: { content: '', toolRequests: [] } },
     { type: 'result' },
   ];
   fs.writeFileSync(eventsPath, `${events.map((event) => JSON.stringify(event)).join('\n')}\n`);
@@ -6484,6 +6486,24 @@ test('PR agent review extracts one no-tools JSONL response and removes raw event
   assert.equal(fs.readFileSync(responsePath, 'utf8'), response);
   assert.equal(fs.existsSync(eventsPath), false);
   fs.rmSync(responsePath);
+  fs.writeFileSync(
+    eventsPath,
+    `${events
+      .toSpliced(2, 0, {
+        type: 'assistant.message',
+        data: { content: '{"decision":"changes-requested"}', toolRequests: [] },
+      })
+      .map((event) => JSON.stringify(event))
+      .join('\n')}\n`,
+  );
+  assert.throws(() =>
+    extractPrAgentReviewResponse({
+      root,
+      env: { COPILOT_GITHUB_TOKEN: 'synthetic-review-token' },
+    }),
+  );
+  assert.equal(fs.existsSync(eventsPath), false);
+  assert.equal(fs.existsSync(responsePath), false);
   fs.writeFileSync(
     eventsPath,
     `${JSON.stringify({ type: 'assistant.message', data: { content: 'synthetic-review-token' } })}\n`,
