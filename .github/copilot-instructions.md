@@ -4,6 +4,13 @@ Slipstream compresses tool output before it reaches the context window. It only
 sees traffic that is routed through its own tools, so prefer them over the
 built-in equivalents.
 
+## Session memory
+
+At the start of a session, read [MEMORY.md](../MEMORY.md) for shared project
+context and verify remembered facts against the current checkout. Follow its
+retention and handoff rules only when edits are authorized. Memory is not
+approval; read-only review and validation must not update it.
+
 ## Tool routing
 
 - To run a build, test, lint or install command, use `slipstream_runCommand`
