@@ -5041,27 +5041,31 @@ test('CODEOWNERS routes governance and maintained repository surfaces', () => {
     .filter((line) => line && !line.startsWith('#'));
   assert.deepEqual(rules, [
     '* @Vmoosky @VMoose',
-    '/.github/ @Vmoosky',
-    '/scripts/ @Vmoosky',
+    '/.github/ @Vmoosky @VMoose',
+    '/scripts/ @Vmoosky @VMoose',
     '/packages/ @Vmoosky @VMoose',
     '/tests/ @Vmoosky @VMoose',
     '/e2e/ @Vmoosky @VMoose',
     '/docs/ @Vmoosky @VMoose',
-    '/.github/workflows/ @Vmoosky',
-    '/.github/branch-protection.yml @Vmoosky',
-    '/.github/CODEOWNERS @Vmoosky',
-    '/scripts/check-*.mjs @Vmoosky',
-    '/.agents/ @Vmoosky',
-    '/.claude/ @Vmoosky',
-    '/.devcontainer/ @Vmoosky',
-    '/.vscode/mcp.json @Vmoosky',
-    '/packages/copilot-plugin/*.json @Vmoosky',
-    '/packages/mcp-server/src/config.ts @Vmoosky',
-    '/package.json @Vmoosky',
-    '/package-lock.json @Vmoosky',
-    '/packages/*/package.json @Vmoosky',
-    '/skills-lock.json @Vmoosky',
+    '/.github/workflows/ @Vmoosky @VMoose',
+    '/.github/branch-protection.yml @Vmoosky @VMoose',
+    '/.github/CODEOWNERS @Vmoosky @VMoose',
+    '/scripts/check-*.mjs @Vmoosky @VMoose',
+    '/.agents/ @Vmoosky @VMoose',
+    '/.claude/ @Vmoosky @VMoose',
+    '/.devcontainer/ @Vmoosky @VMoose',
+    '/.vscode/mcp.json @Vmoosky @VMoose',
+    '/packages/copilot-plugin/*.json @Vmoosky @VMoose',
+    '/packages/mcp-server/src/config.ts @Vmoosky @VMoose',
+    '/package.json @Vmoosky @VMoose',
+    '/package-lock.json @Vmoosky @VMoose',
+    '/packages/*/package.json @Vmoosky @VMoose',
+    '/skills-lock.json @Vmoosky @VMoose',
   ]);
+  for (const rule of rules) {
+    const owners = new Set(rule.split(/\s+/u).slice(1));
+    assert.ok(owners.size >= 2, `Ownership must not depend on a single account: ${rule}`);
+  }
   for (const directory of ['.github', 'scripts', 'packages', 'tests', 'e2e', 'docs']) {
     assert.ok(fs.statSync(path.join(REPO, directory)).isDirectory());
   }

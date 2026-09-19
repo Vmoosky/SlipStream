@@ -286,17 +286,21 @@ Disable force pushes, branch deletion, and routine bypasses. Keep merges manual.
 [branch policy](.github/branch-protection.yml) declares the intended settings;
 editing it does not update GitHub. Verify the active `main` ruleset separately.
 
-[CODEOWNERS](.github/CODEOWNERS) routes general changes to the existing owners and
-governance-sensitive changes to Vmoosky. Explicit last-match overrides cover
+[CODEOWNERS](.github/CODEOWNERS) routes general and governance-sensitive changes
+to Vmoosky and VMoose, both existing collaborators with write access.
+Every rule retains both eligible accounts so neither account is the sole owner.
+Explicit last-match overrides cover
 workflows and release automation, policy and ownership definitions, validation
 scripts, agent/MCP configuration, dependency manifests, and lockfiles. Changes to
 these rules require approval using the ownership rules on the PR base branch.
 Listing multiple owners requires approval from any one eligible owner, not all.
 
-A PR author cannot approve their own PR. A Vmoosky-authored change to a path solely
-owned by Vmoosky therefore needs an eligible second code owner established on the
-base branch before it can satisfy this requirement. Do not bypass the rule or
-claim independent human approval through an alternate account. A separate
+A PR author cannot approve their own PR. Until these ownership changes reach the
+base branch, its older sole-owner rules still apply: an ownership-update PR needs
+an author other than that sole owner and approval from the existing owner.
+Do not bypass the rule or claim independent human approval through an alternate
+account. Multiple eligible accounts prevent an account-level bottleneck but do
+not establish independent people. A separate
 governance reviewer must be a confirmed different person with write access (or an
 eligible team); the existing account names alone do not establish independence.
 Solo-maintainer mode does not claim an independent approval.
