@@ -588,11 +588,13 @@ Supported Node.js: >=20. The pinned development runtime is in [.node-version](..
 | test:dashboard | npm run test:e2e -- |
 | typecheck | npm run typecheck --workspaces --if-present |
 | lint | eslint . --max-warnings 0 |
-| format:check | prettier --check eslint.config.mjs lint-staged.config.mjs playwright.config.ts scripts/check-*.mjs scripts/develop.mjs scripts/install-hooks.mjs scripts/maintenance.mjs tests/check-docs.test.mjs tests/readiness.test.mjs .claude/settings.json .github/hooks/*.json .github/workflows/*.yml .github/branch-protection.yml .github/dependabot.yml .github/labeler.yml .vscode/mcp.json |
+| format:check | prettier --check eslint.config.mjs lint-staged.config.mjs playwright.config.ts scripts/check-*.mjs scripts/develop.mjs scripts/install-hooks.mjs scripts/maintenance.mjs scripts/retire-improvement-rule.mjs tests/check-docs.test.mjs tests/readiness.test.mjs .claude/settings.json .github/hooks/*.json .github/workflows/*.yml .github/branch-protection.yml .github/dependabot.yml .github/labeler.yml .vscode/mcp.json |
 | check:docs | node scripts/check-docs.mjs |
 | docs:write | node scripts/check-docs.mjs --write |
 | maintenance:docs | node scripts/maintenance.mjs |
 | improvement:report | node scripts/check-improvement.mjs |
+| improvement:rollback | node scripts/retire-improvement-rule.mjs |
+| improvement:rollback-repair | node scripts/check-remediation-rollback.mjs |
 | benchmark:snapshot | node scripts/benchmark.mjs --markdown |
 | benchmark:recommendations | node scripts/benchmark.mjs --model-recommendations |
 | proof-table | node scripts/proof-table.mjs |
@@ -614,5 +616,5 @@ Supported Node.js: >=20. The pinned development runtime is in [.node-version](..
 | precommit | node scripts/develop.mjs precommit |
 | test:coverage | npm run build && npm run test:coverage --workspaces --if-present |
 
-<!-- source-sha256: 82a3f8199c92d937f766889f0dd1e7025dbacf119605333062a9c3972b5aec84 -->
+<!-- source-sha256: 6d256818f029bc390b6f26a69870625887720b19bee8e8242395c31fa000a323 -->
 <!-- slipstream-reference:build:end -->

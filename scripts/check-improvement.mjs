@@ -1021,6 +1021,18 @@ export function validateImprovementRegistry(registry) {
   return registry.regressions;
 }
 
+export function registeredRepairPullRequests(registry) {
+  const regressions = validateImprovementRegistry(registry);
+  return [
+    ...new Set([
+      ...regressions.flatMap((regression) =>
+        regression.repair ? [regression.repair.pullRequest] : [],
+      ),
+      ...(registry.agentReviewRepairs ?? []).map((repair) => repair.pullRequest),
+    ]),
+  ].sort((left, right) => left - right);
+}
+
 export async function collectImprovementReports({
   repository,
   branch,

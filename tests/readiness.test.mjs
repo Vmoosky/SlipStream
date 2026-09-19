@@ -27,6 +27,7 @@ import {
   improvementRuleHash,
   parseImprovementRuleRegistry,
   readImprovementRules,
+  retireImprovementRule,
   validateImprovementRules,
   validateImprovementRuleTransition,
 } from '../scripts/check-improvement-rules.mjs';
@@ -72,6 +73,7 @@ import {
   verifyAgentReviewRepair,
   verifyImprovementRulePromotion,
   improvementIdentity,
+  registeredRepairPullRequests,
   runImprovementReview,
 } from '../scripts/check-improvement.mjs';
 import { createHash } from 'node:crypto';
@@ -7357,6 +7359,97 @@ test('improvement learned rules enforce bounded schema and immutable lifecycle',
     [[{ ...retired, version: 2 }], [{ ...retired, version: 2 }, proposed]],
   ])
     assert.throws(() => validateImprovementRuleTransition(registry(before), registry(after)));
+});
+
+test('improvement learned rule rollback retires only an exact active version', () => {
+  const active = improvementRule();
+  const proposed = improvementRule({ id: 'proposed-rule', status: 'proposed' });
+  const registry = { schemaVersion: 1, regressions: [], learnedRules: [active, proposed] };
+  const retired = retireImprovementRule(
+    registry,
+    active.id,
+    active.version,
+    'No longer applicable.',
+  );
+  assert.equal(registry.learnedRules[0].status, 'active');
+  assert.deepEqual(retired.learnedRules[0], {
+    ...active,
+    status: 'retired',
+    reason: 'No longer applicable.',
+  });
+  assert.equal(improvementRuleHash(retired.learnedRules[0]), improvementRuleHash(active));
+  assert.throws(() => retireImprovementRule(registry, proposed.id, proposed.version, 'Invalid.'));
+  assert.throws(() => retireImprovementRule(registry, active.id, 2, 'Invalid.'));
+  assert.throws(() =>
+    retireImprovementRule(registry, active.id, active.version, 'Invalid\nreason.'),
+  );
+});
+
+test('improvement learned rule rollback workflow opens a PR without merge authority', () => {
+  const source = fs.readFileSync(
+    path.join(REPO, '.github/workflows/learned-rule-rollback.yml'),
+    'utf8',
+  );
+  const workflow = parse(source);
+  assert.equal(workflow.name, 'Governed Learned Rule Remediation Rollback');
+  assert.deepEqual(Object.keys(workflow.on), ['workflow_dispatch']);
+  assert.deepEqual(workflow.permissions, { contents: 'read' });
+  assert.deepEqual(workflow.jobs['propose-retirement'].permissions, {
+    contents: 'write',
+    'pull-requests': 'write',
+  });
+  assert.equal(workflow.jobs['propose-retirement'].env.GH_TOKEN, undefined);
+  assert.match(source, /secrets\.SLIPSTREAM_ROLLBACK_TOKEN/);
+  assert.match(source, /persist-credentials: false/);
+  assert.match(source, /gh pr create/);
+  assert.doesNotMatch(source, /gh pr merge|enable-auto-merge|merge_group/);
+});
+
+test('improvement remediation rollback is limited to registered repairs and opens a guarded revert PR', () => {
+  const registry = {
+    schemaVersion: 1,
+    regressions: [
+      {
+        findingId: 'b'.repeat(64),
+        beforeRunId: '1',
+        afterRunId: '2',
+        job: UNIT_JOBS[0],
+        suite: UNIT_REPORTS[0],
+        testName: 'Registered repair regression',
+        repair: { fixCommit: 'c'.repeat(40), pullRequest: 17 },
+      },
+    ],
+    agentReviewRepairs: [
+      {
+        findingId: 'd'.repeat(64),
+        reviewRunId: '3',
+        reviewReportPath: 'run-review/agent-review.json',
+        reviewReportSha256: 'e'.repeat(64),
+        dispositionsPath: '.github/agent-review-dispositions/review.json',
+        dispositionsSha256: 'f'.repeat(64),
+        fixCommit: '1'.repeat(40),
+        pullRequest: 19,
+        afterRunId: '4',
+      },
+    ],
+  };
+  assert.deepEqual(registeredRepairPullRequests(registry), [17, 19]);
+  assert.throws(() => registeredRepairPullRequests({ ...registry, command: 'unsafe' }));
+  const source = fs.readFileSync(
+    path.join(REPO, '.github/workflows/remediation-rollback.yml'),
+    'utf8',
+  );
+  const workflow = parse(source);
+  assert.deepEqual(Object.keys(workflow.on), ['workflow_dispatch']);
+  assert.deepEqual(workflow.permissions, { contents: 'read' });
+  assert.equal(workflow.jobs['propose-revert'].env.GH_TOKEN, undefined);
+  assert.match(source, /secrets\.SLIPSTREAM_ROLLBACK_TOKEN/);
+  assert.match(source, /two-parent merge commit; squash and rebase merges are not eligible/);
+  assert.match(source, /git revert --mainline 1 --no-commit/);
+  assert.match(source, /git diff --cached --name-only/);
+  assert.match(source, /npm run validate/);
+  assert.match(source, /gh pr create/);
+  assert.doesNotMatch(source, /git add --all|gh pr merge|enable-auto-merge|merge_group/);
 });
 
 test('improvement learned rule loader rejects invalid bytes and linked paths', (context) => {

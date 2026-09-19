@@ -1,0 +1,116 @@
+name: Governed Remediation Rollback
+
+on:
+  workflow_dispatch:
+    inputs:
+      repair_pull_request:
+        description: Registered repair PR merged with a merge commit
+        required: true
+        type: string
+      reason:
+        description: Bounded rollback reason for reviewers
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: remediation-rollback-${{ inputs.repair_pull_request }}
+  cancel-in-progress: false
+
+jobs:
+  propose-revert:
+    if: ${{ github.ref == format('refs/heads/{0}', github.event.repository.default_branch) && github.run_attempt == 1 }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: write
+      pull-requests: write
+    env:
+      REPAIR_PR: ${{ inputs.repair_pull_request }}
+      ROLLBACK_REASON: ${{ inputs.reason }}
+    steps:
+      - name: Require trusted default-branch context and dedicated token
+        shell: bash
+        env:
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          GH_TOKEN: ${{ secrets.SLIPSTREAM_ROLLBACK_TOKEN }}
+        run: |
+          set -euo pipefail
+          test -n "$DEFAULT_BRANCH"
+          test -n "$GH_TOKEN"
+          test "$GITHUB_EVENT_NAME" = 'workflow_dispatch'
+          test "$GITHUB_RUN_ATTEMPT" = '1'
+          test "$GITHUB_REF" = "refs/heads/$DEFAULT_BRANCH"
+          test "$GITHUB_WORKFLOW_REF" = "$GITHUB_REPOSITORY/.github/workflows/remediation-rollback.yml@refs/heads/$DEFAULT_BRANCH"
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version-file: .node-version
+          cache: npm
+          cache-dependency-path: package-lock.json
+      - name: Install locked dependencies and build verifier
+        timeout-minutes: 5
+        run: |
+          npm ci --ignore-scripts
+          npm run build --workspace @slipstream/core
+      - id: repair
+        name: Verify registered same-repository repair
+        shell: bash
+        env:
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          GH_TOKEN: ${{ secrets.SLIPSTREAM_ROLLBACK_TOKEN }}
+        run: |
+          set -euo pipefail
+          node scripts/check-remediation-rollback.mjs "$REPAIR_PR" "$ROLLBACK_REASON"
+          pr="$(gh api "repos/$GITHUB_REPOSITORY/pulls/$REPAIR_PR")"
+          test "$(jq -r '.state' <<<"$pr")" = 'closed'
+          test "$(jq -r '.merged_at' <<<"$pr")" != 'null'
+          test "$(jq -r '.base.ref' <<<"$pr")" = "$DEFAULT_BRANCH"
+          test "$(jq -r '.base.repo.full_name' <<<"$pr")" = "$GITHUB_REPOSITORY"
+          test "$(jq -r '.head.repo.full_name' <<<"$pr")" = "$GITHUB_REPOSITORY"
+          merge_sha="$(jq -r '.merge_commit_sha' <<<"$pr")"
+          [[ "$merge_sha" =~ ^[a-f0-9]{40}$ ]]
+          git merge-base --is-ancestor "$merge_sha" HEAD
+          if test "$(git rev-list --parents -n 1 "$merge_sha" | wc -w)" -ne 3; then
+            echo '::error::Rollback requires a repair PR merged with a two-parent merge commit; squash and rebase merges are not eligible.'
+            exit 1
+          fi
+          echo "merge-sha=$merge_sha" >> "$GITHUB_OUTPUT"
+      - name: Revert the registered repair and validate the repository
+        shell: bash
+        env:
+          MERGE_SHA: ${{ steps.repair.outputs.merge-sha }}
+        run: |
+          set -euo pipefail
+          git revert --mainline 1 --no-commit "$MERGE_SHA"
+          test -n "$(git diff --cached --name-only)"
+          npm run validate
+          git diff --quiet
+          test -z "$(git ls-files --others --exclude-standard)"
+      - name: Open a guarded rollback pull request
+        shell: bash
+        env:
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          GH_TOKEN: ${{ secrets.SLIPSTREAM_ROLLBACK_TOKEN }}
+        run: |
+          set -euo pipefail
+          branch="rollback/remediation-pr-${REPAIR_PR}-${GITHUB_RUN_ID}"
+          body="$RUNNER_TEMP/remediation-rollback.md"
+          printf 'Reverts registered remediation PR #%s.\n\nReason: %s\n\nNormal required checks and independent human approval still apply.\n' "$REPAIR_PR" "$ROLLBACK_REASON" > "$body"
+          git config user.name 'slipstream-rollback'
+          git config user.email 'slipstream-rollback@users.noreply.github.com'
+          gh auth setup-git
+          git switch -c "$branch"
+          git commit -m "Revert registered remediation PR #${REPAIR_PR}"
+          git push --set-upstream origin "$branch"
+          gh pr create \
+            --base "$DEFAULT_BRANCH" \
+            --head "$branch" \
+            --title "Rollback registered remediation PR #${REPAIR_PR}" \
+            --body-file "$body"
