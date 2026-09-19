@@ -612,6 +612,22 @@ contracts. No-op runs remain no-ops. Pause live review with its existing opt-in
 variable; roll back a criterion through a reviewed retirement or new version,
 not by editing historical evidence. The collector never writes rule state.
 
+Owners can dispatch **Governed Learned Rule Remediation Rollback** from the default branch
+with an exact active rule ID, version, and bounded reason. Configure the dedicated
+`SLIPSTREAM_ROLLBACK_TOKEN` with contents and pull-request write access. The
+workflow validates the irreversible active-to-retired transition and opens a
+branch and pull request; it cannot merge or bypass required checks or independent
+human approval. Invalid, stale, proposed, or already-retired versions fail closed.
+
+For a source repair already registered in the same evidence registry, owners can
+dispatch **Governed Remediation Rollback** with its merged PR number and a
+bounded reason. The workflow verifies the registry reference and same-repository
+default-branch merge. Only repairs merged with a two-parent merge commit are
+eligible; squash and rebase merges fail closed because they do not provide the
+single merge boundary this workflow reverts. The workflow runs `npm run validate`
+and opens a new pull request. It uses the same dedicated token and has no merge
+authority.
+
 Run the focused offline checks from the repository root:
 
 ```sh

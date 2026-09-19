@@ -163,6 +163,23 @@ export function validateImprovementRuleTransition(before, after) {
   return next;
 }
 
+export function retireImprovementRule(registry, id, version, reason) {
+  const rules = validateImprovementRules(registry);
+  requireRule(typeof id === 'string' && /^[a-z0-9][a-z0-9-]{0,79}$/.test(id));
+  requireRule(Number.isSafeInteger(version) && version > 0);
+  requireRule(boundedText(reason, 2000));
+  const index = rules.findIndex((rule) => rule.id === id && rule.version === version);
+  requireRule(index >= 0 && rules[index].status === 'active');
+  const next = structuredClone(registry);
+  next.learnedRules[index] = {
+    ...next.learnedRules[index],
+    status: 'retired',
+    reason: reason.trim(),
+  };
+  validateImprovementRuleTransition(registry, next);
+  return next;
+}
+
 export function parseImprovementRuleRegistry(bytes) {
   requireRule(
     Buffer.isBuffer(bytes) &&
