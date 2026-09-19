@@ -67,6 +67,24 @@ locked manifest, and repository-scoped working directory without writing files o
 logging hook input. These controls do not grant publication, merge, secret, or
 user-store access, and they do not replace `npm run validate` or human review.
 
+### Claude Code project commands
+
+Start Claude Code in the Slipstream checkout to use these explicitly invoked
+project commands:
+
+| Command | Purpose |
+| --- | --- |
+| `/slipstream-setup` | [Check prerequisites and run the existing setup runner](.claude/commands/slipstream-setup.md). Reinstalls locked dependencies, builds, and downloads Chromium. |
+| `/slipstream-validate` | [Run the full validation gate](.claude/commands/slipstream-validate.md). Reports failures without automatically repairing source. |
+| `/slipstream-review` | [Review local changes without executing or modifying them](.claude/commands/slipstream-review.md). Reports findings, not approval. |
+
+The `slipstream-` prefix avoids collisions with built-in commands. Each command
+disables automatic model invocation and adds no tool permissions, hooks, or model
+overrides. Existing workspace trust and permission prompts still apply.
+These are Claude Code command files, not GitHub Copilot slash commands. Their
+presence does not establish successful execution or guarantee a readiness-score
+increase; Copilot users can use the documented npm commands and PR checklist.
+
 Browser tests start temporary loopback servers and cover desktop/mobile layouts.
 They do not need a running dashboard or the user's savings store. The
 [offline workload](tests/fixtures/outcome-workload) deliberately fails before the
