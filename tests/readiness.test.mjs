@@ -1846,6 +1846,36 @@ test('PR observability workflow writes metadata only from trusted default-branch
   );
 });
 
+test('Claude project commands are manual and reuse existing repository workflows', () => {
+  const directory = path.join(REPO, '.claude/commands');
+  const filenames = fs.readdirSync(directory).filter((file) => file.endsWith('.md'));
+  const commands = ['slipstream-setup', 'slipstream-validate', 'slipstream-review'];
+  assert.ok(filenames.length >= 3);
+  const manifest = JSON.parse(fs.readFileSync(path.join(REPO, 'package.json'), 'utf8'));
+  for (const command of commands) {
+    assert.ok(filenames.includes(`${command}.md`));
+    const text = fs.readFileSync(path.join(directory, `${command}.md`), 'utf8');
+    const match = /^---\r?\n([\s\S]*?)\r?\n---\r?\n/u.exec(text);
+    assert.ok(match, `${command} requires YAML frontmatter`);
+    const metadata = parse(match[1]);
+    assert.deepEqual(Object.keys(metadata).sort(), ['description', 'disable-model-invocation']);
+    assert.equal(metadata['disable-model-invocation'], true);
+    assert.equal(typeof metadata.description, 'string');
+    assert.ok(metadata.description.trim().length > 0);
+    assert.match(text, /\.\.\/settings\.json/u);
+    assert.doesNotMatch(text, /!`/u);
+    if (command !== 'slipstream-review') {
+      const script = command.slice('slipstream-'.length);
+      assert.equal(manifest.scripts[script], `node scripts/develop.mjs ${script}`);
+      assert.ok(text.includes(`npm run ${script}`));
+    } else {
+      assert.match(text, /read-only/u);
+      assert.ok(text.includes('git --no-pager diff --cached'));
+      assert.ok(text.includes('git --no-pager diff'));
+    }
+  }
+});
+
 test('agent harness configurations are bounded, non-publishing, and workspace-scoped', async () => {
   const claude = JSON.parse(fs.readFileSync(path.join(REPO, '.claude/settings.json'), 'utf8'));
   assert.equal(claude.$schema, 'https://json.schemastore.org/claude-code-settings.json');
