@@ -11,8 +11,12 @@ The assessment used reported repository and GitHub API evidence. It found the
 root `pull_request_target` workflow but could not correlate the custom
 JavaScript implementation into its supported static LLM-review capability
 model. More importantly, static workflow inspection cannot prove successful
-execution. The hosted `PR Agent Review` runs visible at assessment time all
-predated the merged fenced-JSON compatibility fix and ended in failure.
+execution. A fresh run on PR 50 later proved preparation and model evaluation
+completed for the exact PR head, but finalization failed with the sanitized
+phase `pr-agent-review-response-json-failed`. The model input omitted the
+`inputSha256` value that the response contract required it to copy. The PR now
+includes a regression-tested correction to that handoff; success remains
+unverified until the updated hosted run completes.
 
 A runtime success claim therefore requires a fresh pull request against the
 post-fix default branch and all of the following bound evidence:

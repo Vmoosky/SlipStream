@@ -124,6 +124,12 @@ export async function collectPrAgentReview(context, client) {
   return preparePrAgentReview({ ...context, base: pull.base.sha, files });
 }
 
+export function prAgentReviewInputEnvelope(prepared) {
+  const input = JSON.parse(prepared.input.toString('utf8'));
+  requireReview(!Object.hasOwn(input, 'inputSha256'));
+  return { ...input, inputSha256: prepared.inputSha256 };
+}
+
 export function prAgentReviewFindingIds(prepared, response) {
   return response.findings.map((finding, index) =>
     sha256(
@@ -209,7 +215,7 @@ export async function preparePrAgentReviewRun({
   const archive = path.join(directory, AGENT_REVIEW_RUNTIME.archive);
   await downloadAgentReviewArchive(archive);
   const executable = await prepareAgentReviewRuntime(archive, directory);
-  const input = JSON.parse(prepared.input.toString('utf8'));
+  const input = prAgentReviewInputEnvelope(prepared);
   writeExclusive(path.join(directory, 'input.json'), `${JSON.stringify(input)}\n`);
   if (env.GITHUB_ACTIONS === 'true' && env.GITHUB_PATH) {
     fs.appendFileSync(env.GITHUB_PATH, `${path.dirname(executable)}\n`);

@@ -55,6 +55,7 @@ import {
   collectPrAgentReview,
   createPrAgentReviewClient,
   finalizePrAgentReviewRun,
+  prAgentReviewInputEnvelope,
   prAgentReviewContext,
   retainPrAgentReviewFailure,
   renderPrAgentReview,
@@ -6069,6 +6070,13 @@ test('PR agent review binds and bounds an untrusted pull request patch', (contex
     files: [{ filename: 'packages/core/src/index.ts', status: 'modified', patch: '@@ -1 +1 @@' }],
   });
   assert.match(prepared.inputSha256, /^[a-f0-9]{64}$/);
+  const envelope = prAgentReviewInputEnvelope(prepared);
+  assert.equal(envelope.inputSha256, prepared.inputSha256);
+  const { inputSha256, ...canonicalInput } = envelope;
+  assert.equal(
+    createHash('sha256').update(JSON.stringify(canonicalInput)).digest('hex'),
+    inputSha256,
+  );
   const args = prAgentReviewArguments(prepared, { model: 'synthetic-model' }, root);
   const prompt = args[args.indexOf('--prompt') + 1];
   assert.match(prompt, /BEGIN UNTRUSTED PR PATCH JSON/);
