@@ -532,12 +532,14 @@ export function classifyFailureContainment(root, options, scope) {
   const metadata = identity(options);
   const gate = scope === 'ci' ? verifyRequired(root, options) : verifySecurity(options);
   const failures = [...gate.errors];
+  let missingReport = false;
   if (scope === 'ci') {
     const reports = [
       ...UNIT_JOBS.map((job) => `ci-unit-${job}/ci-unit.json`),
       ...BROWSER_JOBS.map((job) => `ci-browser-${job}/ci-browser.json`),
     ];
     for (const file of reports) {
+      if (!fs.existsSync(path.join(root, file))) missingReport = true;
       try {
         const report = readJson(root, file);
         if (!Array.isArray(report.errors)) throw new Error('invalid errors');
@@ -549,6 +551,11 @@ export function classifyFailureContainment(root, options, scope) {
       }
     }
   }
+  const completeDependencies =
+    scope === 'ci' &&
+    ['unit', 'browser-proof', 'secrets'].every((job) => options.needs?.[job]?.result === 'success');
+  const incompletePartialRerun =
+    scope === 'ci' && BigInt(metadata.attempt) > 1n && completeDependencies && missingReport;
   const uniqueFailures = [...new Set(failures)].slice(0, 100);
   const categories = [
     ...new Set(
@@ -560,7 +567,9 @@ export function classifyFailureContainment(root, options, scope) {
   ].sort();
   const actions = categories.map((category) =>
     category === 'evidence'
-      ? 'Inspect missing or invalid CI evidence before retrying.'
+      ? incompletePartialRerun
+        ? 'Rerun the complete workflow to produce same-attempt evidence.'
+        : 'Inspect missing or invalid CI evidence before retrying.'
       : CONTAINMENT_RULES.find((rule) => rule.category === category).action,
   );
   return {
@@ -574,6 +583,7 @@ export function classifyFailureContainment(root, options, scope) {
     failures: uniqueFailures,
     categories,
     actions,
+    ...(incompletePartialRerun ? { classification: 'incomplete-partial-rerun' } : {}),
   };
 }
 

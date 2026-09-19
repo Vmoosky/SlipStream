@@ -383,7 +383,7 @@ test('agentic improvement workflow retains failures with read-only trusted execu
   );
 });
 
-function fixture(context) {
+function fixture(context, metadata = META) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'slipstream-ci-'));
   context.after(() => fs.rmSync(root, { recursive: true, force: true }));
   const write = (name, data) => {
@@ -428,8 +428,8 @@ function fixture(context) {
       checks: ['generated-manifests', 'local-links', 'json-examples', 'npm-scripts'],
       files: [...DOC_CONTRACTS].sort(),
       context: {
-        ...META,
-        comparedBase: META.baseRevision,
+        ...metadata,
+        comparedBase: metadata.baseRevision,
         changes: [{ status: 'M', path: 'docs/mcp.md' }],
         documents: [...DOC_CONTRACTS].sort(),
       },
@@ -448,20 +448,20 @@ function fixture(context) {
   return { root, write };
 }
 
-function artifacts(context) {
-  const { root, write } = fixture(context);
+function artifacts(context, metadata = META) {
+  const { root, write } = fixture(context, metadata);
   for (const job of UNIT_JOBS)
-    write(`ci-unit-${job}/ci-unit.json`, collectUnit(root, { ...META, job, steps: unitSteps }));
+    write(`ci-unit-${job}/ci-unit.json`, collectUnit(root, { ...metadata, job, steps: unitSteps }));
   for (const job of BROWSER_JOBS)
     write(
       `ci-browser-${job}/ci-browser.json`,
-      collectBrowser(root, { ...META, job, steps: browserSteps }),
+      collectBrowser(root, { ...metadata, job, steps: browserSteps }),
     );
   return {
     root,
     write,
     options: {
-      ...META,
+      ...metadata,
       documentation: JSON.parse(fs.readFileSync(path.join(root, 'docs.json'), 'utf8')).scope
         .context,
       needs: {
@@ -2753,6 +2753,41 @@ test('failure containment classifies bounded diagnostics and fails closed on mis
     'Inspect missing or invalid CI evidence before retrying.',
     'Reproduce the failing test suite locally.',
   ]);
+});
+
+test('failure containment identifies incomplete partial reruns without trusting prior attempts', (context) => {
+  const firstAttempt = artifacts(context);
+  fs.rmSync(path.join(firstAttempt.root, `ci-unit-${UNIT_JOBS[0]}`, 'ci-unit.json'));
+  const initialFailure = classifyFailureContainment(firstAttempt.root, firstAttempt.options, 'ci');
+  assert.equal(initialFailure.status, 'contained');
+  assert.equal(initialFailure.classification, undefined);
+
+  const rerunMetadata = { ...META, attempt: '2' };
+  const completeRerun = artifacts(context, rerunMetadata);
+  assert.equal(
+    classifyFailureContainment(completeRerun.root, completeRerun.options, 'ci').status,
+    'clear',
+  );
+
+  const partialRerun = artifacts(context, rerunMetadata);
+  fs.rmSync(path.join(partialRerun.root, `ci-unit-${UNIT_JOBS[0]}`, 'ci-unit.json'));
+  const incomplete = classifyFailureContainment(partialRerun.root, partialRerun.options, 'ci');
+  assert.equal(incomplete.status, 'contained');
+  assert.equal(incomplete.classification, 'incomplete-partial-rerun');
+  assert.ok(incomplete.failures.some((failure) => failure.includes('evidence unavailable')));
+  assert.ok(
+    incomplete.actions.includes('Rerun the complete workflow to produce same-attempt evidence.'),
+  );
+  assert.equal(verifyRequired(partialRerun.root, partialRerun.options).passed, false);
+
+  partialRerun.write(
+    `ci-unit-${UNIT_JOBS[0]}/ci-unit.json`,
+    collectUnit(partialRerun.root, { ...META, job: UNIT_JOBS[0], steps: unitSteps }),
+  );
+  const crossAttempt = classifyFailureContainment(partialRerun.root, partialRerun.options, 'ci');
+  assert.equal(crossAttempt.status, 'contained');
+  assert.equal(crossAttempt.classification, undefined);
+  assert.equal(verifyRequired(partialRerun.root, partialRerun.options).passed, false);
 });
 
 function improvementSnapshot(runId, revision, errors = []) {
