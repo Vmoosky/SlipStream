@@ -61,6 +61,7 @@ test('dangerous-command hook denies destructive shell commands through its confi
     'rm -r -f build',
     'rm --recursive --force build',
     'Remove-Item -Recurse -Force build',
+    'rm -Recurse -Force build',
     'git clean -fd',
     'git reset --hard HEAD',
     'git push origin main --force-with-lease',
