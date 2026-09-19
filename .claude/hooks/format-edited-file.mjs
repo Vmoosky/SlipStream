@@ -1,17 +1,27 @@
-import { existsSync } from 'node:fs';
+import { existsSync, realpathSync } from 'node:fs';
 import { relative, resolve } from 'node:path';
 import process from 'node:process';
 import { spawnSync } from 'node:child_process';
 
 const input = await readInput();
 const filePath = input?.tool_input?.file_path;
-const projectDirectory = input?.cwd ?? process.env.CLAUDE_PROJECT_DIR;
+const projectDirectory = process.env.CLAUDE_PROJECT_DIR ?? input?.cwd;
+const inputDirectory = input?.cwd ?? projectDirectory;
 
-if (typeof filePath === 'string' && typeof projectDirectory === 'string') {
-  const projectPath = resolve(projectDirectory);
-  const targetPath = resolve(filePath);
+if (
+  typeof filePath === 'string' &&
+  typeof projectDirectory === 'string' &&
+  typeof inputDirectory === 'string'
+) {
+  const projectPath = resolveExistingPath(projectDirectory);
+  const targetPath = resolveExistingPath(resolve(inputDirectory, filePath));
 
-  if (isProjectFile(projectPath, targetPath) && isPrettierFile(targetPath)) {
+  if (
+    projectPath &&
+    targetPath &&
+    isProjectFile(projectPath, targetPath) &&
+    isPrettierFile(targetPath)
+  ) {
     const prettier = resolve(projectPath, 'node_modules/prettier/bin/prettier.cjs');
 
     if (existsSync(prettier)) {
@@ -25,6 +35,14 @@ if (typeof filePath === 'string' && typeof projectDirectory === 'string') {
         process.exitCode = 2;
       }
     }
+  }
+}
+
+function resolveExistingPath(filePath) {
+  try {
+    return realpathSync.native(filePath);
+  } catch {
+    return undefined;
   }
 }
 
