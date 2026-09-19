@@ -268,8 +268,8 @@ Fixtures must contain synthetic data, never credentials or personal ledgers.
 
 ## Publication And Activation
 
-The workflow files prepare `ci-required` and `security-required`; their presence
-does not activate branch protection. The reviewed source snapshot was published
+The workflow files prepare `ci-required`, `security-required`, and `review`;
+their presence does not activate branch protection. The reviewed source snapshot was published
 as `4dd1559` on 2026-09-14. Future pushes, releases, and GitHub administration
 require the owner's separate approval; publication does not prove CI success or
 merge enforcement.
@@ -280,10 +280,26 @@ but ownership and a root license text still require confirmation. Do not invent 
 copyright holder or publish source, packages, or releases before that review.
 
 The owner must observe real successful and failed PR checks, and then require
-PRs with up-to-date `ci-required` and
-`security-required` results on `main`. Disable force pushes, branch deletion,
-and routine bypasses. Keep merges manual. CODEOWNERS routes review to Vmoosky;
-solo-maintainer mode does not claim an independent approval.
+PRs with up-to-date `ci-required`, `security-required`, and `review` results on
+`main`, including required code-owner approval and review-thread resolution.
+Disable force pushes, branch deletion, and routine bypasses. Keep merges manual. The
+[branch policy](.github/branch-protection.yml) declares the intended settings;
+editing it does not update GitHub. Verify the active `main` ruleset separately.
+
+[CODEOWNERS](.github/CODEOWNERS) routes general changes to the existing owners and
+governance-sensitive changes to Vmoosky. Explicit last-match overrides cover
+workflows and release automation, policy and ownership definitions, validation
+scripts, agent/MCP configuration, dependency manifests, and lockfiles. Changes to
+these rules require approval using the ownership rules on the PR base branch.
+Listing multiple owners requires approval from any one eligible owner, not all.
+
+A PR author cannot approve their own PR. A Vmoosky-authored change to a path solely
+owned by Vmoosky therefore needs an eligible second code owner established on the
+base branch before it can satisfy this requirement. Do not bypass the rule or
+claim independent human approval through an alternate account. A separate
+governance reviewer must be a confirmed different person with write access (or an
+eligible team); the existing account names alone do not establish independence.
+Solo-maintainer mode does not claim an independent approval.
 
 Enable secret scanning/push protection and private vulnerability reporting where
 available. CodeQL completion means analysis ran, not that all alerts are resolved;

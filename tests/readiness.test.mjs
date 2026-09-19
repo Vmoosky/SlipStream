@@ -4992,7 +4992,7 @@ test('security workflow isolates write permission and never builds untrusted PR 
   }
 });
 
-test('in-tree branch policy mirrors the enforced main ruleset and required jobs', () => {
+test('in-tree branch policy requires code-owner approval and existing required jobs', () => {
   const policy = parse(fs.readFileSync(path.join(REPO, '.github/branch-protection.yml'), 'utf8'));
   assert.deepEqual(policy, {
     schemaVersion: 1,
@@ -5008,8 +5008,8 @@ test('in-tree branch policy mirrors the enforced main ruleset and required jobs'
       requiredApprovals: 1,
       dismissStaleReviewsOnPush: true,
       requireLastPushApproval: true,
-      requireCodeOwnerReview: false,
-      requireReviewThreadResolution: false,
+      requireCodeOwnerReview: true,
+      requireReviewThreadResolution: true,
       requireApprovalForUnattributedChanges: true,
       allowedMergeMethods: ['merge', 'squash', 'rebase'],
     },
@@ -5047,6 +5047,20 @@ test('CODEOWNERS routes governance and maintained repository surfaces', () => {
     '/tests/ @Vmoosky @VMoose',
     '/e2e/ @Vmoosky @VMoose',
     '/docs/ @Vmoosky @VMoose',
+    '/.github/workflows/ @Vmoosky',
+    '/.github/branch-protection.yml @Vmoosky',
+    '/.github/CODEOWNERS @Vmoosky',
+    '/scripts/check-*.mjs @Vmoosky',
+    '/.agents/ @Vmoosky',
+    '/.claude/ @Vmoosky',
+    '/.devcontainer/ @Vmoosky',
+    '/.vscode/mcp.json @Vmoosky',
+    '/packages/copilot-plugin/*.json @Vmoosky',
+    '/packages/mcp-server/src/config.ts @Vmoosky',
+    '/package.json @Vmoosky',
+    '/package-lock.json @Vmoosky',
+    '/packages/*/package.json @Vmoosky',
+    '/skills-lock.json @Vmoosky',
   ]);
   for (const directory of ['.github', 'scripts', 'packages', 'tests', 'e2e', 'docs']) {
     assert.ok(fs.statSync(path.join(REPO, directory)).isDirectory());
