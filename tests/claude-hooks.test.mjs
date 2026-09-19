@@ -60,13 +60,16 @@ test('dangerous-command hook denies destructive shell commands through its confi
   const { project } = fixture(context);
   for (const command of [
     'rm -rf build',
+    'rm -r build',
     'rm -r -f build',
     'rm --recursive --force build',
     'Remove-Item -Recurse -Force build',
+    'Remove-Item -Recurse build',
     'rm -Recurse -Force build',
     'git clean -fd',
     'git reset --hard HEAD',
     'git push origin main --force-with-lease',
+    'git push -uf origin main',
   ]) {
     const result = runHook('PreToolUse', { command }, project);
     assert.equal(result.status, 0, `${result.error ?? ''}\n${result.stderr}`);
