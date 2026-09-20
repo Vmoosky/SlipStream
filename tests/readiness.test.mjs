@@ -9000,7 +9000,11 @@ test('failure escalation records are deduplicated, bounded and never claim resol
     'unit-linux-node24',
   ]);
   assert.ok(issue.body.includes(escalationMarker('.github/workflows/ci.yml')));
-  assert.ok(issue.body.includes('https://github.com/Vmoosky/SlipStream/actions/runs/501'));
+  // Assert the exact rendered line. A substring check would pass even if the run
+  // link were embedded in some other URL, and reads as URL sanitization.
+  const expectedRunUrl = `https://github.com/${repository}/actions/runs/501`;
+  assert.equal(issue.url, expectedRunUrl);
+  assert.ok(issue.body.split('\n').includes(`- Run: ${expectedRunUrl}`));
   assert.ok(issue.body.includes('No logs are included'));
   assert.doesNotMatch(issue.body, /secret|token|password/i);
   assert.ok(Buffer.byteLength(issue.title, 'utf8') <= ESCALATION_LIMITS.titleBytes);
