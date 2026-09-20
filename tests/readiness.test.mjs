@@ -16,6 +16,7 @@ import {
   readHookInput,
 } from '../scripts/check-agent-session.mjs';
 import { calculateKeepRate, sameFileSnapshot } from '../scripts/agent/eval/keep-rate.mjs';
+import { runQuiet } from '../scripts/agent/run-quiet.mjs';
 
 import { developmentPlan, runDevelopmentCommand, runDevelopment } from '../scripts/develop.mjs';
 import {
@@ -141,6 +142,43 @@ const unitSteps = Object.fromEntries(
 const browserSteps = Object.fromEntries(
   ['setup', 'chromium', 'validate'].map((name) => [name, { outcome: 'success' }]),
 );
+
+test('agent command wrappers are silent on success and include output on failure', async () => {
+  const success = await runQuiet(process.execPath, ['-e', "console.log('hidden success')"]);
+  assert.equal(success, undefined);
+  await assert.rejects(
+    runQuiet(process.execPath, ['-e', "console.error('useful failure'); process.exit(7) "]),
+    /exit code 7[\s\S]*useful failure/,
+  );
+});
+
+test('agent command wrappers delegate to existing npm commands', () => {
+  const root = path.join(REPO, 'scripts', 'agent');
+  const expected = {
+    'setup.mjs': "['run', 'setup']",
+    'validate.mjs': "['run', 'validate']",
+    'test.mjs': "['test']",
+  };
+  for (const [file, command] of Object.entries(expected)) {
+    const source = fs.readFileSync(path.join(root, file), 'utf8');
+    assert.match(source, new RegExp(`runNpmQuiet\\(${command.replace(/[\\[\\]]/g, '\\$&')}`));
+    assert.match(source, /console\.error\(error\.message\)/);
+  }
+});
+
+test('agent shell wrappers are silent on success and report captured failures', () => {
+  const root = path.join(REPO, 'scripts', 'agent');
+  const expected = {
+    'setup.sh': 'npm run setup',
+    'validate.sh': 'npm run validate',
+    'test.sh': 'npm test',
+  };
+  for (const [file, command] of Object.entries(expected)) {
+    const source = fs.readFileSync(path.join(root, file), 'utf8');
+    assert.match(source, new RegExp(`if ${command} >\\"\\$output\\" 2>&1; then`));
+    assert.match(source, /cat "\$output" >&2/);
+  }
+});
 
 test('agentic improvement evidence binds scheduled maintenance to one review artifact', (context) => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'slipstream-agentic-evidence-'));

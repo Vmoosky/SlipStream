@@ -10,6 +10,7 @@ scripts/maintenance.mjs text eol=lf
 scripts/retire-improvement-rule.mjs text eol=lf
 scripts/setup.ps1 text eol=lf
 scripts/setup.sh text eol=lf
+scripts/agent/*.sh text eol=lf
 scripts/agent/eval/* text eol=lf
 tests/check-docs.test.mjs text eol=lf
 tests/claude-hooks.test.mjs text eol=lf
