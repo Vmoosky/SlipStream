@@ -13,7 +13,7 @@ import { buildSummaryPayload, CompressionEngine, OwnedTaskUsage, recordTaskOutco
  * CSP posture is intact.
  */
 const source = fs.readFileSync(
-  path.join(__dirname, '..', '..', 'core', 'src', 'dashboard.ts'),
+  path.join(__dirname, '..', '..', 'core', 'src', 'dashboardPage.ts'),
   'utf8',
 );
 
