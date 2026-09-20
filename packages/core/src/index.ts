@@ -19,6 +19,7 @@ export * from './nativeChat.js';
 export * from './pricing.js';
 export * from './pricingCatalog.js';
 export * from './dashboard.js';
+export * from './dashboardPage.js';
 export * from './dashboardServer.js';
 export * from './compressors/logCompressor.js';
 export * from './compressors/compressorRegistry.js';

@@ -8,7 +8,6 @@ import {
   buildDetailPayload,
   buildModelPayload,
   buildSummaryPayload,
-  renderDashboardHtml,
   renderDashboardReportCsv,
   renderDashboardReportJson,
   renderDashboardReportMarkdown,
@@ -16,6 +15,7 @@ import {
   type DashboardModelTrackingControls,
   type DashboardServerStatus,
 } from './dashboard.js';
+import { renderDashboardHtml } from './dashboardPage.js';
 import type { CompressionEngine, EngineConfig } from './engine.js';
 import { isCompressionProfile } from './compressionProfiles.js';
 import { runHealthReport } from './health.js';
