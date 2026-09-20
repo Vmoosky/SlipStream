@@ -933,6 +933,12 @@ Every other request fails closed. The job holds `issues: write` with `contents`
 and `actions` read-only, so it cannot push, merge, rerun, cancel, or change
 source.
 
+Both inventories are paged to a bounded page count. If the open-issue list is
+still incomplete and no existing escalation issue was found, the run fails closed
+rather than risk opening a duplicate. A truncated job list is disclosed in the
+issue body and recorded as `jobInventoryComplete: false`, so a partial list is
+never presented as the full failure inventory.
+
 A failure opens one issue carrying a `slipstream-escalation` marker, or appends
 to the existing open one, so repeated failures do not create duplicates. Records
 contain run metadata only — run link, revision, and failed job names, bounded and

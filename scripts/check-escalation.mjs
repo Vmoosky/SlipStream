@@ -15,6 +15,7 @@ export const ESCALATION_LIMITS = Object.freeze({
   titleBytes: 200,
   jobs: 60,
   commentBytes: 4 * 1024,
+  pages: 10,
 });
 
 const MARKER_PREFIX = 'slipstream-escalation:v1:';
@@ -122,7 +123,25 @@ export function failedJobNames(jobs) {
   return [...new Set(failed)].sort().slice(0, ESCALATION_LIMITS.jobs);
 }
 
-export function buildEscalationIssue({ repository, branch, revision, runId, jobs, now }) {
+/** Distinct failed names before the display bound, so truncation can be disclosed. */
+function countFailed(jobs) {
+  return new Set(
+    jobs
+      .filter((job) => ['failure', 'timed_out', 'startup_failure'].includes(job?.conclusion))
+      .map((job) => safeJobName(job.name))
+      .filter((name) => name.length > 0),
+  ).size;
+}
+
+export function buildEscalationIssue({
+  repository,
+  branch,
+  revision,
+  runId,
+  jobs,
+  now,
+  jobsTruncated = false,
+}) {
   requireContext(/^[a-f0-9]{40}$/.test(revision ?? ''), 'An exact source revision is required');
   requireContext(/^[1-9]\d{0,15}$/.test(String(runId)), 'An exact run id is required');
   const failed = failedJobNames(jobs);
@@ -140,6 +159,9 @@ export function buildEscalationIssue({ repository, branch, revision, runId, jobs
       '',
       failed.length > 0 ? '**Failed jobs**' : '**Failed jobs:** none reported by the API.',
       ...failed.map((name) => `- \`${name}\``),
+      ...(jobsTruncated || failed.length < countFailed(jobs)
+        ? ['', 'This list is incomplete; open the run for the full job inventory.']
+        : []),
       '',
       'This issue was opened from run metadata only. No logs are included, nothing was',
       'rerun, and no source was changed. Diagnosis, the fix and closing this issue are',
@@ -205,8 +227,8 @@ export function createEscalationClient(repository, token, fetchImpl = fetch) {
   };
   const readable = [
     /^\/actions\/runs\/[1-9]\d{0,15}$/,
-    /^\/actions\/runs\/[1-9]\d{0,15}\/jobs\?per_page=100$/,
-    /^\/issues\?state=open&per_page=100$/,
+    /^\/actions\/runs\/[1-9]\d{0,15}\/jobs\?per_page=100&page=[1-9]\d{0,2}$/,
+    /^\/issues\?state=open&per_page=100&page=[1-9]\d{0,2}$/,
   ];
   const writable = [/^\/issues$/, /^\/issues\/[1-9]\d{0,15}\/comments$/];
   const request = async (method, resource, body) => {
@@ -247,6 +269,19 @@ export function findEscalationIssue(issues, marker) {
   return matches[0];
 }
 
+/** Bounded pagination. Reports truncation instead of silently returning a partial list. */
+export async function readAllPages(client, resource, key) {
+  const items = [];
+  for (let page = 1; page <= ESCALATION_LIMITS.pages; page += 1) {
+    const chunk = await client.json(`${resource}per_page=100&page=${page}`);
+    const batch = key ? chunk?.[key] : chunk;
+    requireContext(Array.isArray(batch), 'A paged inventory is required');
+    items.push(...batch);
+    if (batch.length < 100) return { items, truncated: false };
+  }
+  return { items, truncated: true };
+}
+
 export async function runEscalation({
   revision,
   env = process.env,
@@ -270,11 +305,19 @@ export async function runEscalation({
       run.head_repository?.full_name === identity.repository,
     'The triggering run no longer matches its event payload',
   );
-  const inventory = await client.json(`${runPath}/jobs?per_page=100`);
-  requireContext(Array.isArray(inventory?.jobs), 'A job inventory is required');
-  const issues = await client.json('/issues?state=open&per_page=100');
-  const existing = findEscalationIssue(issues, identity.marker);
-  const context = { ...identity, jobs: inventory.jobs, now };
+  const jobInventory = await readAllPages(client, `${runPath}/jobs?`, 'jobs');
+  const issueInventory = await readAllPages(client, '/issues?state=open&', null);
+  const existing = findEscalationIssue(issueInventory.items, identity.marker);
+  requireContext(
+    existing !== undefined || !issueInventory.truncated,
+    'Open-issue inventory is incomplete; refusing to risk a duplicate escalation issue',
+  );
+  const context = {
+    ...identity,
+    jobs: jobInventory.items,
+    jobsTruncated: jobInventory.truncated,
+    now,
+  };
 
   let action = 'none';
   let issueNumber = existing?.number;
@@ -311,13 +354,17 @@ export async function runEscalation({
     sourceConclusion: identity.conclusion,
     action,
     issueNumber: issueNumber ?? null,
-    failedJobs: failedJobNames(inventory.jobs),
+    failedJobs: failedJobNames(jobInventory.items),
+    jobInventoryComplete: !jobInventory.truncated,
     automaticResolution: false,
     automaticClosure: false,
     humanTriageRequired: true,
     residual: [
       'Run metadata only; no logs were read and no source, rerun or merge was performed.',
       'A recorded recovery is not proof that the original cause was diagnosed or fixed.',
+      ...(jobInventory.truncated
+        ? ['The job inventory was truncated; the failed-job list is incomplete.']
+        : []),
     ],
     observedAt: new Date(now).toISOString(),
   };

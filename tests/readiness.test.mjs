@@ -8869,11 +8869,14 @@ function escalationContext(conclusion = 'failure') {
 
 function escalationClient(state) {
   const writes = [];
+  const page = (items, n) => items.slice((n - 1) * 100, n * 100);
   const client = {
     async json(resource) {
       if (resource === '/actions/runs/501') return state.run;
-      if (resource === '/actions/runs/501/jobs?per_page=100') return { jobs: state.jobs };
-      if (resource === '/issues?state=open&per_page=100') return state.issues;
+      let match = /^\/actions\/runs\/501\/jobs\?per_page=100&page=(\d+)$/.exec(resource);
+      if (match) return { jobs: page(state.jobs, Number(match[1])) };
+      match = /^\/issues\?state=open&per_page=100&page=(\d+)$/.exec(resource);
+      if (match) return page(state.issues, Number(match[1]));
       throw new Error(`Unexpected escalation read: ${resource}`);
     },
     async post(resource, body) {
@@ -9088,8 +9091,8 @@ test('failure escalation client restricts requests to metadata reads and issue w
   };
   const client = createEscalationClient('Vmoosky/SlipStream', 'token-value', fetchImpl);
   await client.json('/actions/runs/501');
-  await client.json('/actions/runs/501/jobs?per_page=100');
-  await client.json('/issues?state=open&per_page=100');
+  await client.json('/actions/runs/501/jobs?per_page=100&page=1');
+  await client.json('/issues?state=open&per_page=100&page=2');
   await client.post('/issues', { title: 't', body: 'b' });
   await client.post('/issues/7/comments', { body: 'b' });
   assert.equal(attempted.length, 5);
@@ -9106,7 +9109,7 @@ test('failure escalation client restricts requests to metadata reads and issue w
     '/actions/runs/501/rerun',
     '/pulls',
     '/actions/runs/501/cancel',
-    '/issues?state=all&per_page=100',
+    '/issues?state=all&per_page=100&page=1',
   ]) {
     await assert.rejects(client.post(resource, {}), /unsupported API request/);
   }
@@ -9162,4 +9165,71 @@ test('failure escalation workflow stays opt-in, bounded, default-branch-only and
   const script = fs.readFileSync(path.join(REPO, 'scripts/check-escalation.mjs'), 'utf8');
   assert.doesNotMatch(script, /state:\s*'closed'|"closed"/);
   assert.doesNotMatch(script, /PATCH|DELETE|\/rerun|\/cancel/);
+});
+
+test('failure escalation paginates jobs and open issues and fails closed on an incomplete inventory', async () => {
+  const base = escalationContext();
+  const now = Date.parse('2026-09-20T12:00:00Z');
+  const marker = escalationMarker('.github/workflows/ci.yml');
+
+  // A failed job beyond the first page must still reach the record.
+  const manyJobs = [
+    ...Array.from({ length: 100 }, (_, i) => ({ name: `ok-${i}`, conclusion: 'success' })),
+    { name: 'late-failure', conclusion: 'failure' },
+  ];
+  const paged = escalationClient({ run: base.event.workflow_run, jobs: manyJobs, issues: [] });
+  const report = await runEscalation({ ...base, client: paged.client, now });
+  assert.deepEqual(report.failedJobs, ['late-failure']);
+  assert.equal(report.jobInventoryComplete, true);
+  assert.ok(paged.writes[0].body.body.includes('late-failure'));
+
+  // The existing escalation issue may be beyond the first page of open issues.
+  const manyIssues = [
+    ...Array.from({ length: 100 }, (_, i) => ({ number: i + 1, state: 'open', body: 'unrelated' })),
+    { number: 900, state: 'open', body: marker },
+  ];
+  const deep = escalationClient({
+    run: base.event.workflow_run,
+    jobs: base.jobs,
+    issues: manyIssues,
+  });
+  const found = await runEscalation({ ...base, client: deep.client, now });
+  assert.equal(found.action, 'recurrence-recorded');
+  assert.equal(found.issueNumber, 900);
+  assert.deepEqual(
+    deep.writes.map((w) => w.resource),
+    ['/issues/900/comments'],
+  );
+
+  // Beyond the page bound with no match, refuse rather than open a duplicate.
+  const flooded = Array.from({ length: 100 * ESCALATION_LIMITS.pages }, (_, i) => ({
+    number: i + 1,
+    state: 'open',
+    body: 'unrelated',
+  }));
+  const overflow = escalationClient({
+    run: base.event.workflow_run,
+    jobs: base.jobs,
+    issues: flooded,
+  });
+  await assert.rejects(
+    runEscalation({ ...base, client: overflow.client, now }),
+    /refusing to risk a duplicate escalation issue/,
+  );
+  assert.deepEqual(overflow.writes, []);
+
+  // A truncated job inventory is disclosed rather than presented as complete.
+  const tooManyJobs = Array.from({ length: 100 * ESCALATION_LIMITS.pages }, (_, i) => ({
+    name: `job-${i}`,
+    conclusion: 'failure',
+  }));
+  const truncated = escalationClient({
+    run: base.event.workflow_run,
+    jobs: tooManyJobs,
+    issues: [],
+  });
+  const disclosed = await runEscalation({ ...base, client: truncated.client, now });
+  assert.equal(disclosed.jobInventoryComplete, false);
+  assert.ok(disclosed.residual.some((line) => line.includes('truncated')));
+  assert.ok(truncated.writes[0].body.body.includes('This list is incomplete'));
 });
