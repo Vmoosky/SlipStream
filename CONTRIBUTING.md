@@ -951,8 +951,15 @@ to the existing open one, so repeated failures do not create duplicates. A marke
 issue counts only when this automation actually authored it, so a forged marker
 in a hand-created issue cannot capture later recurrence and recovery comments.
 Records contain run metadata only — run link, revision, and failed job names,
-bounded and stripped of control characters. **Logs are never read or copied**,
-which keeps untrusted output and secrets out of a public issue.
+bounded and stripped of control characters and backticks. **Logs are never read
+or copied**, which keeps untrusted output and secrets out of a public issue.
+
+Concurrency is keyed per triggering run rather than per repository. A
+repository-wide key would let GitHub cancel a pending run whenever a newer
+completion queued, silently dropping failures during a burst, which is the one
+thing this workflow exists to prevent. The trade-off is that two near-simultaneous
+failures can each open a record; the oldest is then chosen deterministically and
+`duplicateRecords` reports the rest for a human to close.
 
 A later successful run on the default branch adds a recovery comment and
 deliberately **does not close the issue**. A green build is not proof that the

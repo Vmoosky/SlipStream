@@ -276,23 +276,29 @@ export function createEscalationClient(repository, token, fetchImpl = fetch) {
  * Open issues only, never pull requests, and only records this automation actually
  * authored. Matching on the marker alone would let anyone forge it in a hand-made
  * issue and capture every later recurrence and recovery comment.
+ *
+ * Runs are keyed per triggering run so no completion is dropped, which means two
+ * near-simultaneous failures can each open a record. Rather than fail and leave
+ * escalation broken exactly when it is needed, the oldest record is chosen
+ * deterministically and the duplicate count is reported.
  */
 export function findEscalationIssue(issues, marker, author = ESCALATION_AUTHOR) {
   if (!Array.isArray(issues)) throw new Error('An issue inventory is required');
-  const matches = issues.filter(
-    (issue) =>
-      issue &&
-      issue.pull_request === undefined &&
-      issue.state === 'open' &&
-      typeof issue.body === 'string' &&
-      issue.body.includes(marker) &&
-      issue.user?.login === author &&
-      issue.user?.type === 'Bot' &&
-      Number.isSafeInteger(issue.number) &&
-      issue.number > 0,
-  );
-  if (matches.length > 1) throw new Error('Multiple open escalation issues; resolve them by hand');
-  return matches[0];
+  const matches = issues
+    .filter(
+      (issue) =>
+        issue &&
+        issue.pull_request === undefined &&
+        issue.state === 'open' &&
+        typeof issue.body === 'string' &&
+        issue.body.includes(marker) &&
+        issue.user?.login === author &&
+        issue.user?.type === 'Bot' &&
+        Number.isSafeInteger(issue.number) &&
+        issue.number > 0,
+    )
+    .sort((left, right) => left.number - right.number);
+  return { issue: matches[0], duplicates: Math.max(0, matches.length - 1) };
 }
 
 /** Bounded pagination. Reports truncation instead of silently returning a partial list. */
@@ -333,7 +339,10 @@ export async function runEscalation({
   );
   const jobInventory = await readAllPages(client, `${runPath}/jobs?`, 'jobs');
   const issueInventory = await readAllPages(client, '/issues?state=open&', null);
-  const existing = findEscalationIssue(issueInventory.items, identity.marker);
+  const { issue: existing, duplicates } = findEscalationIssue(
+    issueInventory.items,
+    identity.marker,
+  );
   requireContext(
     existing !== undefined || !issueInventory.truncated,
     'Open-issue inventory is incomplete; refusing to risk a duplicate escalation issue',
@@ -383,6 +392,7 @@ export async function runEscalation({
     issueNumber: issueNumber ?? null,
     failedJobs: failedJobNames(jobInventory.items),
     jobInventoryComplete: !jobInventory.truncated,
+    duplicateRecords: duplicates,
     automaticResolution: false,
     automaticClosure: false,
     humanTriageRequired: true,
@@ -391,6 +401,11 @@ export async function runEscalation({
       'A recorded recovery is not proof that the original cause was diagnosed or fixed.',
       ...(jobInventory.truncated
         ? ['The job inventory was truncated; the failed-job list is incomplete.']
+        : []),
+      ...(duplicates > 0
+        ? [
+            `${duplicates} additional open escalation record(s) exist; the oldest was used and the rest need closing by hand.`,
+          ]
         : []),
     ],
     observedAt: new Date(now).toISOString(),

@@ -9,7 +9,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: failure-escalation-${{ github.repository }}
+  group: failure-escalation-${{ github.event.workflow_run.id }}
   cancel-in-progress: false
 
 jobs:

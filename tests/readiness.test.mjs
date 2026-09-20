@@ -9044,9 +9044,9 @@ test('failure escalation records are deduplicated, bounded and never claim resol
 
 test('failure escalation selects only open marked issues and never a pull request', () => {
   const marker = escalationMarker('.github/workflows/ci.yml');
-  assert.equal(findEscalationIssue([], marker), undefined);
+  assert.equal(findEscalationIssue([], marker).issue, undefined);
   assert.equal(
-    findEscalationIssue([{ number: 1, state: 'open', body: 'unrelated' }], marker),
+    findEscalationIssue([{ number: 1, state: 'open', body: 'unrelated' }], marker).issue,
     undefined,
   );
   assert.equal(
@@ -9060,7 +9060,7 @@ test('failure escalation selects only open marked issues and never a pull reques
         },
       ],
       marker,
-    ),
+    ).issue,
     undefined,
   );
   assert.equal(
@@ -9075,7 +9075,7 @@ test('failure escalation selects only open marked issues and never a pull reques
         },
       ],
       marker,
-    ),
+    ).issue,
     undefined,
   );
   assert.equal(
@@ -9089,30 +9089,31 @@ test('failure escalation selects only open marked issues and never a pull reques
         },
       ],
       marker,
-    ).number,
+    ).issue.number,
     5,
   );
-  assert.throws(
-    () =>
-      findEscalationIssue(
-        [
-          {
-            number: 5,
-            state: 'open',
-            body: marker,
-            user: { login: 'github-actions[bot]', type: 'Bot' },
-          },
-          {
-            number: 6,
-            state: 'open',
-            body: marker,
-            user: { login: 'github-actions[bot]', type: 'Bot' },
-          },
-        ],
-        marker,
-      ),
-    /Multiple open escalation issues/,
+  // Two records can exist when a burst of completions runs concurrently. Choose
+  // the oldest deterministically and report the rest rather than failing, so
+  // escalation keeps working exactly when it is needed most.
+  const duplicated = findEscalationIssue(
+    [
+      {
+        number: 6,
+        state: 'open',
+        body: marker,
+        user: { login: 'github-actions[bot]', type: 'Bot' },
+      },
+      {
+        number: 5,
+        state: 'open',
+        body: marker,
+        user: { login: 'github-actions[bot]', type: 'Bot' },
+      },
+    ],
+    marker,
   );
+  assert.equal(duplicated.issue.number, 5);
+  assert.equal(duplicated.duplicates, 1);
 });
 
 test('failure escalation opens, appends and records recovery without closing or rerunning', async () => {
@@ -9269,6 +9270,9 @@ test('failure escalation workflow stays opt-in, bounded, default-branch-only and
   assert.deepEqual(workflow.on, { workflow_run: { workflows: ['CI'], types: ['completed'] } });
   assert.deepEqual(workflow.permissions, { contents: 'read' });
   assert.equal(workflow.concurrency['cancel-in-progress'], false);
+  // A repository-wide group would let GitHub cancel a pending run when a newer
+  // completion queues, silently dropping failures during a burst.
+  assert.match(workflow.concurrency.group, /github\.event\.workflow_run\.id/);
   assert.deepEqual(Object.keys(workflow.jobs), ['escalate']);
 
   const job = workflow.jobs.escalate;
@@ -9433,12 +9437,12 @@ test('failure escalation ignores a forged marker in an issue it did not author',
     undefined,
   ]) {
     assert.equal(
-      findEscalationIssue([{ number: 9, state: 'open', body: marker, user: forged }], marker),
+      findEscalationIssue([{ number: 9, state: 'open', body: marker, user: forged }], marker).issue,
       undefined,
     );
   }
   assert.equal(
-    findEscalationIssue([{ number: 9, state: 'open', body: marker, user: authentic }], marker)
+    findEscalationIssue([{ number: 9, state: 'open', body: marker, user: authentic }], marker).issue
       .number,
     9,
   );
