@@ -1388,6 +1388,7 @@ test('PR observability collects ordinary PRs and withholds unverifiable automati
     validation: { status: 'not-requested' },
     maintenance: { status: 'not-requested' },
     review: { status: 'review-required', count: 0 },
+    agentReview: { status: 'not-requested' },
     publication: { status: 'not-applied' },
     collector: { status: 'not-recorded' },
   });
@@ -1604,8 +1605,10 @@ function prCompletionHistory({
 } = {}) {
   const fixture = prValidationCompletion();
   const run = fixture.event.workflow_run;
+  const agentReview = workflow === 'PR Agent Review';
   run.name = workflow;
-  run.path = `.github/workflows/${workflow === 'CI' ? 'ci' : 'security'}.yml`;
+  run.path = `.github/workflows/${agentReview ? 'pr-agent-review' : workflow === 'CI' ? 'ci' : 'security'}.yml`;
+  run.event = agentReview ? 'pull_request_target' : 'pull_request';
   run.conclusion = conclusion;
   run.run_attempt = attempt;
   if (fork) {
@@ -1638,12 +1641,16 @@ function prCompletionHistory({
       history.reads.push(resource);
       if (resource === '/pulls/7') return structuredClone(history.pull);
       if (resource === '/actions/runs/101') return structuredClone(history.run);
-      if (resource === `/actions/workflows/${workflow === 'CI' ? 'ci' : 'security'}.yml`)
+      if (
+        resource ===
+        `/actions/workflows/${agentReview ? 'pr-agent-review' : workflow === 'CI' ? 'ci' : 'security'}.yml`
+      )
         return structuredClone(history.workflow);
       if (resource === '/pulls/7/files?per_page=100')
         return [{ filename: 'README.md', status: 'modified' }];
       if (resource === '/pulls/7/reviews?per_page=100') return [];
       if (resource === '/issues/7/labels?per_page=100') return [{ name: 'area:docs' }];
+      if (resource === '/labels/automation%3Aagent-review') return {};
       if (resource === '/issues/7/comments?per_page=100')
         return [
           {
@@ -1690,6 +1697,32 @@ test('PR observability completion verifies terminal API outcomes without claimin
     );
     assert.equal(history.reads.filter((resource) => resource === '/actions/runs/101').length, 3);
   }
+});
+
+test('PR observability correlates a trusted bounded agent review to its exact PR snapshot', async () => {
+  const history = prCompletionHistory({ workflow: 'PR Agent Review', conclusion: 'success' });
+  const report = await collectPrObservability({ ...history.identity, client: history.client });
+  report.collector = history.identity.collector;
+  assert.equal(report.agentReview.status, 'verified-completion');
+  assert.equal(report.agentReview.source.workflow, 'PR Agent Review');
+  assert.ok(report.labels.includes('automation:agent-review'));
+  await publishPrObservability(report, history.client);
+  assert.equal(report.publication, 'applied');
+  assert.ok(
+    history.writes.some(
+      (entry) =>
+        entry.resource === '/issues/7/labels' &&
+        entry.body.labels.includes('automation:agent-review'),
+    ),
+  );
+  assert.match(renderPrObservability(report), /Trusted bounded agent review/);
+
+  const stale = prCompletionHistory({ workflow: 'PR Agent Review', conclusion: 'success' });
+  const staleReport = await collectPrObservability({ ...stale.identity, client: stale.client });
+  stale.run.run_attempt++;
+  await publishPrObservability(staleReport, stale.client);
+  assert.equal(staleReport.publication, 'stale-agent-review');
+  assert.deepEqual(stale.writes, []);
 });
 
 test('PR observability completion withholds publication for stale or mismatched API evidence', async () => {
@@ -1940,12 +1973,12 @@ test('PR observability workflow writes metadata only from trusted default-branch
     'workflow_run',
   ]);
   assert.deepEqual(workflow.on.workflow_run, {
-    workflows: ['CI', 'Security'],
+    workflows: ['CI', 'Security', 'PR Agent Review'],
     types: ['completed'],
   });
   assert.deepEqual(
     workflow.on.workflow_run.workflows,
-    ['ci', 'security'].map(
+    ['ci', 'security', 'pr-agent-review'].map(
       (name) =>
         parse(fs.readFileSync(path.join(REPO, `.github/workflows/${name}.yml`), 'utf8')).name,
     ),
@@ -1954,6 +1987,7 @@ test('PR observability workflow writes metadata only from trusted default-branch
   assert.match(job.if, /SLIPSTREAM_OBSERVABILITY_ENABLED == 'true'/);
   assert.match(job.if, /github.ref == format/);
   assert.ok(job.if.includes("github.event.workflow_run.event == 'pull_request'"));
+  assert.ok(job.if.includes("github.event.workflow_run.event == 'pull_request_target'"));
   assert.ok(job.if.includes("github.event.action == 'completed'"));
   assert.ok(job.if.includes('github.event.workflow_run.repository.full_name == github.repository'));
   assert.ok(
