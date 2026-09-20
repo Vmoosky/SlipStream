@@ -506,6 +506,12 @@ function readinessEvidenceFixture(context, kind = 'pr-observability') {
       'improvement.json',
       'schedule',
     ],
+    'maintenance-validation': [
+      'maintenance.yml',
+      'readiness-maintenance-123-1',
+      'maintenance.json',
+      'workflow_dispatch',
+    ],
   }[kind];
   fs.mkdirSync(path.join(root, '.github/workflows'), { recursive: true });
   fs.writeFileSync(path.join(root, '.github/workflows', source[0]), 'name: Fixture\n');
@@ -540,7 +546,10 @@ function readinessEvidenceFixture(context, kind = 'pr-observability') {
     status: 'insufficient-evidence',
     publication: 'failed',
     errors: ['Fixture failure'],
-    ...(kind === 'bounded-agent-review' ? producer : { collector: producer }),
+    ...(kind === 'maintenance-validation' ? { passed: false } : {}),
+    ...(['bounded-agent-review', 'maintenance-validation'].includes(kind)
+      ? producer
+      : { collector: producer }),
   };
   const bytes = Buffer.from(`${JSON.stringify(report, null, 2)}\r\n`);
   fs.writeFileSync(path.join(root, source[2]), bytes);
@@ -619,6 +628,7 @@ test('readiness preparation authenticates all supported report types without cha
     'pr-observability',
     'bounded-agent-review',
     'continuous-improvement-review',
+    'maintenance-validation',
   ]) {
     const state = readinessEvidenceFixture(context, kind);
     const reports = await collectReadinessArtifacts(state.options);
@@ -626,12 +636,133 @@ test('readiness preparation authenticates all supported report types without cha
     assert.deepEqual(reports[0].bytes, state.bytes);
     assert.equal(
       reports[0].evidence.status,
-      kind === 'pr-observability' ? 'failed' : 'insufficient-evidence',
+      ['pr-observability', 'maintenance-validation'].includes(kind)
+        ? 'failed'
+        : 'insufficient-evidence',
     );
     assert.equal(reports[0].evidence.artifact.digest, state.artifact.digest);
     assert.equal(state.requests.filter((resource) => resource === '/actions/runs/123').length, 2);
     assert.equal(state.requests.at(-1), '/actions/artifacts/88');
   }
+});
+
+test('readiness preparation preserves maintenance no-op, proposal and failed aggregate outcomes', async (context) => {
+  const state = readinessEvidenceFixture(context, 'maintenance-validation');
+  const evidence = maintenanceEvidence(context);
+  const summary = {
+    ...collectMaintenanceEvidence(evidence.root, evidence.options),
+    revision: state.run.head_sha,
+    workflow: state.report.workflow,
+  };
+  for (const eventName of ['schedule', 'workflow_dispatch']) {
+    state.run.event = eventName;
+    for (const outcome of ['no-op', 'proposed']) {
+      for (const passed of [true, false]) {
+        const report = {
+          ...summary,
+          eventName,
+          passed,
+          errors: passed ? [] : ['audit: required command did not succeed'],
+          documentation: { ...summary.documentation, outcome },
+          steps: { ...summary.steps, audit: passed ? 'success' : 'failure' },
+        };
+        state.replaceReport(report);
+        const [collected] = await collectReadinessArtifacts(state.options);
+        assert.deepEqual(collected.bytes, state.bytes);
+        assert.equal(collected.evidence.status, passed ? outcome : 'failed');
+      }
+    }
+  }
+  const prepared = await prepareReadinessCheckout(state.root, state.options);
+  assert.equal(prepared.operationSuccessVerified, false);
+  assert.equal(prepared.reports[0].status, 'failed');
+  assert.deepEqual(
+    fs.readFileSync(path.join(prepared.checkout, 'reports/maintenance.json')),
+    state.bytes,
+  );
+});
+
+test('readiness preparation rejects malformed maintenance outcomes and mismatched producer identities', async (context) => {
+  const state = readinessEvidenceFixture(context, 'maintenance-validation');
+  for (const change of [
+    { revision: 'f'.repeat(40) },
+    { runId: '124' },
+    { attempt: '2' },
+    { workflow: 'fixture/slipstream/.github/workflows/unrelated.yml@refs/heads/main' },
+    { eventName: 'schedule' },
+    { passed: 'false' },
+    { errors: [] },
+    { errors: [null] },
+    { passed: true },
+    { passed: true, errors: [], documentation: { outcome: 'repaired' } },
+    { passed: true, errors: [], documentation: { outcome: 'no-op' }, steps: {} },
+  ]) {
+    state.replaceReport({ ...state.report, ...change });
+    await assert.rejects(collectReadinessArtifacts(state.options), /Readiness evidence/);
+  }
+  for (const eventName of ['local', 'pull_request', 'workflow_run']) {
+    state.run.event = eventName;
+    state.replaceReport({ ...state.report, eventName });
+    await assert.rejects(collectReadinessArtifacts(state.options), /Readiness evidence/);
+  }
+});
+
+test('readiness preparation accepts all four distinct report kinds at one revision', async (context) => {
+  const kinds = [
+    'pr-observability',
+    'bounded-agent-review',
+    'continuous-improvement-review',
+    'maintenance-validation',
+  ];
+  const states = kinds.map((kind) => readinessEvidenceFixture(context, kind));
+  const revision = states[0].run.head_sha;
+  states.forEach((state, index) => {
+    const runId = String(123 + index);
+    state.run = {
+      ...state.run,
+      id: Number(runId),
+      workflow_id: 7 + index,
+      head_sha: revision,
+    };
+    state.artifact = {
+      ...state.artifact,
+      id: 88 + index,
+      name: state.artifact.name.replace('-123-1', `-${runId}-1`),
+      workflow_run: { ...state.artifact.workflow_run, id: Number(runId), head_sha: revision },
+    };
+    const report = structuredClone(state.report);
+    Object.assign(report.collector ?? report, { revision, runId });
+    state.replaceReport(report);
+    state.options.selections[0].runId = runId;
+  });
+  const client = {
+    async json(resource) {
+      if (resource === '')
+        return { id: 10, full_name: 'fixture/slipstream', default_branch: 'main' };
+      for (const state of states) {
+        if (resource === `/actions/runs/${state.run.id}`) return state.run;
+        if (resource === `/actions/workflows/${state.run.workflow_id}`)
+          return { id: state.run.workflow_id, path: state.run.path };
+        if (resource === `/actions/runs/${state.run.id}/artifacts?per_page=100`)
+          return { total_count: 1, artifacts: [state.artifact] };
+        if (resource === `/actions/artifacts/${state.artifact.id}`) return state.artifact;
+      }
+      throw new Error(`Unexpected fixture request: ${resource}`);
+    },
+    async archive(artifact) {
+      return states.find((state) => state.artifact.id === artifact.id).archive;
+    },
+  };
+  const reports = await collectReadinessArtifacts({
+    ...states[0].options,
+    selections: states.flatMap((state) => state.options.selections),
+    client,
+  });
+  assert.deepEqual(
+    reports.map((report) => report.evidence.kind),
+    kinds,
+  );
+  reports.forEach((report, index) => assert.deepEqual(report.bytes, states[index].bytes));
 });
 
 test('readiness preparation rejects stale producers, expired artifacts, altered archives and duplicate selection', async (context) => {
@@ -795,6 +926,7 @@ test('readiness preparation CLI explains explicit selection and never echoes inv
   const help = spawnSync(process.execPath, [script, '--help'], { encoding: 'utf8' });
   assert.equal(help.status, 0, help.stderr);
   assert.match(help.stdout, /KIND:RUN_ID:ATTEMPT/);
+  assert.match(help.stdout, /maintenance-validation/);
   const invalid = spawnSync(
     process.execPath,
     [script, '--prepare', '--repository', 'PRIVATE-INVALID-INPUT'],
@@ -811,6 +943,7 @@ test('readiness reports retain exact producer bytes, identities and unsuccessful
     ['bounded-agent-review', 'agent-review.json'],
     ['pr-observability', 'pr-observability.json'],
     ['continuous-improvement-review', 'improvement.json'],
+    ['maintenance-validation', 'maintenance.json'],
   ]) {
     const report = {
       schemaVersion: 1,
@@ -7918,6 +8051,61 @@ test('bounded agent review rejects malformed, unbound, oversized and executable 
   }
 });
 
+test('maintenance readiness CLI exports byte-identical summaries without masking failed checks', (context) => {
+  for (const failed of [false, true]) {
+    const { root, write, options } = maintenanceEvidence(context);
+    fs.mkdirSync(path.join(root, 'scripts'));
+    for (const name of ['maintenance.mjs', 'check-ci.mjs', 'check-readiness-reports.mjs']) {
+      fs.copyFileSync(path.join(REPO, 'scripts', name), path.join(root, 'scripts', name));
+    }
+    if (failed) options.steps.audit.outcome = 'failure';
+    write('event.json', options.event);
+    const result = spawnSync(
+      process.execPath,
+      [path.join(root, 'scripts/maintenance.mjs'), '--verify'],
+      {
+        encoding: 'utf8',
+        timeout: 30_000,
+        env: {
+          ...process.env,
+          ...options.env,
+          CI_STEPS: JSON.stringify(options.steps),
+          MAINTENANCE_REPORT: options.reportPath,
+          GITHUB_EVENT_PATH: path.join(root, 'event.json'),
+          GITHUB_OUTPUT: path.join(root, 'outputs.txt'),
+          GITHUB_STEP_SUMMARY: '',
+        },
+      },
+    );
+    assert.equal(result.status, failed ? 1 : 0, result.stderr);
+    const bytes = fs.readFileSync(path.join(root, 'reports/maintenance.json'));
+    const report = JSON.parse(bytes.toString());
+    assert.equal(report.passed, !failed);
+    assert.equal(report.documentation.outcome, 'no-op');
+    assert.equal(report.proposalPath, null);
+    assert.equal(report.errors.length, failed ? 1 : 0);
+    const directory = path.join(root, 'test-results/maintenance');
+    const summaries = fs
+      .readdirSync(directory)
+      .map((name) => path.join(directory, name, 'summary.json'))
+      .filter((file) => fs.existsSync(file));
+    assert.equal(summaries.length, 1);
+    assert.deepEqual(fs.readFileSync(summaries[0]), bytes);
+    for (const [file, digest] of Object.entries(report.evidenceSha256)) {
+      assert.equal(
+        createHash('sha256')
+          .update(fs.readFileSync(path.join(root, file)))
+          .digest('hex'),
+        digest,
+      );
+    }
+    assert.match(
+      fs.readFileSync(path.join(root, 'outputs.txt'), 'utf8'),
+      /^readiness_report_path=reports\/maintenance\.json\r?$/m,
+    );
+  }
+});
+
 test('maintenance aggregation needs actual success from every independent check', (context) => {
   const { root, write, options } = maintenanceEvidence(context);
   const successful = collectMaintenanceEvidence(root, options);
@@ -8110,13 +8298,15 @@ test('maintenance workflow stays opt-in, read-only, bounded and default-branch-o
       assert.equal(step.with['node-version-file'], '.node-version');
   }
   const uploads = job.steps.filter((step) => step.uses?.startsWith('actions/upload-artifact@'));
-  assert.equal(uploads.length, 3);
+  assert.equal(uploads.length, 5);
   assert.deepEqual(
     uploads.map((step) => [step.with.name, step.with['retention-days']]),
     [
       ['maintenance-evidence-${{ github.run_id }}-${{ github.run_attempt }}', 90],
       ['maintenance-proposal-${{ github.run_id }}-${{ github.run_attempt }}', 7],
       ['readiness-agent-review-${{ github.run_id }}-${{ github.run_attempt }}', 90],
+      ['maintenance-inputs-${{ github.run_id }}-${{ github.run_attempt }}', 90],
+      ['readiness-maintenance-${{ github.run_id }}-${{ github.run_attempt }}', 90],
     ],
   );
   for (const step of uploads) {
@@ -8144,6 +8334,20 @@ test('maintenance workflow stays opt-in, read-only, bounded and default-branch-o
     'readiness-agent-review-${{ github.run_id }}-${{ github.run_attempt }}',
   );
   assert.equal(uploads[2].env, undefined);
+  assert.equal(
+    uploads[3].if,
+    "${{ always() && steps.context.outcome == 'success' && hashFiles('test-results/maintenance-audit.json', 'test-results/maintenance-proof.json') != '' }}",
+  );
+  assert.deepEqual(uploads[3].with.path.trim().split('\n'), [
+    'test-results/maintenance-audit.json',
+    'test-results/maintenance-proof.json',
+  ]);
+  assert.equal(
+    uploads[4].if,
+    "${{ always() && steps.context.outcome == 'success' && steps.verify.outputs.readiness_report_path != '' }}",
+  );
+  assert.equal(uploads[4].with.path, 'reports/maintenance.json');
+  assert.equal(uploads[4].env, undefined);
 });
 
 test('bounded agent review workflow exposes its dedicated credential only after verified opt-in preparation', () => {

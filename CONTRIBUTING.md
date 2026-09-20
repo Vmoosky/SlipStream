@@ -425,12 +425,13 @@ verified snapshot, evaluator limitations, and outstanding activation steps.
 
 ## Readiness Reports
 
-The review, observability, and authenticated improvement producers use the
-[report writer](scripts/check-readiness-reports.mjs) to emit byte-identical,
+The review, observability, authenticated improvement, and maintenance producers
+use the [report writer](scripts/check-readiness-reports.mjs) to emit byte-identical,
 normalized JSON at `reports/agent-review.json`, `reports/pr-observability.json`,
-and `reports/improvement.json`. Separate `readiness-agent-review-RUN-ATTEMPT`,
-`readiness-pr-observability-PR-RUN-ATTEMPT`, and `readiness-improvement-RUN-ATTEMPT`
-artifacts request 90, 30, and 90 days of retention, respectively, subject to
+`reports/improvement.json`, and `reports/maintenance.json`. Separate
+`readiness-agent-review-RUN-ATTEMPT`, `readiness-pr-observability-PR-RUN-ATTEMPT`,
+`readiness-improvement-RUN-ATTEMPT`, and `readiness-maintenance-RUN-ATTEMPT`
+artifacts request 90, 30, 90, and 90 days of retention, respectively, subject to
 repository policy. Uploads require an emitted report path, not a successful
 decision; failure and unavailable states remain visible. Local improvement
 `--input` comparisons are unverified and do not produce a readiness export.
@@ -472,9 +473,10 @@ node scripts/check-readiness-reports.mjs --prepare --repository Vmoosky/SlipStre
 ```
 
 Repeat `--report KIND:RUN_ID:ATTEMPT` for different kinds at the same revision.
-Supported kinds are `pr-observability`, `bounded-agent-review`, and
-`continuous-improvement-review`; `--branch` defaults to `main`. `--help` explains
-the arguments without authentication or network access. Authentication uses an
+Supported kinds are `pr-observability`, `bounded-agent-review`,
+`continuous-improvement-review`, and `maintenance-validation`; `--branch` defaults
+to `main`. `--help` explains the arguments without authentication or network access.
+Authentication uses an
 existing `GITHUB_TOKEN`, `GH_TOKEN`, or the selected `gh` login, respecting
 `GH_CONFIG_DIR`. Never put a credential in an argument or committed file.
 
@@ -499,6 +501,18 @@ Evaluate the reported checkout separately while the selected evidence remains
 current. Keep the original statuses and receipt with the assessment. Discovery
 of reports still does not repair the static guarded-review detector or establish
 closed-loop operation.
+
+For deterministic maintenance, select `--report "maintenance-validation:${runId}:1"`
+from a completed scheduled or manual default-branch run that emitted the new
+readiness artifact. Earlier runs without that artifact cannot be imported as this
+kind; downloading an old summary does not retroactively create producer evidence.
+The exported bytes are identical to the maintenance validation summary. The receipt
+records `no-op` or `proposed` only when the aggregate passed; otherwise it records
+`failed`, even if documentation alone needed no changes. A proposal is not an
+applied repair, `agentReview.enabled` is configuration rather than execution, and
+manual dispatch does not demonstrate scheduled execution. Original audit/proof
+inputs remain separate retained artifacts, not files injected into the assessment
+checkout. Report discovery must be checked separately from any model-based score.
 
 The maintenance evidence bridge records a genuine empty proposal as
 `not-applicable` with reason `no-proposal`. A nonempty proposal without review
@@ -945,6 +959,14 @@ and record the run, PR, actual review, and merge links in the readiness assessme
 when observed. Full required CI and a manual merge still apply. A local fixture
 run does not establish scheduler operation, independent review, agent-authored
 throughput, or live-provider outcomes.
+
+The existing `maintenance-evidence-RUN-ATTEMPT` archive layout is preserved for
+repair and review consumers. A separate `maintenance-inputs-RUN-ATTEMPT` artifact
+retains the original audit and offline-proof JSON bytes for 90 days, when available,
+so their hashes can be compared with the validation summary. Failed checks remain
+failed; absent inputs are not evidence of success. The separate readiness artifact
+retains that summary byte-for-byte, including unsuccessful outcomes. These uploads
+do not enable model review or change the workflow's publication permissions.
 
 ### Advisory Agent Review
 
