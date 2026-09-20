@@ -947,10 +947,12 @@ issue body and recorded as `jobInventoryComplete: false`, so a partial list is
 never presented as the full failure inventory.
 
 A failure opens one issue carrying a `slipstream-escalation` marker, or appends
-to the existing open one, so repeated failures do not create duplicates. Records
-contain run metadata only — run link, revision, and failed job names, bounded and
-stripped of control characters. **Logs are never read or copied**, which keeps
-untrusted output and secrets out of a public issue.
+to the existing open one, so repeated failures do not create duplicates. A marked
+issue counts only when this automation actually authored it, so a forged marker
+in a hand-created issue cannot capture later recurrence and recovery comments.
+Records contain run metadata only — run link, revision, and failed job names,
+bounded and stripped of control characters. **Logs are never read or copied**,
+which keeps untrusted output and secrets out of a public issue.
 
 A later successful run on the default branch adds a recovery comment and
 deliberately **does not close the issue**. A green build is not proof that the

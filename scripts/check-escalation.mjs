@@ -22,6 +22,12 @@ const MARKER_PREFIX = 'slipstream-escalation:v1:';
 const SOURCE_WORKFLOW = '.github/workflows/ci.yml';
 const SOURCE_WORKFLOW_NAME = 'CI';
 
+/**
+ * The identity `GITHUB_TOKEN` writes as. A marker in an issue opened by anyone
+ * else is treated as a forgery and ignored.
+ */
+export const ESCALATION_AUTHOR = 'github-actions[bot]';
+
 function requireContext(condition, message) {
   if (!condition) throw new Error(message);
 }
@@ -260,8 +266,12 @@ export function createEscalationClient(repository, token, fetchImpl = fetch) {
   };
 }
 
-/** Open issues only, never pull requests, and only one marked escalation record. */
-export function findEscalationIssue(issues, marker) {
+/**
+ * Open issues only, never pull requests, and only records this automation actually
+ * authored. Matching on the marker alone would let anyone forge it in a hand-made
+ * issue and capture every later recurrence and recovery comment.
+ */
+export function findEscalationIssue(issues, marker, author = ESCALATION_AUTHOR) {
   if (!Array.isArray(issues)) throw new Error('An issue inventory is required');
   const matches = issues.filter(
     (issue) =>
@@ -270,6 +280,8 @@ export function findEscalationIssue(issues, marker) {
       issue.state === 'open' &&
       typeof issue.body === 'string' &&
       issue.body.includes(marker) &&
+      issue.user?.login === author &&
+      issue.user?.type === 'Bot' &&
       Number.isSafeInteger(issue.number) &&
       issue.number > 0,
   );

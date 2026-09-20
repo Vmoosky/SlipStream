@@ -9046,26 +9046,64 @@ test('failure escalation selects only open marked issues and never a pull reques
     undefined,
   );
   assert.equal(
-    findEscalationIssue([{ number: 2, state: 'closed', body: marker }], marker),
-    undefined,
-  );
-  assert.equal(
     findEscalationIssue(
-      [{ number: 3, state: 'open', body: marker, pull_request: { url: 'x' } }],
+      [
+        {
+          number: 2,
+          state: 'closed',
+          body: marker,
+          user: { login: 'github-actions[bot]', type: 'Bot' },
+        },
+      ],
       marker,
     ),
     undefined,
   );
   assert.equal(
-    findEscalationIssue([{ number: 5, state: 'open', body: `x${marker}y` }], marker).number,
+    findEscalationIssue(
+      [
+        {
+          number: 3,
+          state: 'open',
+          body: marker,
+          pull_request: { url: 'x' },
+          user: { login: 'github-actions[bot]', type: 'Bot' },
+        },
+      ],
+      marker,
+    ),
+    undefined,
+  );
+  assert.equal(
+    findEscalationIssue(
+      [
+        {
+          number: 5,
+          state: 'open',
+          body: `x${marker}y`,
+          user: { login: 'github-actions[bot]', type: 'Bot' },
+        },
+      ],
+      marker,
+    ).number,
     5,
   );
   assert.throws(
     () =>
       findEscalationIssue(
         [
-          { number: 5, state: 'open', body: marker },
-          { number: 6, state: 'open', body: marker },
+          {
+            number: 5,
+            state: 'open',
+            body: marker,
+            user: { login: 'github-actions[bot]', type: 'Bot' },
+          },
+          {
+            number: 6,
+            state: 'open',
+            body: marker,
+            user: { login: 'github-actions[bot]', type: 'Bot' },
+          },
         ],
         marker,
       ),
@@ -9097,7 +9135,14 @@ test('failure escalation opens, appends and records recovery without closing or 
     ['/issues'],
   );
 
-  const existing = [{ number: 77, state: 'open', body: marker }];
+  const existing = [
+    {
+      number: 77,
+      state: 'open',
+      body: marker,
+      user: { login: 'github-actions[bot]', type: 'Bot' },
+    },
+  ];
   const again = escalationClient({
     run: base.event.workflow_run,
     jobs: base.jobs,
@@ -9278,7 +9323,12 @@ test('failure escalation paginates jobs and open issues and fails closed on an i
   // The existing escalation issue may be beyond the first page of open issues.
   const manyIssues = [
     ...Array.from({ length: 100 }, (_, i) => ({ number: i + 1, state: 'open', body: 'unrelated' })),
-    { number: 900, state: 'open', body: marker },
+    {
+      number: 900,
+      state: 'open',
+      body: marker,
+      user: { login: 'github-actions[bot]', type: 'Bot' },
+    },
   ];
   const deep = escalationClient({
     run: base.event.workflow_run,
@@ -9366,4 +9416,48 @@ test('failure escalation still records a failure after the default branch moves 
   assert.equal(report.collectorRevision, movedOn);
   assert.ok(writes[0].body.body.includes(base.revision));
   assert.ok(!writes[0].body.body.includes(movedOn));
+});
+
+test('failure escalation ignores a forged marker in an issue it did not author', async () => {
+  const marker = escalationMarker('.github/workflows/ci.yml');
+  const authentic = { login: 'github-actions[bot]', type: 'Bot' };
+
+  for (const forged of [
+    { login: 'attacker', type: 'User' },
+    { login: 'github-actions[bot]', type: 'User' },
+    { login: 'other-bot[bot]', type: 'Bot' },
+    undefined,
+  ]) {
+    assert.equal(
+      findEscalationIssue([{ number: 9, state: 'open', body: marker, user: forged }], marker),
+      undefined,
+    );
+  }
+  assert.equal(
+    findEscalationIssue([{ number: 9, state: 'open', body: marker, user: authentic }], marker)
+      .number,
+    9,
+  );
+
+  // A forged issue must not capture recurrence comments; a real record is opened instead.
+  const base = escalationContext();
+  const { client, writes } = escalationClient({
+    run: base.event.workflow_run,
+    jobs: base.jobs,
+    issues: [
+      { number: 66, state: 'open', body: marker, user: { login: 'attacker', type: 'User' } },
+    ],
+  });
+  const report = await runEscalation({
+    collectorRevision: base.revision,
+    env: base.env,
+    event: base.event,
+    client,
+    now: Date.parse('2026-09-20T12:00:00Z'),
+  });
+  assert.equal(report.action, 'issue-opened');
+  assert.deepEqual(
+    writes.map((w) => w.resource),
+    ['/issues'],
+  );
 });
