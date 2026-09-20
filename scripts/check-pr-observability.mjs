@@ -23,6 +23,10 @@ export const PR_OBSERVABILITY_LIMITS = Object.freeze({
 });
 
 const VALIDATION_WORKFLOWS = Object.freeze({ CI: 'ci.yml', Security: 'security.yml' });
+const AGENT_REVIEW_WORKFLOW = Object.freeze({
+  name: 'PR Agent Review',
+  path: 'pr-agent-review.yml',
+});
 
 export const PR_OBSERVABILITY_LABELS = Object.freeze({
   'area:core': { color: '0366d6', description: 'Core compression, pricing, or dashboard changes' },
@@ -39,6 +43,11 @@ export const PR_OBSERVABILITY_LABELS = Object.freeze({
     color: '0e8a16',
     description:
       'Maintenance proposal verified at the linked PR snapshot; not approval or authorship',
+  },
+  'automation:agent-review': {
+    color: '5319e7',
+    description:
+      'Trusted bounded agent review completed for the linked PR snapshot; not approval or authorship',
   },
 });
 
@@ -270,7 +279,7 @@ export function createPrObservabilityClient(repository, token, fetcher = fetch) 
         /^\/git\/(?:commits|blobs)\/[a-f0-9]{40}$/.test(resource) ||
         /^\/git\/trees\/[a-f0-9]{40}\?recursive=1$/.test(resource) ||
         /^\/compare\/[a-f0-9]{40}\.\.\.[a-f0-9]{40}\?per_page=1$/.test(resource) ||
-        /^\/actions\/(?:runs\/[1-9]\d{0,15}(?:\/artifacts\?per_page=10)?|workflows\/(?:maintenance|ci|security)\.yml)$/.test(
+        /^\/actions\/(?:runs\/[1-9]\d{0,15}(?:\/artifacts\?per_page=10)?|workflows\/(?:maintenance|ci|security|pr-agent-review)\.yml)$/.test(
           resource,
         ) ||
         labelNames.includes(label);
@@ -508,6 +517,7 @@ export function pullRequestSnapshot(pull) {
 
 export function observabilityLifecycle(report) {
   const validation = report.validation;
+  const agentReview = report.agentReview;
   return {
     schemaVersion: 1,
     snapshot: {
@@ -533,6 +543,15 @@ export function observabilityLifecycle(report) {
       status: report.review?.status ?? 'unavailable',
       count: report.review?.reviews?.length ?? 0,
     },
+    agentReview: agentReview?.source
+      ? {
+          status: agentReview.status,
+          runId: agentReview.source.runId,
+          attempt: agentReview.source.attempt,
+          conclusion: agentReview.source.conclusion,
+          head: agentReview.source.head,
+        }
+      : { status: agentReview?.status ?? 'not-requested' },
     publication: { status: report.publication ?? 'not-applied' },
     collector: report.collector
       ? {
@@ -571,12 +590,37 @@ async function validationSourceCurrent(report, client) {
   }
 }
 
+async function agentReviewSourceCurrent(report, client) {
+  try {
+    const source = report.agentReview.source;
+    requireEvidence(
+      source.workflow === AGENT_REVIEW_WORKFLOW.name &&
+        source.path === `.github/workflows/${AGENT_REVIEW_WORKFLOW.path}` &&
+        positiveId(source.runId) &&
+        source.number === report.number &&
+        source.head === report.head &&
+        source.base === report.base,
+    );
+    const workflow = await client.json(`/actions/workflows/${AGENT_REVIEW_WORKFLOW.path}`);
+    requireEvidence(
+      workflow.id === source.workflowId &&
+        workflow.name === source.workflow &&
+        workflow.path === source.path,
+    );
+    const run = await client.json(`/actions/runs/${source.runId}`);
+    return isDeepStrictEqual(agentReviewRunSource(run, report.repository, report.branch), source);
+  } catch {
+    return false;
+  }
+}
+
 export async function collectPrObservability({
   repository,
   branch,
   number,
   client,
   validationSource,
+  agentReviewSource,
 }) {
   requireEvidence(positiveId(String(number)));
   const pull = await client.json(`/pulls/${number}`);
@@ -606,6 +650,7 @@ export async function collectPrObservability({
     errors: [],
     maintenance: { status: 'unverified' },
     review: { status: 'unavailable', reviews: [] },
+    agentReview: { status: 'not-requested' },
     checksUrl: `https://github.com/${repository}/pull/${number}/checks`,
     pullUrl: `https://github.com/${repository}/pull/${number}`,
     publication: 'not-applied',
@@ -628,11 +673,35 @@ export async function collectPrObservability({
     }
     report.validation.status = 'verified-completion';
   }
+  if (agentReviewSource) {
+    report.agentReview = { status: 'unverified', source: agentReviewSource };
+    if (
+      pull.base.ref !== branch ||
+      pull.base.sha !== agentReviewSource.base ||
+      pull.base.repo.id !== agentReviewSource.repositoryId ||
+      pull.head.sha !== agentReviewSource.head ||
+      pull.head.repo?.id !== agentReviewSource.headRepositoryId ||
+      pull.head.repo?.full_name !== agentReviewSource.headRepository ||
+      !(await agentReviewSourceCurrent(report, client))
+    ) {
+      report.errors.push(
+        'The triggering agent-review run is unavailable, stale, or does not match this PR snapshot.',
+      );
+      report.lifecycle = observabilityLifecycle(report);
+      return report;
+    }
+    report.agentReview.status = 'verified-completion';
+  }
   try {
     const files = await client.json(`/pulls/${number}/files?per_page=100`);
     report.labels = pullRequestAreaLabels(files, pull.changed_files);
     report.maintenance = await maintenanceForPull({ repository, branch, pull, files, client });
     if (report.maintenance.status === 'verified') report.labels.push('automation:maintenance');
+    if (
+      report.agentReview.status === 'verified-completion' &&
+      report.agentReview.source.conclusion === 'success'
+    )
+      report.labels.push('automation:agent-review');
   } catch {
     report.errors.push(
       'PR file inventory is unavailable or incomplete; managed labels are withheld.',
@@ -653,6 +722,7 @@ export async function collectPrObservability({
 export function renderPrObservability(report) {
   const base = `https://github.com/${report.repository}`;
   const maintenance = report.maintenance;
+  const agentReview = report.agentReview ?? { status: 'not-requested' };
   const lifecycle = observabilityLifecycle(report);
   return [
     PR_OBSERVABILITY_MARKER,
@@ -693,6 +763,14 @@ export function renderPrObservability(report) {
             : ['No validation outcome is verified for this observation.']),
         ]
       : []),
+    ...(agentReview.status === 'verified-completion'
+      ? [
+          `Trusted bounded agent review: [run ${agentReview.source.runId}, attempt ${agentReview.source.attempt}](${base}/actions/runs/${agentReview.source.runId}/attempts/${agentReview.source.attempt}) reported **${agentReview.source.conclusion}** for this exact PR head and recorded base.`,
+          'This records a trusted review workflow outcome, not agent authorship, approval, or a verified repair.',
+        ]
+      : agentReview.status === 'unverified'
+        ? ['No agent-review outcome is verified for this observation.']
+        : []),
     ...(report.collector
       ? [
           `[Observation run](${base}/actions/runs/${report.collector.runId}/attempts/${report.collector.attempt}).`,
@@ -720,6 +798,11 @@ export async function publishPrObservability(report, client) {
     report.lifecycle = observabilityLifecycle(report);
     return;
   }
+  if (report.agentReview?.status === 'unverified') {
+    report.publication = 'unverified-agent-review';
+    report.lifecycle = observabilityLifecycle(report);
+    return;
+  }
   const number = report.number;
   const fresh = async () => {
     if (report.snapshot !== pullRequestSnapshot(await client.json(`/pulls/${number}`))) {
@@ -731,6 +814,17 @@ export async function publishPrObservability(report, client) {
       report.publication = 'stale-validation';
       report.errors.push(
         'The triggering validation run changed or could not be reverified; publication was withheld.',
+      );
+      return false;
+    }
+    if (
+      report.agentReview?.status === 'verified-completion' &&
+      !(await agentReviewSourceCurrent(report, client))
+    ) {
+      report.agentReview.status = 'unverified';
+      report.publication = 'stale-agent-review';
+      report.errors.push(
+        'The triggering agent-review run changed or could not be reverified; publication was withheld.',
       );
       return false;
     }
@@ -849,6 +943,65 @@ function validationRunSource(run, repository, branch) {
   };
 }
 
+function agentReviewRunSource(run, repository, branch) {
+  requireEvidence(
+    run?.name === AGENT_REVIEW_WORKFLOW.name &&
+      run.path === `.github/workflows/${AGENT_REVIEW_WORKFLOW.path}` &&
+      run.event === 'pull_request_target' &&
+      run.status === 'completed' &&
+      run.repository?.full_name === repository &&
+      typeof run.head_repository?.full_name === 'string' &&
+      /^[\w.-]+\/[\w.-]+$/.test(run.head_repository.full_name),
+  );
+  requireEvidence(
+    [
+      'success',
+      'failure',
+      'cancelled',
+      'timed_out',
+      'neutral',
+      'skipped',
+      'action_required',
+      'stale',
+      'startup_failure',
+    ].includes(run.conclusion),
+  );
+  requireEvidence(Array.isArray(run.pull_requests) && run.pull_requests.length === 1);
+  const pull = run.pull_requests[0];
+  requireEvidence(
+    [
+      run.id,
+      run.run_attempt,
+      run.workflow_id,
+      run.repository.id,
+      run.head_repository.id,
+      pull?.number,
+    ].every((value) => Number.isSafeInteger(value) && value > 0),
+  );
+  requireEvidence(
+    revision(run.head_sha) &&
+      pull.head?.sha === run.head_sha &&
+      pull.head.repo?.id === run.head_repository.id &&
+      revision(pull.base?.sha) &&
+      pull.base.ref === branch &&
+      pull.base.repo?.id === run.repository.id,
+  );
+  return {
+    workflow: run.name,
+    path: run.path,
+    workflowId: run.workflow_id,
+    runId: String(run.id),
+    attempt: run.run_attempt,
+    conclusion: run.conclusion,
+    head: run.head_sha,
+    base: pull.base.sha,
+    number: pull.number,
+    repositoryId: run.repository.id,
+    headRepository: run.head_repository.full_name,
+    headRepositoryId: run.head_repository.id,
+  };
+}
+
 export function prObservabilityIdentity(env, event) {
   const repository = event.repository?.full_name;
   const branch = event.repository?.default_branch;
@@ -873,16 +1026,20 @@ export function prObservabilityIdentity(env, event) {
     ['pull_request_target', 'workflow_dispatch', 'workflow_run'].includes(env.GITHUB_EVENT_NAME),
   );
   let validationSource;
+  let agentReviewSource;
   if (env.GITHUB_EVENT_NAME === 'workflow_run') {
     requireEvidence(event.action === 'completed');
-    validationSource = validationRunSource(event.workflow_run, repository, branch);
+    if (event.workflow_run?.name === AGENT_REVIEW_WORKFLOW.name)
+      agentReviewSource = agentReviewRunSource(event.workflow_run, repository, branch);
+    else validationSource = validationRunSource(event.workflow_run, repository, branch);
     requireEvidence(
-      event.repository.id === validationSource.repositoryId &&
-        env.GITHUB_RUN_ID !== validationSource.runId,
+      event.repository.id === (validationSource ?? agentReviewSource).repositoryId &&
+        env.GITHUB_RUN_ID !== (validationSource ?? agentReviewSource).runId,
     );
   }
-  const number = validationSource
-    ? String(validationSource.number)
+  const source = validationSource ?? agentReviewSource;
+  const number = source
+    ? String(source.number)
     : env.GITHUB_EVENT_NAME === 'pull_request_target'
       ? String(event.pull_request?.number)
       : event.inputs?.pull_request;
@@ -898,6 +1055,7 @@ export function prObservabilityIdentity(env, event) {
     branch,
     number: Number(number),
     ...(validationSource ? { validationSource } : {}),
+    ...(agentReviewSource ? { agentReviewSource } : {}),
     collector: {
       revision: env.GITHUB_SHA,
       runId: env.GITHUB_RUN_ID,
@@ -943,7 +1101,15 @@ async function main() {
       fs.appendFileSync(process.env.GITHUB_OUTPUT, `readiness_report_path=${readinessReport}\n`);
     if (process.env.GITHUB_STEP_SUMMARY)
       fs.appendFileSync(process.env.GITHUB_STEP_SUMMARY, `${summary}\n`);
-    if (['stale-pr', 'stale-validation', 'unverified-validation'].includes(report.publication))
+    if (
+      [
+        'stale-pr',
+        'stale-validation',
+        'unverified-validation',
+        'stale-agent-review',
+        'unverified-agent-review',
+      ].includes(report.publication)
+    )
       process.exitCode = 1;
     console.log(
       JSON.stringify({
