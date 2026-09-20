@@ -10,6 +10,7 @@ const REPORT_FILENAMES = Object.freeze({
   'bounded-agent-review': 'agent-review.json',
   'pr-observability': 'pr-observability.json',
   'continuous-improvement-review': 'improvement.json',
+  'maintenance-validation': 'maintenance.json',
 });
 
 const SOURCES = Object.freeze({
@@ -29,6 +30,12 @@ const SOURCES = Object.freeze({
     workflow: '.github/workflows/improvement.yml',
     artifact: 'readiness-improvement',
     events: ['schedule', 'workflow_dispatch', 'workflow_run'],
+    days: 90,
+  },
+  'maintenance-validation': {
+    workflow: '.github/workflows/maintenance.yml',
+    artifact: 'readiness-maintenance',
+    events: ['schedule', 'workflow_dispatch'],
     days: 90,
   },
 });
@@ -70,7 +77,11 @@ function validateSelection({ repository, branch, revision, selections }) {
   requireEvidence(repository.length <= 200 && !repository.includes('..'));
   requireEvidence(typeof branch === 'string' && /^[\w./-]{1,200}$/.test(branch));
   requireEvidence(!branch.includes('..') && /^[a-f0-9]{40}$/.test(revision ?? ''));
-  requireEvidence(Array.isArray(selections) && selections.length > 0 && selections.length <= 3);
+  requireEvidence(
+    Array.isArray(selections) &&
+      selections.length > 0 &&
+      selections.length <= Object.keys(SOURCES).length,
+  );
   requireEvidence(
     new Set(selections.map((selection) => selection?.kind)).size === selections.length,
   );
@@ -193,7 +204,10 @@ export async function collectReadinessArtifacts(options) {
     requireEvidence(bytes.length > 0 && bytes.length <= 1024 * 1024);
     const report = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes));
     requireEvidence(report?.schemaVersion === 1 && report.kind === selection.kind);
-    const producer = selection.kind === 'bounded-agent-review' ? report : report.collector;
+    const directProducer = ['bounded-agent-review', 'maintenance-validation'].includes(
+      selection.kind,
+    );
+    const producer = directProducer ? report : report.collector;
     requireEvidence(
       producer?.revision === revision &&
         producer.runId === selection.runId &&
@@ -201,7 +215,7 @@ export async function collectReadinessArtifacts(options) {
         producer.eventName === run.event &&
         producer.workflow === `${repository}/${source.workflow}@refs/heads/${branch}`,
     );
-    if (selection.kind !== 'bounded-agent-review')
+    if (!directProducer)
       requireEvidence(report.repository === repository && report.branch === branch);
     if (selection.kind === 'pr-observability')
       requireEvidence(
@@ -210,7 +224,24 @@ export async function collectReadinessArtifacts(options) {
       );
     if (selection.kind === 'continuous-improvement-review')
       requireEvidence(report.source === 'github-actions');
-    const status = selection.kind === 'pr-observability' ? report.publication : report.status;
+    let status = selection.kind === 'pr-observability' ? report.publication : report.status;
+    if (selection.kind === 'maintenance-validation') {
+      requireEvidence(
+        typeof report.passed === 'boolean' &&
+          Array.isArray(report.errors) &&
+          report.errors.every((error) => typeof error === 'string') &&
+          report.passed === (report.errors.length === 0),
+      );
+      if (report.passed) {
+        requireEvidence(
+          ['no-op', 'proposed'].includes(report.documentation?.outcome) &&
+            ['context', 'install', 'build', 'tests', 'audit', 'docs', 'proof'].every(
+              (name) => report.steps?.[name] === 'success',
+            ),
+        );
+      }
+      status = report.passed ? report.documentation.outcome : 'failed';
+    }
     requireEvidence(typeof status === 'string' && /^[a-z][a-z-]{0,79}$/.test(status));
     const currentRun = await client.json(runPath);
     validateRun(currentRun, selection, source, { ...identity, now: currentTime() });
@@ -367,7 +398,7 @@ async function main() {
       'node scripts/check-readiness-reports.mjs --prepare --repository OWNER/REPO --revision SHA --report KIND:RUN_ID:ATTEMPT --out test-results/NAME',
     );
     console.log(
-      'KIND: bounded-agent-review, pr-observability, continuous-improvement-review. Repeat --report for different kinds at the same revision. --branch defaults to main.',
+      'KIND: bounded-agent-review, pr-observability, continuous-improvement-review, maintenance-validation. Repeat --report for different kinds at the same revision. --branch defaults to main.',
     );
     return;
   }

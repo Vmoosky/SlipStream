@@ -6,6 +6,7 @@ import { execFile } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 import { DOC_CONTRACTS, validateProofReport } from './check-ci.mjs';
+import { writeReadinessReport } from './check-readiness-reports.mjs';
 
 const executeFile = promisify(execFile);
 const ROOT = fileURLToPath(new URL('../', import.meta.url));
@@ -792,9 +793,11 @@ async function main() {
       reportPath: process.env.MAINTENANCE_REPORT,
     });
     const output = outputDirectory(ROOT);
-    fs.writeFileSync(path.join(output, 'summary.json'), `${JSON.stringify(report, null, 2)}\n`, {
+    const bytes = Buffer.from(`${JSON.stringify(report, null, 2)}\n`);
+    fs.writeFileSync(path.join(output, 'summary.json'), bytes, {
       flag: 'wx',
     });
+    workflowOutput('readiness_report_path', writeReadinessReport(ROOT, bytes));
     workflowOutput('proposal_path', report.proposalPath);
     if (process.env.GITHUB_STEP_SUMMARY) {
       fs.appendFileSync(

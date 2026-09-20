@@ -137,3 +137,21 @@ jobs:
           path: reports/agent-review.json
           if-no-files-found: error
           retention-days: 90
+      - name: Retain original audit and offline proof evidence
+        if: ${{ always() && steps.context.outcome == 'success' && hashFiles('test-results/maintenance-audit.json', 'test-results/maintenance-proof.json') != '' }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: maintenance-inputs-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            test-results/maintenance-audit.json
+            test-results/maintenance-proof.json
+          if-no-files-found: error
+          retention-days: 90
+      - name: Retain the discovery-ready maintenance report
+        if: ${{ always() && steps.context.outcome == 'success' && steps.verify.outputs.readiness_report_path != '' }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: readiness-maintenance-${{ github.run_id }}-${{ github.run_attempt }}
+          path: reports/maintenance.json
+          if-no-files-found: error
+          retention-days: 90
