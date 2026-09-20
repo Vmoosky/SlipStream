@@ -116,12 +116,18 @@ function clamp(text, limitBytes) {
   return value + suffix;
 }
 
-/** Job names are repository-authored, not log output; still bound and sanitize them. */
+/**
+ * Job names are repository-authored, not log output, but they still land in a
+ * public issue. Strip control characters and backticks so a name cannot break out
+ * of its inline code span; markdown inside a code span is not rendered, so
+ * removing the delimiter is enough to stop content injection.
+ */
 function safeJobName(name) {
   return [...String(name ?? '')]
     .map((character) => {
       const code = character.codePointAt(0);
-      return code < 0x20 || code === 0x7f ? ' ' : character;
+      if (code < 0x20 || code === 0x7f) return ' ';
+      return character === '`' ? '' : character;
     })
     .join('')
     .trim()

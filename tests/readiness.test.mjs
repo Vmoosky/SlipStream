@@ -9461,3 +9461,30 @@ test('failure escalation ignores a forged marker in an issue it did not author',
     ['/issues'],
   );
 });
+
+test('failure escalation job names cannot inject markdown into a public issue', () => {
+  const { repository, revision } = escalationContext();
+  const now = Date.parse('2026-09-20T12:00:00Z');
+  const hostile = [
+    { name: '`](https://evil.example/pwn) [click me](https://evil.example', conclusion: 'failure' },
+    { name: 'plain`code`span', conclusion: 'failure' },
+    { name: '`\u001b[31mred', conclusion: 'failure' },
+  ];
+  const issue = buildEscalationIssue({
+    repository,
+    branch: 'main',
+    revision,
+    runId: '501',
+    jobs: hostile,
+    now,
+  });
+
+  // No job name may contain a backtick, so none can escape its code span.
+  for (const name of issue.failedJobs) assert.ok(!name.includes('`'), name);
+  // Every rendered job line keeps exactly the two delimiters the template adds.
+  for (const line of issue.body.split('\n').filter((l) => l.startsWith('- `'))) {
+    assert.equal((line.match(/`/g) ?? []).length, 2, line);
+  }
+  assert.ok(!issue.body.includes('\u001b'));
+  assert.ok(issue.body.includes('evil.example'), 'text is preserved, only delimiters are removed');
+});
