@@ -923,9 +923,16 @@ escalations. It turns a failed default-branch CI run into one human-owned issue
 so a red build becomes tracked work instead of an unread notification.
 
 It responds only to a completed, first-attempt CI run for a `push` on the default
-branch, in this repository, whose revision is also the trusted workflow checkout.
-[The escalation script](scripts/check-escalation.mjs) re-reads the triggering run
-through the API and refuses to act when it no longer matches the event payload.
+branch of this repository. [The escalation script](scripts/check-escalation.mjs)
+re-reads the triggering run through the API and refuses to act when it no longer
+matches the event payload.
+
+The code it runs is always the default-branch checkout, which is what makes it
+trusted. That **collector revision is tracked separately from the failed commit**
+and they are deliberately not required to match: for a `workflow_run` event
+`GITHUB_SHA` is the default-branch tip, so requiring equality would silently drop
+a failure whenever another commit landed before the failing run finished. Records
+and reports carry both.
 
 Its API surface is an explicit allowlist: it may read the run, read that run's
 jobs, and list open issues; it may write only a new issue or an issue comment.

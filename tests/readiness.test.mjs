@@ -5744,7 +5744,6 @@ test('scheduled maintenance identity cannot weaken existing CI provenance', () =
     { SLIPSTREAM_MAINTENANCE_ENABLED: '' },
     { GITHUB_EVENT_NAME: 'pull_request' },
     { GITHUB_REF: 'refs/heads/untrusted' },
-    { GITHUB_SHA: 'b'.repeat(40) },
     { GITHUB_REPOSITORY: 'other/repository' },
     { GITHUB_WORKFLOW_REF: 'other' },
     { GITHUB_RUN_ID: '' },
@@ -8955,7 +8954,6 @@ test('failure escalation identity binds one first-attempt default-branch CI comp
     { GITHUB_WORKFLOW_REF: 'Vmoosky/SlipStream/.github/workflows/ci.yml@refs/heads/main' },
     { GITHUB_SERVER_URL: 'https://example.invalid' },
     { GITHUB_API_URL: 'https://example.invalid' },
-    { GITHUB_SHA: 'b'.repeat(40) },
     { GITHUB_RUN_ID: '501' },
   ]) {
     assert.throws(
@@ -8969,7 +8967,6 @@ test('failure escalation identity binds one first-attempt default-branch CI comp
     { conclusion: 'cancelled' },
     { run_attempt: 2 },
     { head_branch: 'feature' },
-    { head_sha: 'c'.repeat(40) },
     { status: 'in_progress' },
     { path: '.github/workflows/maintenance.yml' },
     { name: 'Maintenance' },
@@ -8978,7 +8975,7 @@ test('failure escalation identity binds one first-attempt default-branch CI comp
     const tampered = { ...event, workflow_run: { ...event.workflow_run, ...patch } };
     assert.throws(() => escalationIdentity(revision, env, tampered), /Failure escalation requires/);
   }
-  assert.throws(() => escalationIdentity('short', env, event), /exact source revision/);
+  assert.throws(() => escalationIdentity('short', env, event), /exact collector revision/);
   assert.throws(
     () => escalationIdentity(revision, env, { ...event, action: 'requested' }),
     /Failure escalation requires/,
@@ -9082,7 +9079,13 @@ test('failure escalation opens, appends and records recovery without closing or 
   const marker = escalationMarker('.github/workflows/ci.yml');
 
   const opened = escalationClient({ run: base.event.workflow_run, jobs: base.jobs, issues: [] });
-  const first = await runEscalation({ ...base, client: opened.client, now });
+  const first = await runEscalation({
+    collectorRevision: base.revision,
+    env: base.env,
+    event: base.event,
+    client: opened.client,
+    now,
+  });
   assert.equal(first.action, 'issue-opened');
   assert.equal(first.issueNumber, 4242);
   assert.equal(first.automaticResolution, false);
@@ -9100,7 +9103,13 @@ test('failure escalation opens, appends and records recovery without closing or 
     jobs: base.jobs,
     issues: existing,
   });
-  const second = await runEscalation({ ...base, client: again.client, now });
+  const second = await runEscalation({
+    collectorRevision: base.revision,
+    env: base.env,
+    event: base.event,
+    client: again.client,
+    now,
+  });
   assert.equal(second.action, 'recurrence-recorded');
   assert.equal(second.issueNumber, 77);
   assert.deepEqual(
@@ -9110,7 +9119,13 @@ test('failure escalation opens, appends and records recovery without closing or 
 
   const green = escalationContext('success');
   const recovered = escalationClient({ run: green.event.workflow_run, jobs: [], issues: existing });
-  const third = await runEscalation({ ...green, client: recovered.client, now });
+  const third = await runEscalation({
+    collectorRevision: green.revision,
+    env: green.env,
+    event: green.event,
+    client: recovered.client,
+    now,
+  });
   assert.equal(third.action, 'recovery-recorded');
   assert.equal(third.automaticResolution, false);
   assert.deepEqual(
@@ -9120,7 +9135,18 @@ test('failure escalation opens, appends and records recovery without closing or 
   assert.ok(recovered.writes[0].body.body.includes('not proof'));
 
   const quiet = escalationClient({ run: green.event.workflow_run, jobs: [], issues: [] });
-  assert.equal((await runEscalation({ ...green, client: quiet.client, now })).action, 'none');
+  assert.equal(
+    (
+      await runEscalation({
+        collectorRevision: green.revision,
+        env: green.env,
+        event: green.event,
+        client: quiet.client,
+        now,
+      })
+    ).action,
+    'none',
+  );
   assert.deepEqual(quiet.writes, []);
 
   const drifted = escalationClient({
@@ -9129,7 +9155,13 @@ test('failure escalation opens, appends and records recovery without closing or 
     issues: [],
   });
   await assert.rejects(
-    runEscalation({ ...base, client: drifted.client, now }),
+    runEscalation({
+      collectorRevision: base.revision,
+      env: base.env,
+      event: base.event,
+      client: drifted.client,
+      now,
+    }),
     /no longer matches its event payload/,
   );
   assert.deepEqual(drifted.writes, []);
@@ -9197,12 +9229,14 @@ test('failure escalation workflow stays opt-in, bounded, default-branch-only and
     "vars.SLIPSTREAM_FAILURE_ESCALATION_ENABLED == 'true'",
     "github.event.workflow_run.event == 'push'",
     'github.event.workflow_run.run_attempt == 1',
-    'github.event.workflow_run.head_sha == github.sha',
     'github.event.workflow_run.repository.full_name == github.repository',
     'github.event.workflow_run.head_branch == github.event.repository.default_branch',
   ]) {
     assert.ok(job.if.includes(guard), guard);
   }
+  // For workflow_run, github.sha is the default-branch tip. Requiring the failed
+  // run to equal it would drop escalations whenever a later commit landed first.
+  assert.ok(!job.if.includes('github.event.workflow_run.head_sha == github.sha'));
   for (const step of job.steps) {
     assert.equal(step['continue-on-error'], undefined);
     if (step.uses) assert.match(step.uses, /^[^@]+@[a-f0-9]{40}$/);
@@ -9230,7 +9264,13 @@ test('failure escalation paginates jobs and open issues and fails closed on an i
     { name: 'late-failure', conclusion: 'failure' },
   ];
   const paged = escalationClient({ run: base.event.workflow_run, jobs: manyJobs, issues: [] });
-  const report = await runEscalation({ ...base, client: paged.client, now });
+  const report = await runEscalation({
+    collectorRevision: base.revision,
+    env: base.env,
+    event: base.event,
+    client: paged.client,
+    now,
+  });
   assert.deepEqual(report.failedJobs, ['late-failure']);
   assert.equal(report.jobInventoryComplete, true);
   assert.ok(paged.writes[0].body.body.includes('late-failure'));
@@ -9245,7 +9285,13 @@ test('failure escalation paginates jobs and open issues and fails closed on an i
     jobs: base.jobs,
     issues: manyIssues,
   });
-  const found = await runEscalation({ ...base, client: deep.client, now });
+  const found = await runEscalation({
+    collectorRevision: base.revision,
+    env: base.env,
+    event: base.event,
+    client: deep.client,
+    now,
+  });
   assert.equal(found.action, 'recurrence-recorded');
   assert.equal(found.issueNumber, 900);
   assert.deepEqual(
@@ -9265,7 +9311,13 @@ test('failure escalation paginates jobs and open issues and fails closed on an i
     issues: flooded,
   });
   await assert.rejects(
-    runEscalation({ ...base, client: overflow.client, now }),
+    runEscalation({
+      collectorRevision: base.revision,
+      env: base.env,
+      event: base.event,
+      client: overflow.client,
+      now,
+    }),
     /refusing to risk a duplicate escalation issue/,
   );
   assert.deepEqual(overflow.writes, []);
@@ -9280,8 +9332,38 @@ test('failure escalation paginates jobs and open issues and fails closed on an i
     jobs: tooManyJobs,
     issues: [],
   });
-  const disclosed = await runEscalation({ ...base, client: truncated.client, now });
+  const disclosed = await runEscalation({
+    collectorRevision: base.revision,
+    env: base.env,
+    event: base.event,
+    client: truncated.client,
+    now,
+  });
   assert.equal(disclosed.jobInventoryComplete, false);
   assert.ok(disclosed.residual.some((line) => line.includes('truncated')));
   assert.ok(truncated.writes[0].body.body.includes('This list is incomplete'));
+});
+
+test('failure escalation still records a failure after the default branch moves on', async () => {
+  const base = escalationContext();
+  const movedOn = 'e'.repeat(40);
+  // The failing commit is no longer the branch tip; the collector runs from the tip.
+  const env = { ...base.env, GITHUB_SHA: movedOn };
+  const { client, writes } = escalationClient({
+    run: base.event.workflow_run,
+    jobs: base.jobs,
+    issues: [],
+  });
+  const report = await runEscalation({
+    collectorRevision: movedOn,
+    env,
+    event: base.event,
+    client,
+    now: Date.parse('2026-09-20T12:00:00Z'),
+  });
+  assert.equal(report.action, 'issue-opened');
+  assert.equal(report.revision, base.revision);
+  assert.equal(report.collectorRevision, movedOn);
+  assert.ok(writes[0].body.body.includes(base.revision));
+  assert.ok(!writes[0].body.body.includes(movedOn));
 });

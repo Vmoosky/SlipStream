@@ -38,10 +38,17 @@ export function escalationMarker(workflowPath) {
 
 /**
  * Binds this run to an enabled, first-attempt, same-repository default-branch CI
- * completion whose revision is also the trusted checkout of this workflow.
+ * completion. The collector revision is the trusted default-branch checkout this
+ * workflow runs from; the source revision is the commit whose CI completed. They
+ * are deliberately independent: for `workflow_run`, `GITHUB_SHA` is the default
+ * branch tip, so requiring equality would silently drop a failure whenever
+ * another commit lands before the failing run finishes.
  */
-export function escalationIdentity(revision, env = process.env, event = {}) {
-  requireContext(/^[a-f0-9]{40}$/.test(revision ?? ''), 'An exact source revision is required');
+export function escalationIdentity(collectorRevision, env = process.env, event = {}) {
+  requireContext(
+    /^[a-f0-9]{40}$/.test(collectorRevision ?? ''),
+    'An exact collector revision is required',
+  );
   const repository = event.repository?.full_name;
   const branch = event.repository?.default_branch;
   const run = event.workflow_run;
@@ -53,7 +60,7 @@ export function escalationIdentity(revision, env = process.env, event = {}) {
       env.SLIPSTREAM_FAILURE_ESCALATION_ENABLED === 'true' &&
       env.GITHUB_EVENT_NAME === 'workflow_run' &&
       env.GITHUB_REPOSITORY === repository &&
-      env.GITHUB_SHA === revision &&
+      env.GITHUB_SHA === collectorRevision &&
       env.GITHUB_REF === `refs/heads/${branch}` &&
       env.GITHUB_WORKFLOW_REF ===
         `${repository}/.github/workflows/failure-escalation.yml@refs/heads/${branch}` &&
@@ -74,17 +81,18 @@ export function escalationIdentity(revision, env = process.env, event = {}) {
       ['failure', 'success'].includes(run.conclusion) &&
       run.run_attempt === 1 &&
       run.head_branch === branch &&
-      run.head_sha === revision &&
+      /^[a-f0-9]{40}$/.test(run.head_sha ?? '') &&
       run.repository?.id === event.repository.id &&
       run.repository?.full_name === repository &&
       run.head_repository?.id === event.repository.id &&
       run.head_repository?.full_name === repository,
-    'Failure escalation requires an enabled, first-attempt default-branch CI completion at trusted current source',
+    'Failure escalation requires an enabled, first-attempt default-branch CI completion from trusted source',
   );
   return {
     repository,
     branch,
-    revision,
+    collectorRevision,
+    revision: run.head_sha,
     runId: String(run.id),
     workflowId: run.workflow_id,
     conclusion: run.conclusion,
@@ -283,13 +291,13 @@ export async function readAllPages(client, resource, key) {
 }
 
 export async function runEscalation({
-  revision,
+  collectorRevision,
   env = process.env,
   event = {},
   client,
   now = Date.now(),
 }) {
-  const identity = escalationIdentity(revision, env, event);
+  const identity = escalationIdentity(collectorRevision, env, event);
   const runPath = `/actions/runs/${identity.runId}`;
   const run = await client.json(runPath);
   requireContext(
@@ -350,6 +358,7 @@ export async function runEscalation({
     repository: identity.repository,
     branch: identity.branch,
     revision: identity.revision,
+    collectorRevision: identity.collectorRevision,
     sourceRunId: identity.runId,
     sourceConclusion: identity.conclusion,
     action,
@@ -372,7 +381,7 @@ export async function runEscalation({
 }
 
 async function main() {
-  const revision = process.env.GITHUB_SHA;
+  const collectorRevision = process.env.GITHUB_SHA;
   const event = JSON.parse(
     await (await import('node:fs/promises')).readFile(process.env.GITHUB_EVENT_PATH, 'utf8'),
   );
@@ -380,7 +389,7 @@ async function main() {
     process.env.GITHUB_REPOSITORY,
     process.env.SLIPSTREAM_ESCALATION_TOKEN,
   );
-  const report = await runEscalation({ revision, env: process.env, event, client });
+  const report = await runEscalation({ collectorRevision, env: process.env, event, client });
   const fs = await import('node:fs');
   fs.mkdirSync('test-results', { recursive: true });
   fs.writeFileSync('test-results/failure-escalation.json', `${JSON.stringify(report, null, 2)}\n`, {
@@ -393,7 +402,8 @@ async function main() {
         `## Failure Escalation — ${report.action}`,
         '',
         `Source run: ${report.sourceRunId} (${report.sourceConclusion})`,
-        `Revision: ${report.revision}`,
+        `Failed revision: ${report.revision}`,
+        `Collector revision: ${report.collectorRevision}`,
         report.issueNumber ? `Issue: #${report.issueNumber}` : 'No escalation issue was required.',
         '',
         ...report.residual.map((line) => `- ${line}`),
