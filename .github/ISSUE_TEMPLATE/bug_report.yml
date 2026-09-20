@@ -1,0 +1,52 @@
+name: Bug report
+description: Report incorrect behavior in the extension, hook runtime, MCP server, or dashboard.
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Please do not paste credentials, tokens, or raw ledger contents. Slipstream
+        processes untrusted tool output, so redact anything sensitive before sharing.
+  - type: input
+    id: version
+    attributes:
+      label: Version or commit
+      description: The released version, or the full commit SHA you are running.
+      placeholder: 0.1.0 or 72ab8de47dc1d0fa531e3f2bc6282c8402ad218c
+    validations:
+      required: true
+  - type: dropdown
+    id: surface
+    attributes:
+      label: Affected surface
+      options:
+        - VS Code extension
+        - Copilot CLI hook runtime
+        - MCP server
+        - Dashboard
+        - Repository tooling or CI
+        - Not sure
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: What you expected, and what happened instead
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Steps to reproduce
+      description: Include the exact commands you ran.
+      render: shell
+    validations:
+      required: true
+  - type: textarea
+    id: validation
+    attributes:
+      label: Local validation output
+      description: Output of `npm run validate`, or the focused command that fails. Redact as needed.
+      render: shell
+    validations:
+      required: false
