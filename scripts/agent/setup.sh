@@ -1,6 +1,9 @@
 #!/usr/bin/env sh
 set -eu
 
+ROOT="$(CDPATH= cd -- "$(dirname "$0")/../.." && pwd)"
+cd "$ROOT"
+
 output="$(mktemp)"
 cleanup() { rm -f "$output"; }
 trap cleanup EXIT HUP INT TERM

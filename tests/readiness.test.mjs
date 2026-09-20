@@ -161,7 +161,7 @@ test('agent command wrappers delegate to existing npm commands', () => {
   };
   for (const [file, command] of Object.entries(expected)) {
     const source = fs.readFileSync(path.join(root, file), 'utf8');
-    assert.match(source, new RegExp(`runNpmQuiet\\(${command.replace(/[\\[\\]]/g, '\\$&')}`));
+    assert.ok(source.includes(`runNpmQuiet(${command}`));
     assert.match(source, /console\.error\(error\.message\)/);
   }
 });
@@ -175,6 +175,7 @@ test('agent shell wrappers are silent on success and report captured failures', 
   };
   for (const [file, command] of Object.entries(expected)) {
     const source = fs.readFileSync(path.join(root, file), 'utf8');
+    assert.match(source, /cd "\$ROOT"/);
     assert.match(source, new RegExp(`if ${command} >\\"\\$output\\" 2>&1; then`));
     assert.match(source, /cat "\$output" >&2/);
   }
