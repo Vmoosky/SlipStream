@@ -677,7 +677,9 @@ export async function collectPrObservability({
     report.agentReview = { status: 'unverified', source: agentReviewSource };
     if (
       pull.base.ref !== branch ||
+      pull.base.sha !== agentReviewSource.base ||
       pull.base.repo.id !== agentReviewSource.repositoryId ||
+      pull.head.sha !== agentReviewSource.head ||
       pull.head.repo?.id !== agentReviewSource.headRepositoryId ||
       pull.head.repo?.full_name !== agentReviewSource.headRepository ||
       !(await agentReviewSourceCurrent(report, client))

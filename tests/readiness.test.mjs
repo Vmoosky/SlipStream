@@ -1717,6 +1717,24 @@ test('PR observability correlates a trusted bounded agent review to its exact PR
   );
   assert.match(renderPrObservability(report), /Trusted bounded agent review/);
 
+  for (const mutate of [
+    (pull) => (pull.head.sha = META.revision),
+    (pull) => (pull.base.sha = META.revision),
+  ]) {
+    const outdated = prCompletionHistory({ workflow: 'PR Agent Review', conclusion: 'success' });
+    mutate(outdated.pull);
+    const outdatedReport = await collectPrObservability({
+      ...outdated.identity,
+      client: outdated.client,
+    });
+    assert.equal(outdatedReport.agentReview.status, 'unverified');
+    assert.deepEqual(outdatedReport.labels, []);
+    assert.equal(
+      outdated.reads.some((resource) => resource.endsWith('/files?per_page=100')),
+      false,
+    );
+  }
+
   const stale = prCompletionHistory({ workflow: 'PR Agent Review', conclusion: 'success' });
   const staleReport = await collectPrObservability({ ...stale.identity, client: stale.client });
   stale.run.run_attempt++;
