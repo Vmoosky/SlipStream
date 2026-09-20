@@ -2349,6 +2349,8 @@ test('development runner and hook configuration retain LF in Windows-style Git c
   const { root } = fixture(context);
   const files = [
     'scripts/develop.mjs',
+    'scripts/setup.ps1',
+    'scripts/setup.sh',
     'scripts/install-hooks.mjs',
     'lint-staged.config.mjs',
     '.husky/pre-commit',
@@ -2422,6 +2424,14 @@ test('development setup uses the root and npm entry point in fixed dependency or
   );
   assert.ok(calls.slice(1).every((call) => call.command === process.execPath));
   assert.ok(calls.every((call) => call.settings.cwd === options.root));
+});
+
+test('development setup launchers delegate to the Node runner', () => {
+  const shellLauncher = fs.readFileSync(path.join(REPO, 'scripts/setup.sh'), 'utf8');
+  const powerShellLauncher = fs.readFileSync(path.join(REPO, 'scripts/setup.ps1'), 'utf8');
+
+  assert.match(shellLauncher, /node "\$\(dirname "\$0"\)\/develop\.mjs" setup/);
+  assert.match(powerShellLauncher, /node \(Join-Path \$PSScriptRoot 'develop\.mjs'\) setup/);
 });
 
 test('development validation retains all existing gates and CI evidence outputs', (context) => {
