@@ -596,6 +596,9 @@ Supported Node.js: >=20. The pinned development runtime is in [.node-version](..
 | improvement:rollback | node scripts/retire-improvement-rule.mjs |
 | improvement:rollback-repair | node scripts/check-remediation-rollback.mjs |
 | agent:keep-rate | node scripts/agent/eval/keep-rate.mjs |
+| agent:setup | node scripts/agent/setup.mjs |
+| agent:validate | node scripts/agent/validate.mjs |
+| agent:test | node scripts/agent/test.mjs |
 | benchmark:snapshot | node scripts/benchmark.mjs --markdown |
 | benchmark:recommendations | node scripts/benchmark.mjs --model-recommendations |
 | proof-table | node scripts/proof-table.mjs |
@@ -617,5 +620,5 @@ Supported Node.js: >=20. The pinned development runtime is in [.node-version](..
 | precommit | node scripts/develop.mjs precommit |
 | test:coverage | npm run build && npm run test:coverage --workspaces --if-present |
 
-<!-- source-sha256: 9fa633412204f1a6115e719405381eff8e230a8376983786412664de754a89a0 -->
+<!-- source-sha256: c0389672d8f46b0fdf96ae46e7d9881bb7cdf3f5a4cf328fb4b31218cbf7f246 -->
 <!-- slipstream-reference:build:end -->
