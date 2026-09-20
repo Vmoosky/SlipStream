@@ -102,6 +102,18 @@ import {
   verifyDocumentationRemediation,
   collectMaintenanceEvidence,
 } from '../scripts/maintenance.mjs';
+import {
+  ESCALATION_LIMITS,
+  buildEscalationIssue,
+  buildRecoveryComment,
+  buildRecurrenceComment,
+  createEscalationClient,
+  escalationIdentity,
+  escalationMarker,
+  failedJobNames,
+  findEscalationIssue,
+  runEscalation,
+} from '../scripts/check-escalation.mjs';
 
 import {
   PR_OBSERVABILITY_LIMITS,
@@ -8810,4 +8822,344 @@ test('pre-commit commits valid staged content without including unstaged edits',
   assert.equal(fs.readFileSync(other, 'utf8'), otherContent);
   assert.equal(fs.readFileSync(untracked, 'utf8'), 'untracked notes\n');
   assert.equal(git(['stash', 'list']), '');
+});
+
+function escalationContext(conclusion = 'failure') {
+  const revision = 'a'.repeat(40);
+  const repository = 'Vmoosky/SlipStream';
+  const event = {
+    action: 'completed',
+    repository: { id: 10, full_name: repository, default_branch: 'main' },
+    workflow_run: {
+      id: 501,
+      workflow_id: 7,
+      name: 'CI',
+      path: '.github/workflows/ci.yml',
+      event: 'push',
+      status: 'completed',
+      conclusion,
+      run_attempt: 1,
+      head_branch: 'main',
+      head_sha: revision,
+      repository: { id: 10, full_name: repository },
+      head_repository: { id: 10, full_name: repository },
+    },
+  };
+  const env = {
+    SLIPSTREAM_FAILURE_ESCALATION_ENABLED: 'true',
+    GITHUB_EVENT_NAME: 'workflow_run',
+    GITHUB_REPOSITORY: repository,
+    GITHUB_SHA: revision,
+    GITHUB_REF: 'refs/heads/main',
+    GITHUB_WORKFLOW_REF: `${repository}/.github/workflows/failure-escalation.yml@refs/heads/main`,
+    GITHUB_SERVER_URL: 'https://github.com',
+    GITHUB_API_URL: 'https://api.github.com',
+    GITHUB_RUN_ID: '999',
+    GITHUB_RUN_ATTEMPT: '1',
+  };
+  const jobs = [
+    { name: 'unit-linux-node24', conclusion: 'failure' },
+    { name: 'unit-linux-node24', conclusion: 'failure' },
+    { name: 'secrets', conclusion: 'success' },
+    { name: 'browser-proof-linux-node24', conclusion: 'timed_out' },
+    { name: 'ci-required', conclusion: 'failure' },
+  ];
+  return { revision, repository, env, event, jobs };
+}
+
+function escalationClient(state) {
+  const writes = [];
+  const client = {
+    async json(resource) {
+      if (resource === '/actions/runs/501') return state.run;
+      if (resource === '/actions/runs/501/jobs?per_page=100') return { jobs: state.jobs };
+      if (resource === '/issues?state=open&per_page=100') return state.issues;
+      throw new Error(`Unexpected escalation read: ${resource}`);
+    },
+    async post(resource, body) {
+      writes.push({ resource, body });
+      return { number: 4242 };
+    },
+  };
+  return { client, writes };
+}
+
+test('failure escalation identity binds one first-attempt default-branch CI completion to trusted source', () => {
+  const { revision, env, event } = escalationContext();
+  const identity = escalationIdentity(revision, env, event);
+  assert.equal(identity.runId, '501');
+  assert.equal(identity.conclusion, 'failure');
+  assert.equal(identity.marker, escalationMarker('.github/workflows/ci.yml'));
+  assert.equal(escalationIdentity(revision, env, event).branch, 'main');
+
+  for (const patch of [
+    { SLIPSTREAM_FAILURE_ESCALATION_ENABLED: 'false' },
+    { GITHUB_EVENT_NAME: 'push' },
+    { GITHUB_RUN_ATTEMPT: '2' },
+    { GITHUB_REF: 'refs/heads/feature' },
+    { GITHUB_WORKFLOW_REF: 'Vmoosky/SlipStream/.github/workflows/ci.yml@refs/heads/main' },
+    { GITHUB_SERVER_URL: 'https://example.invalid' },
+    { GITHUB_API_URL: 'https://example.invalid' },
+    { GITHUB_SHA: 'b'.repeat(40) },
+    { GITHUB_RUN_ID: '501' },
+  ]) {
+    assert.throws(
+      () => escalationIdentity(revision, { ...env, ...patch }, event),
+      /Failure escalation requires/,
+    );
+  }
+
+  for (const patch of [
+    { event: 'pull_request' },
+    { conclusion: 'cancelled' },
+    { run_attempt: 2 },
+    { head_branch: 'feature' },
+    { head_sha: 'c'.repeat(40) },
+    { status: 'in_progress' },
+    { path: '.github/workflows/maintenance.yml' },
+    { name: 'Maintenance' },
+    { head_repository: { id: 11, full_name: 'fork/SlipStream' } },
+  ]) {
+    const tampered = { ...event, workflow_run: { ...event.workflow_run, ...patch } };
+    assert.throws(() => escalationIdentity(revision, env, tampered), /Failure escalation requires/);
+  }
+  assert.throws(() => escalationIdentity('short', env, event), /exact source revision/);
+  assert.throws(
+    () => escalationIdentity(revision, env, { ...event, action: 'requested' }),
+    /Failure escalation requires/,
+  );
+});
+
+test('failure escalation records are deduplicated, bounded and never claim resolution', () => {
+  const { revision, repository, jobs } = escalationContext();
+  const now = Date.parse('2026-09-20T12:00:00Z');
+  const issue = buildEscalationIssue({
+    repository,
+    branch: 'main',
+    revision,
+    runId: '501',
+    jobs,
+    now,
+  });
+
+  assert.deepEqual(issue.failedJobs, [
+    'browser-proof-linux-node24',
+    'ci-required',
+    'unit-linux-node24',
+  ]);
+  assert.ok(issue.body.includes(escalationMarker('.github/workflows/ci.yml')));
+  assert.ok(issue.body.includes('https://github.com/Vmoosky/SlipStream/actions/runs/501'));
+  assert.ok(issue.body.includes('No logs are included'));
+  assert.doesNotMatch(issue.body, /secret|token|password/i);
+  assert.ok(Buffer.byteLength(issue.title, 'utf8') <= ESCALATION_LIMITS.titleBytes);
+  assert.ok(Buffer.byteLength(issue.body, 'utf8') <= ESCALATION_LIMITS.bodyBytes);
+
+  const noisy = Array.from({ length: 500 }, (_, i) => ({
+    name: `job-${i}\u001b[31m`,
+    conclusion: 'failure',
+  }));
+  const bounded = buildEscalationIssue({
+    repository,
+    branch: 'main',
+    revision,
+    runId: '501',
+    jobs: noisy,
+    now,
+  });
+  assert.equal(bounded.failedJobs.length, ESCALATION_LIMITS.jobs);
+  assert.ok(Buffer.byteLength(bounded.body, 'utf8') <= ESCALATION_LIMITS.bodyBytes);
+  assert.ok(!bounded.body.includes('\u001b'));
+
+  const recovery = buildRecoveryComment({ repository, revision, runId: '502', now });
+  assert.ok(recovery.includes('succeeded'));
+  assert.ok(recovery.includes('Close this issue only after a human confirms'));
+  assert.ok(Buffer.byteLength(recovery, 'utf8') <= ESCALATION_LIMITS.commentBytes);
+  assert.ok(
+    Buffer.byteLength(
+      buildRecurrenceComment({ repository, revision, runId: '503', jobs, now }),
+      'utf8',
+    ) <= ESCALATION_LIMITS.commentBytes,
+  );
+
+  assert.deepEqual(failedJobNames([{ name: 'ok', conclusion: 'success' }]), []);
+  assert.throws(() => failedJobNames('nope'), /Job inventory/);
+  assert.throws(() => escalationMarker('../etc/passwd'), /exact workflow path/);
+});
+
+test('failure escalation selects only open marked issues and never a pull request', () => {
+  const marker = escalationMarker('.github/workflows/ci.yml');
+  assert.equal(findEscalationIssue([], marker), undefined);
+  assert.equal(
+    findEscalationIssue([{ number: 1, state: 'open', body: 'unrelated' }], marker),
+    undefined,
+  );
+  assert.equal(
+    findEscalationIssue([{ number: 2, state: 'closed', body: marker }], marker),
+    undefined,
+  );
+  assert.equal(
+    findEscalationIssue(
+      [{ number: 3, state: 'open', body: marker, pull_request: { url: 'x' } }],
+      marker,
+    ),
+    undefined,
+  );
+  assert.equal(
+    findEscalationIssue([{ number: 5, state: 'open', body: `x${marker}y` }], marker).number,
+    5,
+  );
+  assert.throws(
+    () =>
+      findEscalationIssue(
+        [
+          { number: 5, state: 'open', body: marker },
+          { number: 6, state: 'open', body: marker },
+        ],
+        marker,
+      ),
+    /Multiple open escalation issues/,
+  );
+});
+
+test('failure escalation opens, appends and records recovery without closing or rerunning', async () => {
+  const base = escalationContext();
+  const now = Date.parse('2026-09-20T12:00:00Z');
+  const marker = escalationMarker('.github/workflows/ci.yml');
+
+  const opened = escalationClient({ run: base.event.workflow_run, jobs: base.jobs, issues: [] });
+  const first = await runEscalation({ ...base, client: opened.client, now });
+  assert.equal(first.action, 'issue-opened');
+  assert.equal(first.issueNumber, 4242);
+  assert.equal(first.automaticResolution, false);
+  assert.equal(first.automaticClosure, false);
+  assert.equal(first.humanTriageRequired, true);
+  assert.match(first.digest, /^[a-f0-9]{64}$/);
+  assert.deepEqual(
+    opened.writes.map((w) => w.resource),
+    ['/issues'],
+  );
+
+  const existing = [{ number: 77, state: 'open', body: marker }];
+  const again = escalationClient({
+    run: base.event.workflow_run,
+    jobs: base.jobs,
+    issues: existing,
+  });
+  const second = await runEscalation({ ...base, client: again.client, now });
+  assert.equal(second.action, 'recurrence-recorded');
+  assert.equal(second.issueNumber, 77);
+  assert.deepEqual(
+    again.writes.map((w) => w.resource),
+    ['/issues/77/comments'],
+  );
+
+  const green = escalationContext('success');
+  const recovered = escalationClient({ run: green.event.workflow_run, jobs: [], issues: existing });
+  const third = await runEscalation({ ...green, client: recovered.client, now });
+  assert.equal(third.action, 'recovery-recorded');
+  assert.equal(third.automaticResolution, false);
+  assert.deepEqual(
+    recovered.writes.map((w) => w.resource),
+    ['/issues/77/comments'],
+  );
+  assert.ok(recovered.writes[0].body.body.includes('not proof'));
+
+  const quiet = escalationClient({ run: green.event.workflow_run, jobs: [], issues: [] });
+  assert.equal((await runEscalation({ ...green, client: quiet.client, now })).action, 'none');
+  assert.deepEqual(quiet.writes, []);
+
+  const drifted = escalationClient({
+    run: { ...base.event.workflow_run, head_sha: 'd'.repeat(40) },
+    jobs: base.jobs,
+    issues: [],
+  });
+  await assert.rejects(
+    runEscalation({ ...base, client: drifted.client, now }),
+    /no longer matches its event payload/,
+  );
+  assert.deepEqual(drifted.writes, []);
+});
+
+test('failure escalation client restricts requests to metadata reads and issue writes', async () => {
+  const attempted = [];
+  const fetchImpl = async (url, init) => {
+    attempted.push(`${init.method} ${url}`);
+    return { ok: true, status: 200, json: async () => ({ number: 1 }) };
+  };
+  const client = createEscalationClient('Vmoosky/SlipStream', 'token-value', fetchImpl);
+  await client.json('/actions/runs/501');
+  await client.json('/actions/runs/501/jobs?per_page=100');
+  await client.json('/issues?state=open&per_page=100');
+  await client.post('/issues', { title: 't', body: 'b' });
+  await client.post('/issues/7/comments', { body: 'b' });
+  assert.equal(attempted.length, 5);
+  assert.ok(
+    attempted.every(
+      (entry) =>
+        entry.startsWith('GET https://api.github.com/repos/Vmoosky/SlipStream/') ||
+        entry.startsWith('POST https://api.github.com/repos/Vmoosky/SlipStream/'),
+    ),
+  );
+
+  for (const resource of [
+    '/issues/7',
+    '/actions/runs/501/rerun',
+    '/pulls',
+    '/actions/runs/501/cancel',
+    '/issues?state=all&per_page=100',
+  ]) {
+    await assert.rejects(client.post(resource, {}), /unsupported API request/);
+  }
+  for (const resource of ['/issues/7/comments', '/issues', '/contents/README.md']) {
+    await assert.rejects(client.json(resource), /unsupported API request/);
+  }
+  assert.throws(() => createEscalationClient('bad repo', 'token'), /valid repository/);
+  assert.throws(() => createEscalationClient('Vmoosky/SlipStream', ''), /API token/);
+
+  const failing = createEscalationClient('Vmoosky/SlipStream', 'token', async () => ({
+    ok: false,
+    status: 403,
+    json: async () => ({}),
+  }));
+  await assert.rejects(failing.json('/actions/runs/501'), /status 403/);
+});
+
+test('failure escalation workflow stays opt-in, bounded, default-branch-only and issue-scoped', () => {
+  const source = fs.readFileSync(
+    path.join(REPO, '.github/workflows/failure-escalation.yml'),
+    'utf8',
+  );
+  const workflow = parse(source);
+  assert.deepEqual(workflow.on, { workflow_run: { workflows: ['CI'], types: ['completed'] } });
+  assert.deepEqual(workflow.permissions, { contents: 'read' });
+  assert.equal(workflow.concurrency['cancel-in-progress'], false);
+  assert.deepEqual(Object.keys(workflow.jobs), ['escalate']);
+
+  const job = workflow.jobs.escalate;
+  assert.deepEqual(job.permissions, { contents: 'read', actions: 'read', issues: 'write' });
+  assert.equal(job['timeout-minutes'], 5);
+  for (const guard of [
+    "vars.SLIPSTREAM_FAILURE_ESCALATION_ENABLED == 'true'",
+    "github.event.workflow_run.event == 'push'",
+    'github.event.workflow_run.run_attempt == 1',
+    'github.event.workflow_run.head_sha == github.sha',
+    'github.event.workflow_run.repository.full_name == github.repository',
+    'github.event.workflow_run.head_branch == github.event.repository.default_branch',
+  ]) {
+    assert.ok(job.if.includes(guard), guard);
+  }
+  for (const step of job.steps) {
+    assert.equal(step['continue-on-error'], undefined);
+    if (step.uses) assert.match(step.uses, /^[^@]+@[a-f0-9]{40}$/);
+    if (step.uses?.startsWith('actions/checkout@')) {
+      assert.equal(step.with.ref, '${{ github.sha }}');
+      assert.equal(step.with['persist-credentials'], false);
+    }
+  }
+  assert.match(source, /node scripts\/check-escalation\.mjs/);
+  assert.doesNotMatch(source, /gh pr merge|rerun|--force|contents: write/);
+
+  const script = fs.readFileSync(path.join(REPO, 'scripts/check-escalation.mjs'), 'utf8');
+  assert.doesNotMatch(script, /state:\s*'closed'|"closed"/);
+  assert.doesNotMatch(script, /PATCH|DELETE|\/rerun|\/cancel/);
 });

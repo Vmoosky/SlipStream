@@ -1,0 +1,8 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Security vulnerability
+    url: https://github.com/Vmoosky/SlipStream/security/policy
+    about: Report vulnerabilities privately through the security policy, not a public issue.
+  - name: Contributing and validation gates
+    url: https://github.com/Vmoosky/SlipStream/blob/main/CONTRIBUTING.md
+    about: Local setup, validation commands, publication boundaries and governed automation.

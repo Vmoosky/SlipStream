@@ -914,6 +914,47 @@ manual merge. Discard an unused patch to cancel it; if a merged proposal needs
 reversal, use the existing [reviewed rollback procedure](#repair-review-and-rollback).
 No real CI failure, reviewed merge, or rollback is claimed by local fixture tests.
 
+## Failure Escalation
+
+The [failure escalation workflow](.github/workflows/failure-escalation.yml) is
+disabled by default. After reviewing it, the owner may set
+`SLIPSTREAM_FAILURE_ESCALATION_ENABLED=true`; setting it to `false` pauses future
+escalations. It turns a failed default-branch CI run into one human-owned issue
+so a red build becomes tracked work instead of an unread notification.
+
+It responds only to a completed, first-attempt CI run for a `push` on the default
+branch, in this repository, whose revision is also the trusted workflow checkout.
+[The escalation script](scripts/check-escalation.mjs) re-reads the triggering run
+through the API and refuses to act when it no longer matches the event payload.
+
+Its API surface is an explicit allowlist: it may read the run, read that run's
+jobs, and list open issues; it may write only a new issue or an issue comment.
+Every other request fails closed. The job holds `issues: write` with `contents`
+and `actions` read-only, so it cannot push, merge, rerun, cancel, or change
+source.
+
+A failure opens one issue carrying a `slipstream-escalation` marker, or appends
+to the existing open one, so repeated failures do not create duplicates. Records
+contain run metadata only — run link, revision, and failed job names, bounded and
+stripped of control characters. **Logs are never read or copied**, which keeps
+untrusted output and secrets out of a public issue.
+
+A later successful run on the default branch adds a recovery comment and
+deliberately **does not close the issue**. A green build is not proof that the
+original cause was diagnosed, so closing stays a human decision. The report
+records `automaticResolution` and `automaticClosure` as false, and is retained
+for 90 days, subject to repository policy.
+
+Escalation is notification and bookkeeping. It does not diagnose, repair, or
+establish a verified closed loop, and an opened issue is not evidence that anyone
+has acted.
+
+Run the focused offline checks from the repository root:
+
+```sh
+node --test --test-name-pattern='^failure escalation' tests/readiness.test.mjs
+```
+
 ## Bounded Maintenance
 
 The [maintenance workflow](.github/workflows/maintenance.yml) is prepared but
